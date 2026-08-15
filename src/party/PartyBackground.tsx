@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react'
-import { Engine, Interaction, Spawner, type IParticle } from '@cazala/party'
+import { Engine, Interaction, type IParticle } from '@cazala/party'
 import { Effectors, type Effector } from './effectors'
 import { createPartyModules, applyPreset, DEMO_PRESETS } from './presets'
 import { getTargets, getHovered, onTargetsChanged } from './targets'
 
 const NAME_LINES = ['BENNETT', 'VERNON']
-const NAME_FONT = 'Georgia, "Times New Roman", serif'
+const NAME_FONT =
+  '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif'
+const GUTTER_PX = 22
 // Fixed drag interaction, same values as the caza.la/party homepage.
 const DRAG_STRENGTH = 100_000
 const isMobile = () =>
@@ -13,60 +15,74 @@ const isMobile = () =>
 const DESIRED_ZOOM = () => (isMobile() ? 0.2 : 0.3)
 const DRAG_RADIUS = () => (isMobile() ? 700 : 800)
 const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_000) : 2_500)
-const PINNED_RESERVE = 9_000
 const MAX_CANVAS_HEIGHT = 8_000
 
 /** Effector tuning (world units are CSS px / zoom). */
+const NAME_POINT_STRENGTH = 10_000
 const BLOCK_STRENGTH = 100_000
 const BLOCK_RANGE_PX = 120
+const BLOCK_FRAME_PAD_PX = 14
+const BLOCK_FRAME_RANGE_PX = 90
+const BLOCK_FRAME_STRENGTH = 14_000
 const DOT_STRENGTH = 100_000
-const DOT_RANGE_PX = 85
-const NAV_ATTRACT_STRENGTH = 12_000
-const NAV_ATTRACT_RANGE_PX = 70
-const NAV_UNDERLINE_OFFSET_PX = 16
-const NAV_UNDERLINE_HALF_H_PX = 2
-const NAV_BUBBLE_STRENGTH = 100_000
-const NAV_BUBBLE_PAD_PX = 30
+const DOT_RANGE_PX = 70
+const NAV_ATTRACT_STRENGTH = 28_000
+const NAV_ATTRACT_RANGE_PX = 110
+const NAV_UNDERLINE_OFFSET_PX = 10
+const NAV_UNDERLINE_HALF_H_PX = 3
+const NAV_PILL_STRENGTH = 100_000
+const NAV_PILL_PAD_PX = 12
 
-function measureNameWidth(pageW: number): number {
+function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
   // below the width where that would exceed 3/4 of the page, span the page.
   const desktop = Math.max(pageW / 3, 480)
-  return desktop >= pageW * 0.75 ? pageW * 0.96 : desktop
+  return desktop >= pageW * 0.75 ? pageW - GUTTER_PX * 2 : desktop
 }
 
-function spawnName(pageW: number, viewportH: number, zoom: number): IParticle[] {
-  const canvas = document.createElement('canvas')
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return []
-  ctx.font = `100px ${NAME_FONT}`
+interface NameLayout {
+  /** Page-space glyph sample points the particles are attracted to. */
+  points: { x: number; y: number }[]
+  bottom: number
+  width: number
+  /** Sampling step in page px; also drives attractor range and spawn jitter. */
+  step: number
+}
+
+/** Samples the bold name glyphs into page-space points, top-left justified. */
+function sampleName(pageW: number, viewportH: number): NameLayout {
+  const off = document.createElement('canvas')
+  const ctx = off.getContext('2d', { willReadFrequently: true })
+  const width = nameWidth(pageW)
+  if (!ctx) return { points: [], bottom: viewportH * 0.4, width, step: 10 }
+  ctx.font = `700 100px ${NAME_FONT}`
   const widest = Math.max(...NAME_LINES.map((l) => ctx.measureText(l).width))
-  const sizePx = (100 * measureNameWidth(pageW)) / widest
-  const sizeWorld = sizePx / zoom
-  const lineGap = sizeWorld * 1.12
-  const centerX = pageW / 2 / zoom
-  const centerY = (viewportH * 0.42) / zoom - lineGap / 2
-  const spawner = new Spawner()
-  const particles: IParticle[] = []
+  const size = (100 * width) / widest
+  const lineGap = size * 1.08
+  const topY = Math.max(48, viewportH * 0.08)
+  const step = Math.max(8, Math.round(size / 16))
+
+  const points: { x: number; y: number }[] = []
   NAME_LINES.forEach((text, i) => {
-    const line = spawner.initParticles({
-      count: 3_600,
-      shape: 'text',
-      text,
-      font: NAME_FONT,
-      textSize: sizeWorld,
-      center: { x: centerX, y: centerY + i * lineGap },
-      position: { x: centerX, y: centerY + i * lineGap },
-      align: { horizontal: 'center', vertical: 'center' },
-      size: 1.9 / zoom,
-      mass: 1,
-      velocity: { speed: 0, direction: 'out' },
-      colors: ['#ffffff'],
-    })
-    particles.push(...line)
+    off.width = Math.ceil(width) + step * 2
+    off.height = Math.ceil(size * 1.3)
+    const c = off.getContext('2d', { willReadFrequently: true })
+    if (!c) return
+    c.clearRect(0, 0, off.width, off.height)
+    c.font = `700 ${size}px ${NAME_FONT}`
+    c.textBaseline = 'top'
+    c.fillStyle = '#fff'
+    c.fillText(text, 0, 0)
+    const data = c.getImageData(0, 0, off.width, off.height).data
+    for (let y = 0; y < off.height; y += step) {
+      for (let x = 0; x < off.width; x += step) {
+        if (data[(y * off.width + x) * 4 + 3] > 64) {
+          points.push({ x: GUTTER_PX + x, y: topY + i * lineGap + y })
+        }
+      }
+    }
   })
-  for (const p of particles) p.mass = -1 // pinned
-  return particles.slice(0, PINNED_RESERVE)
+  return { points, bottom: topY + lineGap + size * 1.1, width, step }
 }
 
 export function PartyBackground() {
@@ -81,12 +97,12 @@ export function PartyBackground() {
     let disposed = false
     let engine: Engine | null = null
     let zoom = DESIRED_ZOOM()
-    let pinnedCount = 0
     let webgpu = false
     let demoIndex = 0
     let demoTimer = 0
     let maxParticlesRaf = 0
     let syncScheduled = false
+    let name: NameLayout = { points: [], bottom: 0, width: 0, step: 10 }
     const cleanups: (() => void)[] = []
 
     const mods = createPartyModules()
@@ -100,61 +116,85 @@ export function PartyBackground() {
 
     const pageToWorld = (px: number, py: number) => ({ x: px / zoom, y: py / zoom })
 
+    const nameEffectors = (): Effector[] => {
+      const range = Math.max(20, name.step * 2) / zoom
+      return name.points.map((p) => ({
+        shape: 'circle' as const,
+        mode: 'attract' as const,
+        x: p.x / zoom,
+        y: p.y / zoom,
+        range,
+        halfW: 0,
+        halfH: 0,
+        strength: NAME_POINT_STRENGTH,
+      }))
+    }
+
     const syncEffectors = () => {
       syncScheduled = false
       if (!engine) return
       const hovered = getHovered()
-      const list: Effector[] = []
+      const list: Effector[] = nameEffectors()
       for (const t of getTargets()) {
         const r = t.el.getBoundingClientRect()
         if (r.width === 0 && r.height === 0) continue
-        const pageX = r.left + window.scrollX + r.width / 2
-        const pageY = r.top + window.scrollY + r.height / 2
-        const { x, y } = pageToWorld(pageX, pageY)
+        const cx = (r.left + window.scrollX + r.width / 2) / zoom
+        const cy = (r.top + window.scrollY + r.height / 2) / zoom
         if (t.kind === 'block') {
+          // Push particles out of the text, gather them on a frame around it.
           list.push({
             shape: 'rect',
             mode: 'repel',
-            x,
-            y,
+            x: cx,
+            y: cy,
             range: BLOCK_RANGE_PX / zoom,
             halfW: r.width / 2 / zoom,
             halfH: r.height / 2 / zoom,
             strength: BLOCK_STRENGTH,
+          })
+          list.push({
+            shape: 'rect',
+            mode: 'attract',
+            x: cx,
+            y: cy,
+            range: BLOCK_FRAME_RANGE_PX / zoom,
+            halfW: (r.width / 2 + BLOCK_FRAME_PAD_PX) / zoom,
+            halfH: (r.height / 2 + BLOCK_FRAME_PAD_PX) / zoom,
+            strength: BLOCK_FRAME_STRENGTH,
           })
         } else if (t.kind === 'dot') {
           if (hovered?.kind === 'dot' && hovered.id !== t.id) continue
           list.push({
             shape: 'circle',
             mode: 'repel',
-            x,
-            y,
+            x: cx,
+            y: cy,
             range: DOT_RANGE_PX / zoom,
             halfW: 0,
             halfH: 0,
             strength: DOT_STRENGTH,
           })
         } else {
-          // nav: attract underline normally, repel bubble while hovered
+          // nav: attract underline normally, tight repel pill while hovered
           if (hovered?.kind === 'nav' && hovered.id !== t.id) continue
           if (hovered?.kind === 'nav' && hovered.id === t.id) {
             list.push({
-              shape: 'circle',
+              shape: 'pill',
               mode: 'repel',
-              x,
-              y,
-              range: (r.width / 2 + NAV_BUBBLE_PAD_PX) / zoom,
-              halfW: 0,
+              x: cx,
+              y: cy,
+              range: (r.height / 2 + NAV_PILL_PAD_PX) / zoom,
+              halfW: r.width / 2 / zoom,
               halfH: 0,
-              strength: NAV_BUBBLE_STRENGTH,
+              strength: NAV_PILL_STRENGTH,
             })
           } else {
-            const underlineY = r.bottom + window.scrollY + NAV_UNDERLINE_OFFSET_PX
+            const underlineY = (r.bottom + window.scrollY + NAV_UNDERLINE_OFFSET_PX) / zoom
             list.push({
               shape: 'rect',
               mode: 'attract',
-              x,
-              y: underlineY / zoom,
+              x: cx,
+              y: underlineY,
               range: NAV_ATTRACT_RANGE_PX / zoom,
               halfW: r.width / 2 / zoom,
               halfH: NAV_UNDERLINE_HALF_H_PX / zoom,
@@ -187,24 +227,40 @@ export function PartyBackground() {
       engine.setCamera(w / (2 * zoom), h / (2 * zoom))
     }
 
+    const measureName = () => {
+      name = sampleName(holder.clientWidth, window.innerHeight)
+      document.documentElement.style.setProperty('--name-bottom', `${Math.round(name.bottom)}px`)
+    }
+
+    // Free particles are born in the shape of the name and merely guided
+    // back to it by the glyph attractors afterwards. A fifth of them seed
+    // the rest of the page so the underline and block-frame attractors have
+    // roamers to gather from the start.
     const spawnAll = () => {
-      if (!engine) return
-      const w = holder.clientWidth
-      const viewportH = window.innerHeight
-      const name = spawnName(w, viewportH, zoom)
-      pinnedCount = name.length
-      const center = pageToWorld(w / 2, viewportH / 2)
-      const swarm = new Spawner().initParticles({
-        count: SWARM_BUDGET(webgpu),
-        shape: 'circle',
-        center,
-        radius: isMobile() ? 600 : 500,
-        size: 3,
-        mass: 1,
-        colors: ['#ffffff'],
-        velocity: { speed: 100, direction: 'random' },
-      })
-      engine.setParticles([...name, ...swarm])
+      if (!engine || name.points.length === 0) return
+      const count = SWARM_BUDGET(webgpu)
+      const jitter = name.step
+      const pageW = holder.clientWidth
+      const pageH = Math.min(holder.clientHeight, MAX_CANVAS_HEIGHT)
+      const particles: IParticle[] = []
+      for (let i = 0; i < count; i++) {
+        const roamer = i % 5 === 0
+        const p = roamer
+          ? { x: Math.random() * pageW, y: Math.random() * pageH }
+          : name.points[Math.floor(Math.random() * name.points.length)]
+        const { x, y } = pageToWorld(
+          p.x + (Math.random() - 0.5) * jitter,
+          p.y + (Math.random() - 0.5) * jitter,
+        )
+        particles.push({
+          position: { x, y },
+          velocity: { x: 0, y: 0 },
+          size: 3,
+          mass: 1,
+          color: { r: 1, g: 1, b: 1, a: 1 },
+        })
+      }
+      engine.setParticles(particles)
     }
 
     const setMaxParticlesAnimated = (target: number, durationMs: number) => {
@@ -231,8 +287,10 @@ export function PartyBackground() {
       demoIndex = index
       const preset = DEMO_PRESETS[index]
       applyPreset(engine, mods, preset, { isMobile: isMobile(), isWebGPU: webgpu })
-      const cap = pinnedCount + Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor)
-      setMaxParticlesAnimated(cap, preset.transitionMs)
+      setMaxParticlesAnimated(
+        Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor),
+        preset.transitionMs,
+      )
       window.dispatchEvent(new CustomEvent('party:demo', { detail: index }))
       window.clearTimeout(demoTimer)
       demoTimer = window.setTimeout(
@@ -242,7 +300,7 @@ export function PartyBackground() {
     }
 
     const start = async () => {
-      engine = new Engine({
+      const eng = new Engine({
         canvas,
         forces: [
           mods.environment,
@@ -256,26 +314,29 @@ export function PartyBackground() {
         ],
         render: [mods.trails, mods.particles],
         runtime: 'auto',
-        maxParticles: PINNED_RESERVE + 80_000,
+        maxParticles: 80_000,
         cellSize: 16,
         maxNeighbors: 100,
         constrainIterations: 1,
       })
-      await engine.initialize()
+      await eng.initialize()
       if (disposed) {
-        void engine.destroy()
-        engine = null
+        void eng.destroy()
         return
       }
+      engine = eng
       webgpu = engine.getActualRuntime() === 'webgpu'
       layout()
+      measureName()
+      lastPageW = holder.clientWidth
       spawnAll()
       syncEffectors()
       applyDemo(0)
       engine.play()
     }
 
-    // Pointer drag moves the repel field, like the reference landing page.
+    // Pointer drag moves the repel field, like the reference landing page —
+    // holding it over the name dissolves it.
     const isInteractive = (target: EventTarget | null) =>
       target instanceof Element && target.closest('a, button')
     let dragging = false
@@ -312,16 +373,23 @@ export function PartyBackground() {
     cleanups.push(() => window.removeEventListener('scroll', scheduleSync))
     cleanups.push(onTargetsChanged(scheduleSync))
 
-    // Relayout when the viewport or document height changes.
+    // Viewport/document size changes: always relayout and resync; only
+    // respawn (and re-measure the name) when the width actually changed,
+    // so tab switches that change page height don't reset the swarm.
     let resizeTimer = 0
+    let lastPageW = 0
     const onResize = () => {
       window.clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => {
         if (!engine) return
+        const pageW = holder.clientWidth
         layout()
-        spawnAll()
+        measureName()
+        if (pageW !== lastPageW) {
+          lastPageW = pageW
+          spawnAll()
+        }
         syncEffectors()
-        applyDemo(demoIndex)
       }, 200)
     }
     window.addEventListener('resize', onResize)

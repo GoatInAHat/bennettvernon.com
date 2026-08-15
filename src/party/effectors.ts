@@ -6,7 +6,7 @@ import {
   type CPUDescriptor,
 } from '@cazala/party'
 
-export type EffectorShape = 'circle' | 'rect'
+export type EffectorShape = 'circle' | 'rect' | 'pill'
 export type EffectorMode = 'attract' | 'repel'
 
 export interface Effector {
@@ -17,11 +17,13 @@ export interface Effector {
   y: number
   /** Influence distance beyond the shape edge (circle: from center). */
   range: number
-  /** Rect half extents in world units (unused for circles). */
+  /** Rect half extents, or pill half segment length, in world units. */
   halfW: number
   halfH: number
   strength: number
 }
+
+const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 }
 
 const STRIDE = 8
 
@@ -49,7 +51,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     const data: number[] = []
     for (const e of effectors) {
       data.push(
-        e.shape === 'rect' ? 1 : 0,
+        SHAPE_CODE[e.shape],
         e.mode === 'repel' ? 1 : 0,
         e.x,
         e.y,
@@ -78,9 +80,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     let strength = ${getUniform('data', 'base + 7u')};
     let px = ${particleVar}.position.x;
     let py = ${particleVar}.position.y;
-    if (kind < 0.5) {
-      // Circle: identical to Interaction's falloff.
-      let dx = ex - px;
+    if (kind < 0.5 || kind > 1.5) {
+      // Circle (or pill: distance to a horizontal segment), Interaction falloff.
+      let sx = clamp(px - ex, -hw, hw) * select(0.0, 1.0, kind > 1.5);
+      let dx = (ex + sx) - px;
       let dy = ey - py;
       let dist2 = dx * dx + dy * dy;
       if (dist2 > 0.0 && dist2 <= range * range) {
@@ -140,8 +143,9 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
           const hw = data[base + 5]
           const hh = data[base + 6]
           const strength = data[base + 7]
-          if (kind < 0.5) {
-            const dx = ex - px
+          if (kind < 0.5 || kind > 1.5) {
+            const sx = kind > 1.5 ? Math.max(-hw, Math.min(hw, px - ex)) : 0
+            const dx = ex + sx - px
             const dy = ey - py
             const dist2 = dx * dx + dy * dy
             if (dist2 <= 0 || dist2 > range * range) continue

@@ -4,12 +4,8 @@ import { DEMO_PRESETS } from './party/presets'
 import { setHovered, useEffectorTarget } from './party/targets'
 import { site, work } from './content'
 
-const NAV = [
-  { id: 'about', label: 'About' },
-  { id: 'projects', label: 'Projects' },
-  { id: 'work', label: 'Work' },
-  { id: 'research', label: 'Research' },
-]
+const SECTIONS = ['About', 'Projects', 'Work', 'Research'] as const
+type Section = (typeof SECTIONS)[number]
 
 /** The site descriptions only use **bold** and _italic_. */
 function Rich({ text }: { text: string }) {
@@ -59,20 +55,29 @@ function DemoDot({ index, active }: { index: number; active: boolean }) {
   )
 }
 
-function NavButton({ id, label }: { id: string; label: string }) {
-  const ref = useRef<HTMLAnchorElement>(null)
-  useEffectorTarget(`nav-${id}`, 'nav', ref)
+function NavButton({
+  label,
+  active,
+  onSelect,
+}: {
+  label: Section
+  active: boolean
+  onSelect: () => void
+}) {
+  const ref = useRef<HTMLButtonElement>(null)
+  useEffectorTarget(`nav-${label}`, 'nav', ref)
   return (
-    <a
+    <button
       ref={ref}
-      className="nav-button"
-      href={`#${id}`}
+      className={`nav-button ${active ? 'active' : ''}`}
       data-label={label}
-      onPointerEnter={() => setHovered({ kind: 'nav', id: `nav-${id}` })}
+      onClick={onSelect}
+      onPointerEnter={() => setHovered({ kind: 'nav', id: `nav-${label}` })}
       onPointerLeave={() => setHovered(null)}
+      aria-pressed={active}
     >
       {label}
-    </a>
+    </button>
   )
 }
 
@@ -87,15 +92,6 @@ function Block({ children, className }: { children: ReactNode; className?: strin
   )
 }
 
-function SectionLabel({ label }: { label: string }) {
-  return (
-    <div className="section-label" aria-hidden="true">
-      <span>{label}</span>
-      <div className="rule" />
-    </div>
-  )
-}
-
 function ComingSoon() {
   return (
     <Block className="coming-soon">
@@ -105,6 +101,7 @@ function ComingSoon() {
 }
 
 export default function App() {
+  const [section, setSection] = useState<Section>('About')
   return (
     <>
       <PartyBackground />
@@ -114,13 +111,17 @@ export default function App() {
       </header>
       <main className="container">
         <nav className="site-nav" aria-label="Sections">
-          {NAV.map((item) => (
-            <NavButton key={item.id} id={item.id} label={item.label} />
+          {SECTIONS.map((label) => (
+            <NavButton
+              key={label}
+              label={label}
+              active={section === label}
+              onSelect={() => setSection(label)}
+            />
           ))}
         </nav>
 
-        <section id="about">
-          <SectionLabel label="about" />
+        {section === 'About' ? (
           <Block>
             <p className="lede">{site.description}</p>
             <div className="hero-links">
@@ -139,37 +140,30 @@ export default function App() {
               ))}
             </div>
           </Block>
-        </section>
+        ) : null}
 
-        <section id="projects">
-          <SectionLabel label="projects" />
-          <ComingSoon />
-        </section>
+        {section === 'Projects' ? <ComingSoon /> : null}
 
-        <section id="work">
-          <SectionLabel label="work" />
-          {work.map((item) => (
-            <Block key={item.title}>
-              <article>
-                <div className="work-head">
-                  <div>
-                    <div className="meta subtitle">{item.subtitle}</div>
-                    <h3>{item.title}</h3>
+        {section === 'Work'
+          ? work.map((item) => (
+              <Block key={item.title}>
+                <article>
+                  <div className="work-head">
+                    <div>
+                      <div className="meta subtitle">{item.subtitle}</div>
+                      <h3>{item.title}</h3>
+                    </div>
+                    <div className="meta">{item.date}</div>
                   </div>
-                  <div className="meta">{item.date}</div>
-                </div>
-                <p className="md-muted">
-                  <Rich text={item.description} />
-                </p>
-              </article>
-            </Block>
-          ))}
-        </section>
+                  <p className="md-muted">
+                    <Rich text={item.description} />
+                  </p>
+                </article>
+              </Block>
+            ))
+          : null}
 
-        <section id="research">
-          <SectionLabel label="research" />
-          <ComingSoon />
-        </section>
+        {section === 'Research' ? <ComingSoon /> : null}
       </main>
     </>
   )
