@@ -6,8 +6,7 @@ import { createPartyModules, applyPreset, DEMO_PRESETS } from './presets'
 import { getTargets, onTargetsChanged } from './targets'
 
 const NAME_LINES = ['BENNETT', 'VERNON']
-const NAME_FONT =
-  '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif'
+const NAME_FONT = 'Georgia, "Times New Roman", serif'
 const GUTTER_PX = 22
 const isMobile = () =>
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768
@@ -61,7 +60,7 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
     lineGap: 0,
   }
   if (!ctx) return fallback
-  ctx.font = `700 100px ${NAME_FONT}`
+  ctx.font = `100px ${NAME_FONT}`
   const widest = Math.max(...NAME_LINES.map((l) => ctx.measureText(l).width))
   const size = (100 * width) / widest
   const lineGap = size * 1.08
@@ -75,7 +74,7 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
     const c = off.getContext('2d', { willReadFrequently: true })
     if (!c) return
     c.clearRect(0, 0, off.width, off.height)
-    c.font = `700 ${size}px ${NAME_FONT}`
+    c.font = `${size}px ${NAME_FONT}`
     c.textBaseline = 'top'
     c.fillStyle = '#fff'
     c.fillText(text, 0, 0)
@@ -152,7 +151,7 @@ export function PartyBackground() {
       dctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
       dctx.lineWidth = 1
       // Name: outline of the type the attractor points were sampled from.
-      dctx.font = `700 ${name.size}px ${NAME_FONT}`
+      dctx.font = `${name.size}px ${NAME_FONT}`
       dctx.textBaseline = 'top'
       NAME_LINES.forEach((text, i) => {
         dctx.strokeText(text, GUTTER_PX, name.topY + i * name.lineGap)
