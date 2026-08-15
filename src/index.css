@@ -22,6 +22,9 @@
 
 html {
   background: var(--bg);
+  /* Scroll anchoring fights the full-page particle canvas and causes a
+     continuous scroll drift; the layout has no dynamic content that needs it. */
+  overflow-anchor: none;
 }
 
 body {
