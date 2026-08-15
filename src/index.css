@@ -279,6 +279,68 @@ a:visited {
   transform: scale(1.2);
 }
 
+.gear-button {
+  color: #000;
+  opacity: 0.3;
+  transition: opacity 0.2s ease;
+}
+
+.gear-button:hover,
+.gear-button.active {
+  opacity: 0.75;
+}
+
+/* Physics settings popup; the particles flow around its edges. */
+.settings-panel {
+  position: fixed;
+  top: 24px;
+  right: 68px;
+  z-index: 210;
+  width: 250px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 16px 18px 18px;
+}
+
+.settings-title {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  color: var(--faint);
+  margin-bottom: 10px;
+}
+
+.settings-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px;
+  cursor: pointer;
+}
+
+.settings-close:hover {
+  color: var(--fg);
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 24px;
+  color: var(--muted);
+}
+
+.settings-row input[type='range'] {
+  width: 100%;
+  accent-color: #000;
+}
+
 @media (max-width: 768px) {
   .hero {
     height: calc(var(--name-bottom, 30vh) + 46vh);
@@ -302,5 +364,12 @@ a:visited {
 
   .site-nav {
     gap: 8px 22px;
+  }
+
+  .settings-panel {
+    top: calc(var(--name-bottom, 30vh) + 52px);
+    left: var(--gutter);
+    right: var(--gutter);
+    width: auto;
   }
 }

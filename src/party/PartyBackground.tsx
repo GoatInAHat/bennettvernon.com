@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Engine, Interaction, type IParticle } from '@cazala/party'
+import { bridge } from './bridge'
 import { Effectors, type Effector } from './effectors'
 import { createPartyModules, applyPreset, DEMO_PRESETS } from './presets'
 import { getTargets, getHovered, onTargetsChanged } from './targets'
@@ -18,20 +19,23 @@ const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_00
 const MAX_CANVAS_HEIGHT = 8_000
 
 /** Effector tuning (world units are CSS px / zoom). */
-const NAME_POINT_STRENGTH = 10_000
 const BLOCK_STRENGTH = 100_000
 const BLOCK_RANGE_PX = 120
 const BLOCK_FRAME_PAD_PX = 14
 const BLOCK_FRAME_RANGE_PX = 90
 const BLOCK_FRAME_STRENGTH = 14_000
-const DOT_STRENGTH = 100_000
-const DOT_RANGE_PX = 70
-const NAV_ATTRACT_STRENGTH = 28_000
-const NAV_ATTRACT_RANGE_PX = 110
+const DOT_ATTRACT_STRENGTH = 12_000
+const DOT_ATTRACT_RANGE_PX = 60
+const NAV_ATTRACT_STRENGTH = 15_000
+const NAV_ATTRACT_RANGE_PX = 100
 const NAV_UNDERLINE_OFFSET_PX = 10
 const NAV_UNDERLINE_HALF_H_PX = 3
-const NAV_PILL_STRENGTH = 100_000
-const NAV_PILL_PAD_PX = 12
+const HOVER_CIRCLE_STRENGTH = 100_000
+const PANEL_STRENGTH = 100_000
+const PANEL_RANGE_PX = 160
+
+/** Hover circle radius: a circle with twice the button's area. */
+const hoverRadiusPx = (w: number, h: number) => Math.sqrt((2 * w * h) / Math.PI)
 
 function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
@@ -60,7 +64,7 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
   const size = (100 * width) / widest
   const lineGap = size * 1.08
   const topY = Math.max(48, viewportH * 0.08)
-  const step = Math.max(8, Math.round(size / 16))
+  const step = Math.max(4, Math.round(size / 26))
 
   const points: { x: number; y: number }[] = []
   NAME_LINES.forEach((text, i) => {
@@ -102,6 +106,8 @@ export function PartyBackground() {
     let demoTimer = 0
     let maxParticlesRaf = 0
     let syncScheduled = false
+    let pinnedCount = 0
+    let rotationPaused = false
     let name: NameLayout = { points: [], bottom: 0, width: 0, step: 10 }
     const cleanups: (() => void)[] = []
 
@@ -116,31 +122,30 @@ export function PartyBackground() {
 
     const pageToWorld = (px: number, py: number) => ({ x: px / zoom, y: py / zoom })
 
-    const nameEffectors = (): Effector[] => {
-      const range = Math.max(20, name.step * 2) / zoom
-      return name.points.map((p) => ({
-        shape: 'circle' as const,
-        mode: 'attract' as const,
-        x: p.x / zoom,
-        y: p.y / zoom,
-        range,
-        halfW: 0,
-        halfH: 0,
-        strength: NAME_POINT_STRENGTH,
-      }))
-    }
-
     const syncEffectors = () => {
       syncScheduled = false
       if (!engine) return
       const hovered = getHovered()
-      const list: Effector[] = nameEffectors()
+      const list: Effector[] = []
       for (const t of getTargets()) {
         const r = t.el.getBoundingClientRect()
         if (r.width === 0 && r.height === 0) continue
         const cx = (r.left + window.scrollX + r.width / 2) / zoom
         const cy = (r.top + window.scrollY + r.height / 2) / zoom
-        if (t.kind === 'block') {
+        if (t.kind === 'panel') {
+          // Particles flow around the open settings panel like they did
+          // around the reference page's big center circle.
+          list.push({
+            shape: 'rect',
+            mode: 'repel',
+            x: cx,
+            y: cy,
+            range: PANEL_RANGE_PX / zoom,
+            halfW: r.width / 2 / zoom,
+            halfH: r.height / 2 / zoom,
+            strength: PANEL_STRENGTH,
+          })
+        } else if (t.kind === 'block') {
           // Push particles out of the text, gather them on a frame around it.
           list.push({
             shape: 'rect',
@@ -163,30 +168,47 @@ export function PartyBackground() {
             strength: BLOCK_FRAME_STRENGTH,
           })
         } else if (t.kind === 'dot') {
+          // Attract spots (active mode pulls twice as hard); hovering swaps
+          // the hovered dot to a small center-circle-style repel field and
+          // deactivates the other dots' effectors.
           if (hovered?.kind === 'dot' && hovered.id !== t.id) continue
-          list.push({
-            shape: 'circle',
-            mode: 'repel',
-            x: cx,
-            y: cy,
-            range: DOT_RANGE_PX / zoom,
-            halfW: 0,
-            halfH: 0,
-            strength: DOT_STRENGTH,
-          })
-        } else {
-          // nav: attract underline normally, tight repel pill while hovered
-          if (hovered?.kind === 'nav' && hovered.id !== t.id) continue
-          if (hovered?.kind === 'nav' && hovered.id === t.id) {
+          if (hovered?.kind === 'dot' && hovered.id === t.id) {
             list.push({
-              shape: 'pill',
+              shape: 'circle',
               mode: 'repel',
               x: cx,
               y: cy,
-              range: (r.height / 2 + NAV_PILL_PAD_PX) / zoom,
-              halfW: r.width / 2 / zoom,
+              range: hoverRadiusPx(r.width, r.height) / zoom,
+              halfW: 0,
               halfH: 0,
-              strength: NAV_PILL_STRENGTH,
+              strength: HOVER_CIRCLE_STRENGTH,
+            })
+          } else {
+            const active = t.id === `dot-${demoIndex}`
+            list.push({
+              shape: 'circle',
+              mode: 'attract',
+              x: cx,
+              y: cy,
+              range: DOT_ATTRACT_RANGE_PX / zoom,
+              halfW: 0,
+              halfH: 0,
+              strength: DOT_ATTRACT_STRENGTH * (active ? 2 : 1),
+            })
+          }
+        } else {
+          // nav: attract underline normally, small repel circle while hovered
+          if (hovered?.kind === 'nav' && hovered.id !== t.id) continue
+          if (hovered?.kind === 'nav' && hovered.id === t.id) {
+            list.push({
+              shape: 'circle',
+              mode: 'repel',
+              x: cx,
+              y: cy,
+              range: hoverRadiusPx(r.width, r.height) / zoom,
+              halfW: 0,
+              halfH: 0,
+              strength: HOVER_CIRCLE_STRENGTH,
             })
           } else {
             const underlineY = (r.bottom + window.scrollY + NAV_UNDERLINE_OFFSET_PX) / zoom
@@ -232,35 +254,74 @@ export function PartyBackground() {
       document.documentElement.style.setProperty('--name-bottom', `${Math.round(name.bottom)}px`)
     }
 
-    // Free particles are born in the shape of the name and merely guided
-    // back to it by the glyph attractors afterwards. A fifth of them seed
-    // the rest of the page so the underline and block-frame attractors have
-    // roamers to gather from the start.
+    /** Page-space rows of points under each nav button for the underlines. */
+    const underlinePoints = (): { x: number; y: number }[] => {
+      const points: { x: number; y: number }[] = []
+      for (const t of getTargets()) {
+        if (t.kind !== 'nav') continue
+        const r = t.el.getBoundingClientRect()
+        if (r.width === 0) continue
+        const y0 = r.bottom + window.scrollY + NAV_UNDERLINE_OFFSET_PX
+        for (let row = 0; row < 2; row++) {
+          for (let x = r.left + window.scrollX; x <= r.right + window.scrollX; x += 2.5) {
+            points.push({ x, y: y0 + row * 3 })
+          }
+        }
+      }
+      return points
+    }
+
+    const freeParticle = (px: number, py: number, jitter: number): IParticle => {
+      const { x, y } = pageToWorld(
+        px + (Math.random() - 0.5) * jitter,
+        py + (Math.random() - 0.5) * jitter,
+      )
+      return {
+        position: { x, y },
+        velocity: { x: 0, y: 0 },
+        size: 3,
+        mass: 1,
+        color: { r: 1, g: 1, b: 1, a: 1 },
+      }
+    }
+
+    // The name and nav underlines are spelled by pinned particles (mass < 0
+    // skips integration, so they hold their shape). Free particles spawn
+    // concentrated at those same spots and roam from there; the rest seed
+    // the whole page.
     const spawnAll = () => {
       if (!engine || name.points.length === 0) return
-      const count = SWARM_BUDGET(webgpu)
-      const jitter = name.step
       const pageW = holder.clientWidth
       const pageH = Math.min(holder.clientHeight, MAX_CANVAS_HEIGHT)
-      const particles: IParticle[] = []
-      for (let i = 0; i < count; i++) {
-        const roamer = i % 5 === 0
-        const p = roamer
-          ? { x: Math.random() * pageW, y: Math.random() * pageH }
-          : name.points[Math.floor(Math.random() * name.points.length)]
-        const { x, y } = pageToWorld(
-          p.x + (Math.random() - 0.5) * jitter,
-          p.y + (Math.random() - 0.5) * jitter,
-        )
-        particles.push({
+      const underline = underlinePoints()
+      const pinned: IParticle[] = [...name.points, ...underline].map((p) => {
+        const { x, y } = pageToWorld(p.x, p.y)
+        return {
           position: { x, y },
           velocity: { x: 0, y: 0 },
-          size: 3,
-          mass: 1,
+          size: 1.9 / zoom,
+          mass: -1,
           color: { r: 1, g: 1, b: 1, a: 1 },
-        })
+        }
+      })
+      pinnedCount = pinned.length
+
+      const count = SWARM_BUDGET(webgpu)
+      const jitter = name.step * 2
+      const free: IParticle[] = []
+      for (let i = 0; i < count; i++) {
+        const roll = i % 20
+        if (roll < 11) {
+          const p = name.points[Math.floor(Math.random() * name.points.length)]
+          free.push(freeParticle(p.x, p.y, jitter))
+        } else if (roll < 14 && underline.length > 0) {
+          const p = underline[Math.floor(Math.random() * underline.length)]
+          free.push(freeParticle(p.x, p.y, jitter))
+        } else {
+          free.push(freeParticle(Math.random() * pageW, Math.random() * pageH, 0))
+        }
       }
-      engine.setParticles(particles)
+      engine.setParticles([...pinned, ...free])
     }
 
     const setMaxParticlesAnimated = (target: number, durationMs: number) => {
@@ -282,22 +343,40 @@ export function PartyBackground() {
       maxParticlesRaf = requestAnimationFrame(tick)
     }
 
+    const scheduleNextDemo = () => {
+      window.clearTimeout(demoTimer)
+      if (rotationPaused) return
+      demoTimer = window.setTimeout(
+        () => applyDemo((demoIndex + 1) % DEMO_PRESETS.length),
+        DEMO_PRESETS[demoIndex].duration[isMobile() ? 1 : 0],
+      )
+    }
+
     const applyDemo = (index: number) => {
       if (!engine) return
       demoIndex = index
       const preset = DEMO_PRESETS[index]
       applyPreset(engine, mods, preset, { isMobile: isMobile(), isWebGPU: webgpu })
       setMaxParticlesAnimated(
-        Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor),
+        pinnedCount + Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor),
         preset.transitionMs,
       )
       window.dispatchEvent(new CustomEvent('party:demo', { detail: index }))
-      window.clearTimeout(demoTimer)
-      demoTimer = window.setTimeout(
-        () => applyDemo((index + 1) % DEMO_PRESETS.length),
-        preset.duration[isMobile() ? 1 : 0],
-      )
+      scheduleSync() // the active dot attracts twice as hard
+      scheduleNextDemo()
     }
+
+    bridge.mods = mods
+    bridge.interaction = interaction
+    bridge.setPaused = (paused: boolean) => {
+      rotationPaused = paused
+      scheduleNextDemo()
+    }
+    cleanups.push(() => {
+      bridge.mods = null
+      bridge.interaction = null
+      bridge.setPaused = () => {}
+    })
 
     const start = async () => {
       const eng = new Engine({
@@ -314,7 +393,7 @@ export function PartyBackground() {
         ],
         render: [mods.trails, mods.particles],
         runtime: 'auto',
-        maxParticles: 80_000,
+        maxParticles: 88_000, // free-particle budget plus pinned headroom
         cellSize: 16,
         maxNeighbors: 100,
         constrainIterations: 1,
@@ -388,6 +467,9 @@ export function PartyBackground() {
         if (pageW !== lastPageW) {
           lastPageW = pageW
           spawnAll()
+          engine.setMaxParticles(
+            pinnedCount + Math.floor(SWARM_BUDGET(webgpu) * DEMO_PRESETS[demoIndex].budgetFactor),
+          )
         }
         syncEffectors()
       }, 200)

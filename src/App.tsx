@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { PartyBackground } from './party/PartyBackground'
 import { DEMO_PRESETS } from './party/presets'
 import { setHovered, useEffectorTarget } from './party/targets'
+import { SettingsPanel } from './SettingsPanel'
 import { site, work } from './content'
 
 const SECTIONS = ['About', 'Projects', 'Work', 'Research'] as const
@@ -21,7 +22,42 @@ function Rich({ text }: { text: string }) {
   )
 }
 
-function DemoDots() {
+function GearButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null)
+  useEffectorTarget('dot-gear', 'dot', ref)
+  return (
+    <button
+      ref={ref}
+      className={`demo-dot-button gear-button ${open ? 'active' : ''}`}
+      onClick={onToggle}
+      onPointerEnter={() => setHovered({ kind: 'dot', id: 'dot-gear' })}
+      onPointerLeave={() => setHovered(null)}
+      aria-pressed={open}
+      aria-label="Physics settings"
+    >
+      <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
+        <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+          <line x1="1" y1="2.5" x2="12" y2="2.5" />
+          <line x1="1" y1="6.5" x2="12" y2="6.5" />
+          <line x1="1" y1="10.5" x2="12" y2="10.5" />
+        </g>
+        <g fill="currentColor">
+          <circle cx="4" cy="2.5" r="1.8" />
+          <circle cx="9" cy="6.5" r="1.8" />
+          <circle cx="5.5" cy="10.5" r="1.8" />
+        </g>
+      </svg>
+    </button>
+  )
+}
+
+function DemoDots({
+  settingsOpen,
+  onToggleSettings,
+}: {
+  settingsOpen: boolean
+  onToggleSettings: () => void
+}) {
   const [active, setActive] = useState(0)
   useEffect(() => {
     const onDemo = (e: Event) => setActive((e as CustomEvent<number>).detail)
@@ -30,6 +66,7 @@ function DemoDots() {
   }, [])
   return (
     <div className="demo-dots" aria-label="Simulation mode selector">
+      <GearButton open={settingsOpen} onToggle={onToggleSettings} />
       {DEMO_PRESETS.map((_, index) => (
         <DemoDot key={index} index={index} active={index === active} />
       ))}
@@ -102,10 +139,12 @@ function ComingSoon() {
 
 export default function App() {
   const [section, setSection] = useState<Section>('About')
+  const [settingsOpen, setSettingsOpen] = useState(false)
   return (
     <>
       <PartyBackground />
-      <DemoDots />
+      <DemoDots settingsOpen={settingsOpen} onToggleSettings={() => setSettingsOpen((v) => !v)} />
+      {settingsOpen ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
       <header className="hero">
         <h1 className="sr-only">Bennett Vernon</h1>
       </header>
