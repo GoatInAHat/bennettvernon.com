@@ -1,0 +1,89 @@
+name: Validate agent configuration
+
+on:
+  pull_request:
+  push:
+    branches:
+      - particles
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-agent-config:
+    name: Agent configuration is current
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate shell scripts
+        run: bash -n .agents/scripts/bootstrap.sh .agents/scripts/link-skills.sh .agents/scripts/sync-mcp.sh
+
+      - name: Verify skill links
+        shell: bash
+        run: |
+          .agents/scripts/link-skills.sh
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Skill links are stale. Run .agents/scripts/link-skills.sh and commit the result."
+            git status --short
+            exit 1
+          fi
+
+          broken_links="$(find .claude/skills .cursor/skills -type l ! -exec test -e {} \; -print)"
+          if [ -n "$broken_links" ]; then
+            echo "Broken skill links:"
+            echo "$broken_links"
+            exit 1
+          fi
+
+      - name: Verify MCP adapters
+        run: .agents/scripts/sync-mcp.sh check
+
+      - name: Validate generated configuration syntax
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import tomllib
+          from pathlib import Path
+
+          for path in (
+              Path(".agents/mcp/servers.json"),
+              Path(".claude/settings.json"),
+              Path(".mcp.json"),
+              Path(".cursor/mcp.json"),
+              Path("skills-lock.json"),
+          ):
+              json.loads(path.read_text(encoding="utf-8"))
+
+          tomllib.loads(Path(".codex/config.toml").read_text(encoding="utf-8"))
+
+          lock = json.loads(Path("skills-lock.json").read_text(encoding="utf-8"))["skills"]
+          dirs = {p.name for p in Path(".agents/skills").iterdir() if p.is_dir()}
+          if set(lock) != dirs:
+              raise SystemExit(
+                  "skills-lock.json out of sync with .agents/skills/: "
+                  f"only in lock {sorted(set(lock) - dirs)}, "
+                  f"only on disk {sorted(dirs - set(lock))}"
+              )
+          PY
+
+      - name: Reject trailing whitespace outside vendored skills
+        shell: bash
+        run: |
+          if git grep -nI -E '[[:blank:]]+$' -- . ':(exclude).agents/skills/**'; then
+            echo "Tracked files contain trailing whitespace."
+            exit 1
+          fi
+
+      - name: Test environment bootstrap
+        run: .agents/scripts/bootstrap.sh
+
+      - name: Run pre-commit hooks
+        shell: bash
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          pre-commit run --all-files --show-diff-on-failure

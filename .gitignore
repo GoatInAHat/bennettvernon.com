@@ -1,0 +1,18 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Agent skills (machine-local)
+.agents/skills-local/*
+!.agents/skills-local/.gitkeep
+
+# Agent settings (machine-local)
+.claude/settings.local.json
+.claude/worktrees/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
