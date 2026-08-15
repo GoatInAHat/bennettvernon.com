@@ -98,6 +98,13 @@ a:visited {
   filter: invert(1) contrast(2);
 }
 
+/* Effector debug overlay; drawn outside the inversion filter. */
+.party-debug {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
 /* The name lives at the top left of the first viewport; the spacer leaves
    roaming room for the particles before the content starts. */
 .hero {
@@ -130,6 +137,9 @@ a:visited {
   line-height: 22px;
   padding: 4px 2px;
   cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
 }
 
 /* Reserve the bold width so hover doesn't shift the row. */
@@ -145,12 +155,14 @@ a:visited {
 .nav-button:hover,
 .nav-button.active {
   font-weight: 700;
+  text-decoration-thickness: 2px;
 }
 
-/* Content blocks: particles are pushed out of these. */
+/* Content blocks: particles ring these like the reference center circle. */
 .pblock {
   padding: 18px 22px;
   margin: 0 0 44px;
+  border-radius: 12px;
 }
 
 .pblock:last-child {
@@ -299,6 +311,7 @@ a:visited {
   width: 250px;
   background: var(--bg);
   border: 1px solid var(--border);
+  border-radius: 12px;
   padding: 16px 18px 18px;
 }
 
@@ -339,6 +352,32 @@ a:visited {
 .settings-row input[type='range'] {
   width: 100%;
   accent-color: #000;
+}
+
+.settings-toggle {
+  margin-top: 6px;
+}
+
+.settings-toggle input {
+  justify-self: start;
+  accent-color: #000;
+}
+
+.settings-copy {
+  margin-top: 12px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.settings-copy:hover {
+  border-color: rgba(0, 0, 0, 0.35);
 }
 
 @media (max-width: 768px) {

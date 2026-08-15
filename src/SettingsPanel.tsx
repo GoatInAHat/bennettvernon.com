@@ -1,116 +1,56 @@
 import { useEffect, useRef, useState } from 'react'
-import { bridge } from './party/bridge'
+import { bridge, type ModeSettings, type SettingKey } from './party/bridge'
 import { useEffectorTarget } from './party/targets'
 
-interface Slider {
-  label: string
-  min: number
-  max: number
-  step: number
-  get: () => number
-  set: (v: number) => void
-}
-
-function buildSliders(): Slider[] {
-  const m = bridge.mods
-  const drag = bridge.interaction
-  if (!m || !drag) return []
-  return [
-    {
-      label: 'gravity',
-      min: 0,
-      max: 4000,
-      step: 50,
-      get: () => m.environment.getGravityStrength(),
-      set: (v) => m.environment.setGravityStrength(v),
-    },
-    {
-      label: 'wander',
-      min: 0,
-      max: 100,
-      step: 1,
-      get: () => m.behavior.getWander(),
-      set: (v) => m.behavior.setWander(v),
-    },
-    {
-      label: 'cohesion',
-      min: 0,
-      max: 10,
-      step: 0.1,
-      get: () => m.behavior.getCohesion(),
-      set: (v) => m.behavior.setCohesion(v),
-    },
-    {
-      label: 'alignment',
-      min: 0,
-      max: 10,
-      step: 0.1,
-      get: () => m.behavior.getAlignment(),
-      set: (v) => m.behavior.setAlignment(v),
-    },
-    {
-      label: 'separation',
-      min: 0,
-      max: 100,
-      step: 1,
-      get: () => m.behavior.getSeparation(),
-      set: (v) => m.behavior.setSeparation(v),
-    },
-    {
-      label: 'viscosity',
-      min: 0,
-      max: 10,
-      step: 0.05,
-      get: () => m.fluids.getViscosity(),
-      set: (v) => m.fluids.setViscosity(v),
-    },
-    {
-      label: 'pressure',
-      min: 0,
-      max: 200,
-      step: 1,
-      get: () => m.fluids.getPressureMultiplier(),
-      set: (v) => m.fluids.setPressureMultiplier(v),
-    },
-    {
-      label: 'trail decay',
-      min: 1,
-      max: 50,
-      step: 1,
-      get: () => m.trails.readValue('trailDecay'),
-      set: (v) => m.trails.setTrailDecay(v),
-    },
-    {
-      label: 'drag strength',
-      min: 0,
-      max: 200000,
-      step: 1000,
-      get: () => drag.getStrength(),
-      set: (v) => drag.setStrength(v),
-    },
-    {
-      label: 'drag radius',
-      min: 100,
-      max: 2000,
-      step: 10,
-      get: () => drag.getRadius(),
-      set: (v) => drag.setRadius(v),
-    },
-  ]
-}
+const SLIDERS: { key: SettingKey; label: string; min: number; max: number; step: number }[] = [
+  { key: 'gravity', label: 'gravity', min: 0, max: 4000, step: 50 },
+  { key: 'wander', label: 'wander', min: 0, max: 100, step: 1 },
+  { key: 'cohesion', label: 'cohesion', min: 0, max: 10, step: 0.1 },
+  { key: 'alignment', label: 'alignment', min: 0, max: 10, step: 0.1 },
+  { key: 'separation', label: 'separation', min: 0, max: 100, step: 1 },
+  { key: 'viscosity', label: 'viscosity', min: 0, max: 10, step: 0.05 },
+  { key: 'pressure', label: 'pressure', min: 0, max: 200, step: 1 },
+  { key: 'trailDecay', label: 'trail decay', min: 1, max: 50, step: 1 },
+  { key: 'dragStrength', label: 'drag power', min: 0, max: 200000, step: 1000 },
+  { key: 'dragRadius', label: 'drag radius', min: 100, max: 2000, step: 10 },
+  { key: 'nameAttraction', label: 'name pull', min: 0, max: 50000, step: 500 },
+  { key: 'boxAttraction', label: 'box pull', min: 0, max: 200000, step: 1000 },
+]
 
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffectorTarget('settings-panel', 'panel', ref)
-  const [sliders] = useState(buildSliders)
-  const [values, setValues] = useState(() => sliders.map((s) => s.get()))
+  const [values, setValues] = useState<ModeSettings | null>(bridge.getCurrentSettings)
+  const [debug, setDebug] = useState(bridge.debugOn)
+  const [copied, setCopied] = useState(false)
 
-  // Pause the demo rotation while tweaking, so presets don't overwrite the
-  // sliders mid-adjustment.
+  // Pause the auto rotation while tweaking; the dots still switch modes and
+  // the sliders re-read that mode's settings when they do.
   useEffect(() => {
     bridge.setPaused(true)
-    return () => bridge.setPaused(false)
+    const onDemo = () => setValues(bridge.getCurrentSettings())
+    window.addEventListener('party:demo', onDemo)
+    return () => {
+      window.removeEventListener('party:demo', onDemo)
+      bridge.setPaused(false)
+    }
   }, [])
+
+  const copy = async () => {
+    const json = JSON.stringify(bridge.getAllSettings(), null, 2)
+    try {
+      await navigator.clipboard.writeText(json)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = json
+      document.body.append(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
 
   return (
     <div ref={ref} className="settings-panel" role="dialog" aria-label="Physics settings">
@@ -118,26 +58,42 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         ×
       </button>
       <div className="settings-title">physics</div>
-      {sliders.length === 0 ? (
+      {values === null ? (
         <p className="meta">simulation still starting…</p>
       ) : (
-        sliders.map((s, i) => (
-          <label key={s.label} className="settings-row">
-            <span>{s.label}</span>
+        <>
+          {SLIDERS.map((s) => (
+            <label key={s.key} className="settings-row">
+              <span>{s.label}</span>
+              <input
+                type="range"
+                min={s.min}
+                max={s.max}
+                step={s.step}
+                value={values[s.key]}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  bridge.applySetting(s.key, v)
+                  setValues((prev) => (prev ? { ...prev, [s.key]: v } : prev))
+                }}
+              />
+            </label>
+          ))}
+          <label className="settings-row settings-toggle">
+            <span>debug view</span>
             <input
-              type="range"
-              min={s.min}
-              max={s.max}
-              step={s.step}
-              value={values[i]}
+              type="checkbox"
+              checked={debug}
               onChange={(e) => {
-                const v = Number(e.target.value)
-                s.set(v)
-                setValues((prev) => prev.map((p, j) => (j === i ? v : p)))
+                setDebug(e.target.checked)
+                bridge.setDebug(e.target.checked)
               }}
             />
           </label>
-        ))
+          <button className="settings-copy" onClick={copy}>
+            {copied ? 'copied' : 'copy settings json'}
+          </button>
+        </>
       )}
     </div>
   )

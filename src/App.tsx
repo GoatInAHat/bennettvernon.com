@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { PartyBackground } from './party/PartyBackground'
 import { DEMO_PRESETS } from './party/presets'
-import { setHovered, useEffectorTarget } from './party/targets'
+import { useEffectorTarget } from './party/targets'
 import { SettingsPanel } from './SettingsPanel'
 import { site, work } from './content'
 
@@ -23,15 +23,10 @@ function Rich({ text }: { text: string }) {
 }
 
 function GearButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  const ref = useRef<HTMLButtonElement>(null)
-  useEffectorTarget('dot-gear', 'dot', ref)
   return (
     <button
-      ref={ref}
       className={`demo-dot-button gear-button ${open ? 'active' : ''}`}
       onClick={onToggle}
-      onPointerEnter={() => setHovered({ kind: 'dot', id: 'dot-gear' })}
-      onPointerLeave={() => setHovered(null)}
       aria-pressed={open}
       aria-label="Physics settings"
     >
@@ -68,53 +63,17 @@ function DemoDots({
     <div className="demo-dots" aria-label="Simulation mode selector">
       <GearButton open={settingsOpen} onToggle={onToggleSettings} />
       {DEMO_PRESETS.map((_, index) => (
-        <DemoDot key={index} index={index} active={index === active} />
+        <button
+          key={index}
+          className={`demo-dot-button ${index === active ? 'active' : ''}`}
+          onClick={() => window.dispatchEvent(new CustomEvent('party:select', { detail: index }))}
+          aria-pressed={index === active}
+          aria-label={`Simulation mode ${index + 1}`}
+        >
+          <span className="demo-dot" />
+        </button>
       ))}
     </div>
-  )
-}
-
-function DemoDot({ index, active }: { index: number; active: boolean }) {
-  const ref = useRef<HTMLButtonElement>(null)
-  useEffectorTarget(`dot-${index}`, 'dot', ref)
-  return (
-    <button
-      ref={ref}
-      className={`demo-dot-button ${active ? 'active' : ''}`}
-      onClick={() => window.dispatchEvent(new CustomEvent('party:select', { detail: index }))}
-      onPointerEnter={() => setHovered({ kind: 'dot', id: `dot-${index}` })}
-      onPointerLeave={() => setHovered(null)}
-      aria-pressed={active}
-      aria-label={`Simulation mode ${index + 1}`}
-    >
-      <span className="demo-dot" />
-    </button>
-  )
-}
-
-function NavButton({
-  label,
-  active,
-  onSelect,
-}: {
-  label: Section
-  active: boolean
-  onSelect: () => void
-}) {
-  const ref = useRef<HTMLButtonElement>(null)
-  useEffectorTarget(`nav-${label}`, 'nav', ref)
-  return (
-    <button
-      ref={ref}
-      className={`nav-button ${active ? 'active' : ''}`}
-      data-label={label}
-      onClick={onSelect}
-      onPointerEnter={() => setHovered({ kind: 'nav', id: `nav-${label}` })}
-      onPointerLeave={() => setHovered(null)}
-      aria-pressed={active}
-    >
-      {label}
-    </button>
   )
 }
 
@@ -151,12 +110,15 @@ export default function App() {
       <main className="container">
         <nav className="site-nav" aria-label="Sections">
           {SECTIONS.map((label) => (
-            <NavButton
+            <button
               key={label}
-              label={label}
-              active={section === label}
-              onSelect={() => setSection(label)}
-            />
+              className={`nav-button ${section === label ? 'active' : ''}`}
+              data-label={label}
+              onClick={() => setSection(label)}
+              aria-pressed={section === label}
+            >
+              {label}
+            </button>
           ))}
         </nav>
 

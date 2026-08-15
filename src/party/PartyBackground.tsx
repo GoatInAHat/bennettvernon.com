@@ -1,16 +1,14 @@
 import { useEffect, useRef } from 'react'
 import { Engine, Interaction, type IParticle } from '@cazala/party'
-import { bridge } from './bridge'
+import { bridge, SETTING_KEYS, type ModeSettings, type SettingKey } from './bridge'
 import { Effectors, type Effector } from './effectors'
 import { createPartyModules, applyPreset, DEMO_PRESETS } from './presets'
-import { getTargets, getHovered, onTargetsChanged } from './targets'
+import { getTargets, onTargetsChanged } from './targets'
 
 const NAME_LINES = ['BENNETT', 'VERNON']
 const NAME_FONT =
   '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif'
 const GUTTER_PX = 22
-// Fixed drag interaction, same values as the caza.la/party homepage.
-const DRAG_STRENGTH = 100_000
 const isMobile = () =>
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768
 const DESIRED_ZOOM = () => (isMobile() ? 0.2 : 0.3)
@@ -19,23 +17,14 @@ const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_00
 const MAX_CANVAS_HEIGHT = 8_000
 
 /** Effector tuning (world units are CSS px / zoom). */
-const BLOCK_STRENGTH = 100_000
-const BLOCK_RANGE_PX = 120
-const BLOCK_FRAME_PAD_PX = 14
-const BLOCK_FRAME_RANGE_PX = 90
-const BLOCK_FRAME_STRENGTH = 14_000
-const DOT_ATTRACT_STRENGTH = 12_000
-const DOT_ATTRACT_RANGE_PX = 60
-const NAV_ATTRACT_STRENGTH = 15_000
-const NAV_ATTRACT_RANGE_PX = 100
-const NAV_UNDERLINE_OFFSET_PX = 10
-const NAV_UNDERLINE_HALF_H_PX = 3
-const HOVER_CIRCLE_STRENGTH = 100_000
-const PANEL_STRENGTH = 100_000
-const PANEL_RANGE_PX = 160
-
-/** Hover circle radius: a circle with twice the button's area. */
-const hoverRadiusPx = (w: number, h: number) => Math.sqrt((2 * w * h) / Math.PI)
+const BOX_RANGE_PX = 22
+const BOX_CORNER_PX = 12
+const PANEL_RANGE_PX = 26
+const NAME_ATTRACTION_DEFAULT = 10_000
+const BOX_STRENGTH_DEFAULT = 100_000
+const DRAG_STRENGTH_DEFAULT = 100_000
+const SPAWN_SPREAD_PX = 60
+const SPAWN_SPEED = 100
 
 function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
@@ -51,6 +40,10 @@ interface NameLayout {
   width: number
   /** Sampling step in page px; also drives attractor range and spawn jitter. */
   step: number
+  /** Type geometry for the debug outline. */
+  size: number
+  topY: number
+  lineGap: number
 }
 
 /** Samples the bold name glyphs into page-space points, top-left justified. */
@@ -58,13 +51,22 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
   const off = document.createElement('canvas')
   const ctx = off.getContext('2d', { willReadFrequently: true })
   const width = nameWidth(pageW)
-  if (!ctx) return { points: [], bottom: viewportH * 0.4, width, step: 10 }
+  const fallback = {
+    points: [],
+    bottom: viewportH * 0.4,
+    width,
+    step: 10,
+    size: 0,
+    topY: 0,
+    lineGap: 0,
+  }
+  if (!ctx) return fallback
   ctx.font = `700 100px ${NAME_FONT}`
   const widest = Math.max(...NAME_LINES.map((l) => ctx.measureText(l).width))
   const size = (100 * width) / widest
   const lineGap = size * 1.08
   const topY = Math.max(48, viewportH * 0.08)
-  const step = Math.max(4, Math.round(size / 26))
+  const step = Math.max(8, Math.round(size / 16))
 
   const points: { x: number; y: number }[] = []
   NAME_LINES.forEach((text, i) => {
@@ -86,17 +88,19 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
       }
     }
   })
-  return { points, bottom: topY + lineGap + size * 1.1, width, step }
+  return { points, bottom: topY + lineGap + size * 1.1, width, step, size, topY, lineGap }
 }
 
 export function PartyBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const debugRef = useRef<HTMLCanvasElement>(null)
   const holderRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
+    const debugCanvas = debugRef.current
     const holder = holderRef.current
-    if (!canvas || !holder) return
+    if (!canvas || !debugCanvas || !holder) return
 
     let disposed = false
     let engine: Engine | null = null
@@ -106,15 +110,18 @@ export function PartyBackground() {
     let demoTimer = 0
     let maxParticlesRaf = 0
     let syncScheduled = false
-    let pinnedCount = 0
     let rotationPaused = false
-    let name: NameLayout = { points: [], bottom: 0, width: 0, step: 10 }
+    let nameAttraction = NAME_ATTRACTION_DEFAULT
+    let boxAttraction = BOX_STRENGTH_DEFAULT
+    const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
+    let name: NameLayout = sampleName(1440, 900)
+    let boxRects: DOMRect[] = []
     const cleanups: (() => void)[] = []
 
     const mods = createPartyModules()
     const interaction = new Interaction({
       mode: 'repel',
-      strength: DRAG_STRENGTH,
+      strength: DRAG_STRENGTH_DEFAULT,
       radius: DRAG_RADIUS(),
       active: false,
     })
@@ -122,110 +129,72 @@ export function PartyBackground() {
 
     const pageToWorld = (px: number, py: number) => ({ x: px / zoom, y: py / zoom })
 
+    // Same field as the caza.la/party center circle (repel, linear falloff,
+    // particles settle at the influence edge) but rect-shaped with rounded
+    // corners: shrinking the rect by the corner radius and extending the
+    // range by it makes the settle boundary a rounded box hugging the element.
+    const boxEffector = (r: DOMRect, rangePx: number): Effector => ({
+      shape: 'rect',
+      mode: 'repel',
+      x: (r.left + window.scrollX + r.width / 2) / zoom,
+      y: (r.top + window.scrollY + r.height / 2) / zoom,
+      range: (rangePx + BOX_CORNER_PX) / zoom,
+      halfW: Math.max(4, r.width / 2 - BOX_CORNER_PX) / zoom,
+      halfH: Math.max(4, r.height / 2 - BOX_CORNER_PX) / zoom,
+      strength: boxAttraction,
+    })
+
+    const drawDebug = () => {
+      const dctx = debugCanvas.getContext('2d')
+      if (!dctx) return
+      dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
+      if (!bridge.debugOn) return
+      dctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
+      dctx.lineWidth = 1
+      // Name: outline of the type the attractor points were sampled from.
+      dctx.font = `700 ${name.size}px ${NAME_FONT}`
+      dctx.textBaseline = 'top'
+      NAME_LINES.forEach((text, i) => {
+        dctx.strokeText(text, GUTTER_PX, name.topY + i * name.lineGap)
+      })
+      // Boxes: the settle boundary each box effector produces.
+      for (const r of boxRects) {
+        const pad = BOX_RANGE_PX
+        dctx.beginPath()
+        dctx.roundRect(
+          r.left + window.scrollX - pad,
+          r.top + window.scrollY - pad,
+          r.width + pad * 2,
+          r.height + pad * 2,
+          BOX_CORNER_PX + pad,
+        )
+        dctx.stroke()
+      }
+    }
+
     const syncEffectors = () => {
       syncScheduled = false
       if (!engine) return
-      const hovered = getHovered()
-      const list: Effector[] = []
+      const range = Math.max(16, name.step * 2.2) / zoom
+      const list: Effector[] = name.points.map((p) => ({
+        shape: 'circle' as const,
+        mode: 'attract' as const,
+        x: p.x / zoom,
+        y: p.y / zoom,
+        range,
+        halfW: 0,
+        halfH: 0,
+        strength: nameAttraction,
+      }))
+      boxRects = []
       for (const t of getTargets()) {
         const r = t.el.getBoundingClientRect()
         if (r.width === 0 && r.height === 0) continue
-        const cx = (r.left + window.scrollX + r.width / 2) / zoom
-        const cy = (r.top + window.scrollY + r.height / 2) / zoom
-        if (t.kind === 'panel') {
-          // Particles flow around the open settings panel like they did
-          // around the reference page's big center circle.
-          list.push({
-            shape: 'rect',
-            mode: 'repel',
-            x: cx,
-            y: cy,
-            range: PANEL_RANGE_PX / zoom,
-            halfW: r.width / 2 / zoom,
-            halfH: r.height / 2 / zoom,
-            strength: PANEL_STRENGTH,
-          })
-        } else if (t.kind === 'block') {
-          // Push particles out of the text, gather them on a frame around it.
-          list.push({
-            shape: 'rect',
-            mode: 'repel',
-            x: cx,
-            y: cy,
-            range: BLOCK_RANGE_PX / zoom,
-            halfW: r.width / 2 / zoom,
-            halfH: r.height / 2 / zoom,
-            strength: BLOCK_STRENGTH,
-          })
-          list.push({
-            shape: 'rect',
-            mode: 'attract',
-            x: cx,
-            y: cy,
-            range: BLOCK_FRAME_RANGE_PX / zoom,
-            halfW: (r.width / 2 + BLOCK_FRAME_PAD_PX) / zoom,
-            halfH: (r.height / 2 + BLOCK_FRAME_PAD_PX) / zoom,
-            strength: BLOCK_FRAME_STRENGTH,
-          })
-        } else if (t.kind === 'dot') {
-          // Attract spots (active mode pulls twice as hard); hovering swaps
-          // the hovered dot to a small center-circle-style repel field and
-          // deactivates the other dots' effectors.
-          if (hovered?.kind === 'dot' && hovered.id !== t.id) continue
-          if (hovered?.kind === 'dot' && hovered.id === t.id) {
-            list.push({
-              shape: 'circle',
-              mode: 'repel',
-              x: cx,
-              y: cy,
-              range: hoverRadiusPx(r.width, r.height) / zoom,
-              halfW: 0,
-              halfH: 0,
-              strength: HOVER_CIRCLE_STRENGTH,
-            })
-          } else {
-            const active = t.id === `dot-${demoIndex}`
-            list.push({
-              shape: 'circle',
-              mode: 'attract',
-              x: cx,
-              y: cy,
-              range: DOT_ATTRACT_RANGE_PX / zoom,
-              halfW: 0,
-              halfH: 0,
-              strength: DOT_ATTRACT_STRENGTH * (active ? 2 : 1),
-            })
-          }
-        } else {
-          // nav: attract underline normally, small repel circle while hovered
-          if (hovered?.kind === 'nav' && hovered.id !== t.id) continue
-          if (hovered?.kind === 'nav' && hovered.id === t.id) {
-            list.push({
-              shape: 'circle',
-              mode: 'repel',
-              x: cx,
-              y: cy,
-              range: hoverRadiusPx(r.width, r.height) / zoom,
-              halfW: 0,
-              halfH: 0,
-              strength: HOVER_CIRCLE_STRENGTH,
-            })
-          } else {
-            const underlineY = (r.bottom + window.scrollY + NAV_UNDERLINE_OFFSET_PX) / zoom
-            list.push({
-              shape: 'rect',
-              mode: 'attract',
-              x: cx,
-              y: underlineY,
-              range: NAV_ATTRACT_RANGE_PX / zoom,
-              halfW: r.width / 2 / zoom,
-              halfH: NAV_UNDERLINE_HALF_H_PX / zoom,
-              strength: NAV_ATTRACT_STRENGTH,
-            })
-          }
-        }
+        boxRects.push(r)
+        list.push(boxEffector(r, t.kind === 'panel' ? PANEL_RANGE_PX : BOX_RANGE_PX))
       }
       effectors.set(list)
+      drawDebug()
     }
 
     const scheduleSync = () => {
@@ -241,8 +210,12 @@ export function PartyBackground() {
       const w = holder.clientWidth
       const h = Math.min(holder.clientHeight, MAX_CANVAS_HEIGHT)
       if (w < 1 || h < 1) return
-      canvas.style.width = `${w}px`
-      canvas.style.height = `${h}px`
+      for (const c of [canvas, debugCanvas]) {
+        c.style.width = `${w}px`
+        c.style.height = `${h}px`
+      }
+      debugCanvas.width = w
+      debugCanvas.height = h
       engine.setSize(w, h)
       engine.setZoom(DESIRED_ZOOM())
       zoom = engine.getZoom() // may be clamped on tall pages
@@ -254,74 +227,53 @@ export function PartyBackground() {
       document.documentElement.style.setProperty('--name-bottom', `${Math.round(name.bottom)}px`)
     }
 
-    /** Page-space rows of points under each nav button for the underlines. */
-    const underlinePoints = (): { x: number; y: number }[] => {
-      const points: { x: number; y: number }[] = []
+    /** Page-space anchor points along the perimeter of each content box. */
+    const boxAnchors = (): { x: number; y: number }[] => {
+      const anchors: { x: number; y: number }[] = []
       for (const t of getTargets()) {
-        if (t.kind !== 'nav') continue
         const r = t.el.getBoundingClientRect()
         if (r.width === 0) continue
-        const y0 = r.bottom + window.scrollY + NAV_UNDERLINE_OFFSET_PX
-        for (let row = 0; row < 2; row++) {
-          for (let x = r.left + window.scrollX; x <= r.right + window.scrollX; x += 2.5) {
-            points.push({ x, y: y0 + row * 3 })
-          }
+        const x0 = r.left + window.scrollX
+        const y0 = r.top + window.scrollY
+        for (let x = 0; x <= r.width; x += 12) {
+          anchors.push({ x: x0 + x, y: y0 }, { x: x0 + x, y: y0 + r.height })
+        }
+        for (let y = 12; y < r.height; y += 12) {
+          anchors.push({ x: x0, y: y0 + y }, { x: x0 + r.width, y: y0 + y })
         }
       }
-      return points
+      return anchors
     }
 
-    const freeParticle = (px: number, py: number, jitter: number): IParticle => {
-      const { x, y } = pageToWorld(
-        px + (Math.random() - 0.5) * jitter,
-        py + (Math.random() - 0.5) * jitter,
-      )
-      return {
-        position: { x, y },
-        velocity: { x: 0, y: 0 },
-        size: 3,
-        mass: 1,
-        color: { r: 1, g: 1, b: 1, a: 1 },
-      }
-    }
-
-    // The name and nav underlines are spelled by pinned particles (mass < 0
-    // skips integration, so they hold their shape). Free particles spawn
-    // concentrated at those same spots and roam from there; the rest seed
-    // the whole page.
+    // Like the reference page's spawn-around-the-circle: particles are born
+    // scattered around the name and around every content box, with the same
+    // random launch speed.
     const spawnAll = () => {
       if (!engine || name.points.length === 0) return
-      const pageW = holder.clientWidth
-      const pageH = Math.min(holder.clientHeight, MAX_CANVAS_HEIGHT)
-      const underline = underlinePoints()
-      const pinned: IParticle[] = [...name.points, ...underline].map((p) => {
-        const { x, y } = pageToWorld(p.x, p.y)
-        return {
-          position: { x, y },
-          velocity: { x: 0, y: 0 },
-          size: 1.9 / zoom,
-          mass: -1,
-          color: { r: 1, g: 1, b: 1, a: 1 },
-        }
-      })
-      pinnedCount = pinned.length
-
+      const boxes = boxAnchors()
       const count = SWARM_BUDGET(webgpu)
-      const jitter = name.step * 2
-      const free: IParticle[] = []
+      const particles: IParticle[] = []
       for (let i = 0; i < count; i++) {
-        const roll = i % 20
-        if (roll < 11) {
-          const p = name.points[Math.floor(Math.random() * name.points.length)]
-          free.push(freeParticle(p.x, p.y, jitter))
-        } else if (roll < 14 && underline.length > 0) {
-          const p = underline[Math.floor(Math.random() * underline.length)]
-          free.push(freeParticle(p.x, p.y, jitter))
-        } else {
-          free.push(freeParticle(Math.random() * pageW, Math.random() * pageH, 0))
-        }
+        const anchor =
+          boxes.length > 0 && i % 2 === 0
+            ? boxes[Math.floor(Math.random() * boxes.length)]
+            : name.points[Math.floor(Math.random() * name.points.length)]
+        const spread = SPAWN_SPREAD_PX * Math.sqrt(Math.random())
+        const angle = Math.random() * Math.PI * 2
+        const { x, y } = pageToWorld(
+          anchor.x + Math.cos(angle) * spread,
+          anchor.y + Math.sin(angle) * spread,
+        )
+        const heading = Math.random() * Math.PI * 2
+        particles.push({
+          position: { x, y },
+          velocity: { x: Math.cos(heading) * SPAWN_SPEED, y: Math.sin(heading) * SPAWN_SPEED },
+          size: 3,
+          mass: 1,
+          color: { r: 1, g: 1, b: 1, a: 1 },
+        })
       }
-      engine.setParticles([...pinned, ...free])
+      engine.setParticles(particles)
     }
 
     const setMaxParticlesAnimated = (target: number, durationMs: number) => {
@@ -343,6 +295,72 @@ export function PartyBackground() {
       maxParticlesRaf = requestAnimationFrame(tick)
     }
 
+    const applySettingValue = (key: SettingKey, v: number) => {
+      switch (key) {
+        case 'gravity':
+          mods.environment.setGravityStrength(v)
+          break
+        case 'wander':
+          mods.behavior.setWander(v)
+          break
+        case 'cohesion':
+          mods.behavior.setCohesion(v)
+          break
+        case 'alignment':
+          mods.behavior.setAlignment(v)
+          break
+        case 'separation':
+          mods.behavior.setSeparation(v)
+          break
+        case 'viscosity':
+          mods.fluids.setViscosity(v)
+          break
+        case 'pressure':
+          mods.fluids.setPressureMultiplier(v)
+          break
+        case 'trailDecay':
+          mods.trails.setTrailDecay(v)
+          break
+        case 'dragStrength':
+          interaction.setStrength(v)
+          break
+        case 'dragRadius':
+          interaction.setRadius(v)
+          break
+        case 'nameAttraction':
+          nameAttraction = v
+          scheduleSync()
+          break
+        case 'boxAttraction':
+          boxAttraction = v
+          scheduleSync()
+          break
+      }
+    }
+
+    const baseSettings = (index: number): ModeSettings => {
+      const m = DEMO_PRESETS[index].session.modules
+      return {
+        gravity: m.environment.gravityStrength,
+        wander: m.behavior.wander,
+        cohesion: m.behavior.cohesion,
+        alignment: m.behavior.alignment,
+        separation: m.behavior.separation,
+        viscosity: m.fluids.viscosity,
+        pressure: m.fluids.pressureMultiplier,
+        trailDecay: m.trails.trailDecay,
+        dragStrength: DRAG_STRENGTH_DEFAULT,
+        dragRadius: DRAG_RADIUS(),
+        nameAttraction: NAME_ATTRACTION_DEFAULT,
+        boxAttraction: BOX_STRENGTH_DEFAULT,
+      }
+    }
+
+    const getSettings = (index: number): ModeSettings => ({
+      ...baseSettings(index),
+      ...overrides[index],
+    })
+
     const scheduleNextDemo = () => {
       window.clearTimeout(demoTimer)
       if (rotationPaused) return
@@ -357,25 +375,38 @@ export function PartyBackground() {
       demoIndex = index
       const preset = DEMO_PRESETS[index]
       applyPreset(engine, mods, preset, { isMobile: isMobile(), isWebGPU: webgpu })
+      const settings = getSettings(index)
+      for (const key of SETTING_KEYS) applySettingValue(key, settings[key])
       setMaxParticlesAnimated(
-        pinnedCount + Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor),
+        Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor),
         preset.transitionMs,
       )
       window.dispatchEvent(new CustomEvent('party:demo', { detail: index }))
-      scheduleSync() // the active dot attracts twice as hard
+      scheduleSync()
       scheduleNextDemo()
     }
 
-    bridge.mods = mods
-    bridge.interaction = interaction
     bridge.setPaused = (paused: boolean) => {
       rotationPaused = paused
       scheduleNextDemo()
     }
+    bridge.applySetting = (key, value) => {
+      overrides[demoIndex] = { ...overrides[demoIndex], [key]: value }
+      applySettingValue(key, value)
+    }
+    bridge.getCurrentSettings = () => getSettings(demoIndex)
+    bridge.getAllSettings = () =>
+      Object.fromEntries(DEMO_PRESETS.map((p, i) => [p.session.name, getSettings(i)]))
+    bridge.setDebug = (on) => {
+      bridge.debugOn = on
+      scheduleSync()
+    }
     cleanups.push(() => {
-      bridge.mods = null
-      bridge.interaction = null
       bridge.setPaused = () => {}
+      bridge.applySetting = () => {}
+      bridge.getCurrentSettings = () => null
+      bridge.getAllSettings = () => ({})
+      bridge.setDebug = () => {}
     })
 
     const start = async () => {
@@ -393,7 +424,7 @@ export function PartyBackground() {
         ],
         render: [mods.trails, mods.particles],
         runtime: 'auto',
-        maxParticles: 88_000, // free-particle budget plus pinned headroom
+        maxParticles: 80_000,
         cellSize: 16,
         maxNeighbors: 100,
         constrainIterations: 1,
@@ -417,7 +448,7 @@ export function PartyBackground() {
     // Pointer drag moves the repel field, like the reference landing page —
     // holding it over the name dissolves it.
     const isInteractive = (target: EventTarget | null) =>
-      target instanceof Element && target.closest('a, button')
+      target instanceof Element && target.closest('a, button, input, .settings-panel')
     let dragging = false
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0 || isInteractive(e.target)) return
@@ -447,7 +478,7 @@ export function PartyBackground() {
       window.removeEventListener('pointercancel', stopDrag)
     })
 
-    // The fixed-position demo dots move in page space while scrolling.
+    // The fixed-position settings panel moves in page space while scrolling.
     window.addEventListener('scroll', scheduleSync, { passive: true })
     cleanups.push(() => window.removeEventListener('scroll', scheduleSync))
     cleanups.push(onTargetsChanged(scheduleSync))
@@ -468,7 +499,7 @@ export function PartyBackground() {
           lastPageW = pageW
           spawnAll()
           engine.setMaxParticles(
-            pinnedCount + Math.floor(SWARM_BUDGET(webgpu) * DEMO_PRESETS[demoIndex].budgetFactor),
+            Math.floor(SWARM_BUDGET(webgpu) * DEMO_PRESETS[demoIndex].budgetFactor),
           )
         }
         syncEffectors()
@@ -510,6 +541,7 @@ export function PartyBackground() {
   return (
     <div ref={holderRef} className="party-holder" aria-hidden="true">
       <canvas ref={canvasRef} className="party-canvas" />
+      <canvas ref={debugRef} className="party-debug" />
     </div>
   )
 }

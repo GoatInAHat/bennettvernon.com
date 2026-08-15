@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-export type TargetKind = 'dot' | 'nav' | 'block' | 'panel'
+export type TargetKind = 'block' | 'panel'
 
 export interface EffectorTarget {
   id: string
@@ -8,14 +8,8 @@ export interface EffectorTarget {
   el: HTMLElement
 }
 
-export interface HoverState {
-  kind: 'dot' | 'nav'
-  id: string
-}
-
 // ponytail: module-level singleton registry, context is overkill for one canvas
 const targets = new Map<string, EffectorTarget>()
-let hovered: HoverState | null = null
 const listeners = new Set<() => void>()
 
 function notify() {
@@ -31,15 +25,6 @@ export function onTargetsChanged(fn: () => void): () => void {
 
 export function getTargets(): EffectorTarget[] {
   return [...targets.values()]
-}
-
-export function getHovered(): HoverState | null {
-  return hovered
-}
-
-export function setHovered(state: HoverState | null): void {
-  hovered = state
-  notify()
 }
 
 /** Registers a DOM element as a particle effector target. */
