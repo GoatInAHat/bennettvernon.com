@@ -58,7 +58,6 @@ const NAME_FIELD_RANGE_PX = 90
 /** Effector tuning (world units are CSS px / zoom). */
 const PANEL_RANGE_PX = 6
 const BOX_CORNER_PX = 6
-const SEPARATOR_RANGE_PX = 90
 const SPAWN_SPREAD_PX = 60
 const SPAWN_SPEED = 100
 const TRAIL_BASE_TTL_MS = 900
@@ -74,10 +73,11 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   dragRadius: 800,
   nameAttraction: 10_000,
   boxAttraction: 100_000,
-  textPadding: 8,
+  textPaddingInner: 4,
+  textPaddingOuter: 44,
   textSmoothing: 1.8,
-  exclusionFalloff: 36,
   separatorAttraction: 15_000,
+  separatorRange: 90,
   cursorStrength: 6_000,
   trailIntensity: 0.5,
   cursorFalloff: 0.5,
@@ -458,8 +458,11 @@ export function PartyBackground() {
         cols: textField.cols,
         rows: textField.rows,
         strength: globals.boxAttraction,
-        padding: globals.textPadding / zoom,
-        falloff: globals.exclusionFalloff / zoom,
+        // The push is zero at the outer padding and saturates at the
+        // inner padding; the field header keeps its (padding, falloff)
+        // parametrization with padding = outer, falloff = outer - inner.
+        padding: globals.textPaddingOuter / zoom,
+        falloff: Math.max(1, globals.textPaddingOuter - globals.textPaddingInner) / zoom,
         distances: world,
       })
     }
@@ -613,7 +616,7 @@ export function PartyBackground() {
             mode: 'attract',
             x: (r.x + r.w / 2) / zoom,
             y: (r.y + r.h / 2) / zoom,
-            range: SEPARATOR_RANGE_PX / zoom,
+            range: globals.separatorRange / zoom,
             halfW: r.w / 2 / zoom,
             halfH: 0,
             strength: globals.separatorAttraction,
@@ -1489,16 +1492,12 @@ export function PartyBackground() {
         staticVizDirty = true
         scheduleSync()
       } else if (key === 'modeDuration') scheduleNextDemo()
-      else if (key === 'textPadding' || key === 'boxAttraction') {
+      else if (key === 'textPaddingInner' || key === 'textPaddingOuter' || key === 'boxAttraction') {
         pushField()
         staticVizDirty = true
         scheduleSync()
       } else if (key === 'textSmoothing') {
         buildTextField()
-        staticVizDirty = true
-        scheduleSync()
-      } else if (key === 'exclusionFalloff') {
-        pushField()
         staticVizDirty = true
         scheduleSync()
       } else if (key === 'nameAttraction') {

@@ -204,6 +204,8 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
 
     const field = state.field
     if (field && field.length > FIELD_HEADER) {
+      // The push is zero at d = padding and reaches full strength at
+      // d = padding - falloff, so those are the range limit and the body.
       add('effectors:exclusion', false, {
         kind: 'field',
         originX: field[0],
@@ -213,8 +215,8 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         rows: field[4],
         values: field,
         valuesStart: FIELD_HEADER,
-        inner: field[6],
-        outer: field[6] + field[7],
+        inner: field[6] - field[7],
+        outer: field[6],
         intensity: field[5],
       })
     }

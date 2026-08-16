@@ -310,6 +310,75 @@ function drawField(
 
 let maxScratch: HTMLCanvasElement | null = null
 
+/**
+ * Renders a strongest-wins group of ring sources as the actual max-field:
+ * canvas compositing cannot take a per-pixel max of alphas (blend modes max
+ * color but still accumulate alpha, which over-brightens overlaps), so the
+ * field is rasterized exactly — each sample fills only its own radius box,
+ * keeping the per-frame cost tiny.
+ */
+function rasterMaxRings(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  rings: Extract<VizPrimitive, { kind: 'ring' }>[],
+  scale: number,
+  zoom: number,
+) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const p of rings) {
+    const r = p.r1 * zoom
+    minX = Math.min(minX, p.x * zoom - r)
+    minY = Math.min(minY, p.y * zoom - r)
+    maxX = Math.max(maxX, p.x * zoom + r)
+    maxY = Math.max(maxY, p.y * zoom + r)
+  }
+  const cell = 3
+  const cols = Math.ceil((maxX - minX) / cell) + 2
+  const rows = Math.ceil((maxY - minY) / cell) + 2
+  if (cols < 2 || rows < 2 || cols * rows > 600_000) return
+  const field = new Float32Array(cols * rows)
+  for (const p of rings) {
+    const r = p.r1 * zoom
+    const cx = p.x * zoom - minX
+    const cy = p.y * zoom - minY
+    const s = Math.abs(p.intensity) / scale
+    const gx0 = Math.max(0, Math.floor((cx - r) / cell))
+    const gx1 = Math.min(cols - 1, Math.ceil((cx + r) / cell))
+    const gy0 = Math.max(0, Math.floor((cy - r) / cell))
+    const gy1 = Math.min(rows - 1, Math.ceil((cy + r) / cell))
+    for (let gy = gy0; gy <= gy1; gy++) {
+      const dy = (gy + 0.5) * cell - cy
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const dx = (gx + 0.5) * cell - cx
+        const d = Math.hypot(dx, dy)
+        if (d >= r) continue
+        const v = s * (1 - d / r)
+        const i = gy * cols + gx
+        if (v > field[i]) field[i] = v
+      }
+    }
+  }
+  const [cr, cg, cb] = vizRgb(key)
+  const img = new ImageData(cols, rows)
+  for (let i = 0; i < field.length; i++) {
+    if (field[i] > 0) {
+      img.data[i * 4] = cr
+      img.data[i * 4 + 1] = cg
+      img.data[i * 4 + 2] = cb
+      img.data[i * 4 + 3] = Math.round(Math.min(1, 0.3 * field[i]) * 255)
+    }
+  }
+  const small = document.createElement('canvas')
+  small.width = cols
+  small.height = rows
+  small.getContext('2d')?.putImageData(img, 0, 0)
+  ctx.imageSmoothingEnabled = true
+  ctx.drawImage(small, minX, minY, cols * cell, rows * cell)
+}
+
 function drawGroup(ctx: CanvasRenderingContext2D, g: VizGroup, zoom: number, gradientOnly: boolean) {
   const scale = groupScale(g)
   for (const p of g.primitives) {
@@ -324,29 +393,51 @@ function drawGroup(ctx: CanvasRenderingContext2D, g: VizGroup, zoom: number, gra
 export function drawViz(ctx: CanvasRenderingContext2D, groups: VizGroup[], zoom: number): void {
   for (const g of groups) {
     if (g.blend === 'max') {
-      // Physics says the strongest primitive wins at each point, so the
-      // view composites with lighten (per-channel max) on a scratch layer
-      // — dense overlapping samples read as one smooth blob, exactly like
-      // the force field.
-      const w = ctx.canvas.width
-      const h = ctx.canvas.height
-      if (!maxScratch) maxScratch = document.createElement('canvas')
-      if (maxScratch.width !== w || maxScratch.height !== h) {
-        maxScratch.width = w
-        maxScratch.height = h
+      const rings = g.primitives.filter(
+        (p): p is Extract<VizPrimitive, { kind: 'ring' }> => p.kind === 'ring' && p.r1 > 0,
+      )
+      // The strongest sample wins at each point, so the gradient is the
+      // exact per-pixel max-field of the sources.
+      if (rings.length > 0) rasterMaxRings(ctx, g.key, rings, groupScale(g), zoom)
+      // Range-limit outline: the silhouette of the union of the sample
+      // ranges — the field's zero-force boundary — drawn as one blob
+      // (enlarged union minus shrunk union), never per-sample circles.
+      if (rings.length > 0) {
+        const w = ctx.canvas.width
+        const h = ctx.canvas.height
+        if (!maxScratch) maxScratch = document.createElement('canvas')
+        if (maxScratch.width !== w || maxScratch.height !== h) {
+          maxScratch.width = w
+          maxScratch.height = h
+        }
+        const sctx = maxScratch.getContext('2d')
+        if (!sctx) continue
+        const t = ctx.getTransform()
+        sctx.setTransform(1, 0, 0, 1, 0, 0)
+        sctx.clearRect(0, 0, w, h)
+        sctx.setTransform(ctx.getTransform())
+        const grow = new Path2D()
+        const shrink = new Path2D()
+        for (const p of rings) {
+          const x = p.x * zoom
+          const y = p.y * zoom
+          const r = p.r1 * zoom
+          grow.moveTo(x + r + 0.75, y)
+          grow.arc(x, y, r + 0.75, 0, Math.PI * 2)
+          const ri = Math.max(0, r - 0.75)
+          shrink.moveTo(x + ri, y)
+          shrink.arc(x, y, ri, 0, Math.PI * 2)
+        }
+        sctx.fillStyle = vizCss(g.key, 0.4)
+        sctx.fill(grow)
+        sctx.globalCompositeOperation = 'destination-out'
+        sctx.fillStyle = '#000'
+        sctx.fill(shrink)
+        sctx.globalCompositeOperation = 'source-over'
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.drawImage(maxScratch, 0, 0)
+        ctx.setTransform(t)
       }
-      const sctx = maxScratch.getContext('2d')
-      if (!sctx) continue
-      sctx.setTransform(1, 0, 0, 1, 0, 0)
-      sctx.clearRect(0, 0, w, h)
-      sctx.setTransform(ctx.getTransform())
-      sctx.globalCompositeOperation = 'lighten'
-      drawGroup(sctx, g, zoom, true)
-      sctx.globalCompositeOperation = 'source-over'
-      const t = ctx.getTransform()
-      ctx.setTransform(1, 0, 0, 1, 0, 0)
-      ctx.drawImage(maxScratch, 0, 0)
-      ctx.setTransform(t)
     } else {
       drawGroup(ctx, g, zoom, false)
     }
