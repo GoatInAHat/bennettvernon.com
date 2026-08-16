@@ -8,6 +8,8 @@ import { getTargets, onTargetsChanged } from './targets'
 const NAME_LINES = ['BENNETT', 'VERNON']
 const NAME_FONT = 'Georgia, "Times New Roman", serif'
 const GUTTER_PX = 22
+/** The name sits this far from both the left and the top edge. */
+const NAME_MARGIN_PX = GUTTER_PX * 2
 const isMobile = () =>
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768
 const DESIRED_ZOOM = () => (isMobile() ? 0.2 : 0.3)
@@ -16,9 +18,10 @@ const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_00
 const MAX_CANVAS_HEIGHT = 8_000
 
 /** Effector tuning (world units are CSS px / zoom). */
-const BOX_RANGE_PX = 22
-const BOX_CORNER_PX = 12
-const PANEL_RANGE_PX = 26
+// Range + corner = the ring's visual corner radius, kept equal to the 12px
+// CSS radius of the panel and content blocks, with the ring hugging them.
+const BOX_RANGE_PX = 6
+const BOX_CORNER_PX = 6
 const NAME_ATTRACTION_DEFAULT = 10_000
 const BOX_STRENGTH_DEFAULT = 100_000
 const DRAG_STRENGTH_DEFAULT = 100_000
@@ -29,7 +32,7 @@ function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
   // below the width where that would exceed 3/4 of the page, span the page.
   const desktop = Math.max(pageW / 3, 480)
-  return desktop >= pageW * 0.75 ? pageW - GUTTER_PX * 2 : desktop
+  return desktop >= pageW * 0.75 ? pageW - NAME_MARGIN_PX * 2 : desktop
 }
 
 interface NameLayout {
@@ -60,11 +63,11 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
     lineGap: 0,
   }
   if (!ctx) return fallback
-  ctx.font = `100px ${NAME_FONT}`
+  ctx.font = `700 100px ${NAME_FONT}`
   const widest = Math.max(...NAME_LINES.map((l) => ctx.measureText(l).width))
   const size = (100 * width) / widest
   const lineGap = size * 1.08
-  const topY = Math.max(48, viewportH * 0.08)
+  const topY = NAME_MARGIN_PX
   const step = Math.max(8, Math.round(size / 16))
 
   const points: { x: number; y: number }[] = []
@@ -74,7 +77,7 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
     const c = off.getContext('2d', { willReadFrequently: true })
     if (!c) return
     c.clearRect(0, 0, off.width, off.height)
-    c.font = `${size}px ${NAME_FONT}`
+    c.font = `700 ${size}px ${NAME_FONT}`
     c.textBaseline = 'top'
     c.fillStyle = '#fff'
     c.fillText(text, 0, 0)
@@ -82,7 +85,7 @@ function sampleName(pageW: number, viewportH: number): NameLayout {
     for (let y = 0; y < off.height; y += step) {
       for (let x = 0; x < off.width; x += step) {
         if (data[(y * off.width + x) * 4 + 3] > 64) {
-          points.push({ x: GUTTER_PX + x, y: topY + i * lineGap + y })
+          points.push({ x: NAME_MARGIN_PX + x, y: topY + i * lineGap + y })
         }
       }
     }
@@ -109,7 +112,6 @@ export function PartyBackground() {
     let demoTimer = 0
     let maxParticlesRaf = 0
     let syncScheduled = false
-    let rotationPaused = false
     let nameAttraction = NAME_ATTRACTION_DEFAULT
     let boxAttraction = BOX_STRENGTH_DEFAULT
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
@@ -151,10 +153,10 @@ export function PartyBackground() {
       dctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
       dctx.lineWidth = 1
       // Name: outline of the type the attractor points were sampled from.
-      dctx.font = `${name.size}px ${NAME_FONT}`
+      dctx.font = `700 ${name.size}px ${NAME_FONT}`
       dctx.textBaseline = 'top'
       NAME_LINES.forEach((text, i) => {
-        dctx.strokeText(text, GUTTER_PX, name.topY + i * name.lineGap)
+        dctx.strokeText(text, NAME_MARGIN_PX, name.topY + i * name.lineGap)
       })
       // Boxes: the settle boundary each box effector produces.
       for (const r of boxRects) {
@@ -190,7 +192,7 @@ export function PartyBackground() {
         const r = t.el.getBoundingClientRect()
         if (r.width === 0 && r.height === 0) continue
         boxRects.push(r)
-        list.push(boxEffector(r, t.kind === 'panel' ? PANEL_RANGE_PX : BOX_RANGE_PX))
+        list.push(boxEffector(r, BOX_RANGE_PX))
       }
       effectors.set(list)
       drawDebug()
@@ -362,7 +364,7 @@ export function PartyBackground() {
 
     const scheduleNextDemo = () => {
       window.clearTimeout(demoTimer)
-      if (rotationPaused) return
+      if (!bridge.autoRotateOn) return
       demoTimer = window.setTimeout(
         () => applyDemo((demoIndex + 1) % DEMO_PRESETS.length),
         DEMO_PRESETS[demoIndex].duration[isMobile() ? 1 : 0],
@@ -385,8 +387,8 @@ export function PartyBackground() {
       scheduleNextDemo()
     }
 
-    bridge.setPaused = (paused: boolean) => {
-      rotationPaused = paused
+    bridge.setAutoRotate = (on: boolean) => {
+      bridge.autoRotateOn = on
       scheduleNextDemo()
     }
     bridge.applySetting = (key, value) => {
@@ -401,7 +403,7 @@ export function PartyBackground() {
       scheduleSync()
     }
     cleanups.push(() => {
-      bridge.setPaused = () => {}
+      bridge.setAutoRotate = () => {}
       bridge.applySetting = () => {}
       bridge.getCurrentSettings = () => null
       bridge.getAllSettings = () => ({})

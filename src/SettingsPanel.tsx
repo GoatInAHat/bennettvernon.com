@@ -21,19 +21,16 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffectorTarget('settings-panel', 'panel', ref)
   const [values, setValues] = useState<ModeSettings | null>(bridge.getCurrentSettings)
+  const [autoRotate, setAutoRotate] = useState(bridge.autoRotateOn)
   const [debug, setDebug] = useState(bridge.debugOn)
   const [copied, setCopied] = useState(false)
 
-  // Pause the auto rotation while tweaking; the dots still switch modes and
-  // the sliders re-read that mode's settings when they do.
+  // The dots still switch modes while the panel is open; the sliders re-read
+  // that mode's settings when they do.
   useEffect(() => {
-    bridge.setPaused(true)
     const onDemo = () => setValues(bridge.getCurrentSettings())
     window.addEventListener('party:demo', onDemo)
-    return () => {
-      window.removeEventListener('party:demo', onDemo)
-      bridge.setPaused(false)
-    }
+    return () => window.removeEventListener('party:demo', onDemo)
   }, [])
 
   const copy = async () => {
@@ -54,7 +51,19 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div ref={ref} className="settings-panel" role="dialog" aria-label="Physics settings">
-      <button className="settings-close" onClick={onClose} aria-label="Close settings">
+      <button className="settings-icon settings-copy" onClick={copy} aria-label="Copy settings JSON">
+        {copied ? (
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+            <path d="M2 7.5 5.5 11 12 3.5" />
+          </svg>
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+            <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" />
+            <path d="M9.5 1.5H3A1.5 1.5 0 0 0 1.5 3v6.5" />
+          </svg>
+        )}
+      </button>
+      <button className="settings-icon settings-close" onClick={onClose} aria-label="Close settings">
         ×
       </button>
       <div className="settings-title">physics</div>
@@ -80,6 +89,17 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             </label>
           ))}
           <label className="settings-row settings-toggle">
+            <span>auto switch</span>
+            <input
+              type="checkbox"
+              checked={autoRotate}
+              onChange={(e) => {
+                setAutoRotate(e.target.checked)
+                bridge.setAutoRotate(e.target.checked)
+              }}
+            />
+          </label>
+          <label className="settings-row settings-toggle">
             <span>debug view</span>
             <input
               type="checkbox"
@@ -90,9 +110,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               }}
             />
           </label>
-          <button className="settings-copy" onClick={copy}>
-            {copied ? 'copied' : 'copy settings json'}
-          </button>
         </>
       )}
     </div>

@@ -22,8 +22,9 @@ export type ModeSettings = Record<SettingKey, number>
  * mode; edits persist as overrides across mode switches.
  */
 export const bridge: {
-  /** Pauses/resumes the automatic demo rotation. */
-  setPaused: (paused: boolean) => void
+  /** Turns the automatic demo rotation on or off. */
+  setAutoRotate: (on: boolean) => void
+  autoRotateOn: boolean
   /** Applies a value to the current mode and stores it as that mode's override. */
   applySetting: (key: SettingKey, value: number) => void
   getCurrentSettings: () => ModeSettings | null
@@ -32,7 +33,8 @@ export const bridge: {
   setDebug: (on: boolean) => void
   debugOn: boolean
 } = {
-  setPaused: () => {},
+  setAutoRotate: () => {},
+  autoRotateOn: true,
   applySetting: () => {},
   getCurrentSettings: () => null,
   getAllSettings: () => ({}),

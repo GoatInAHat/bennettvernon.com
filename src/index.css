@@ -105,10 +105,10 @@ a:visited {
   left: 0;
 }
 
-/* The name lives at the top left of the first viewport; the spacer leaves
-   roaming room for the particles before the content starts. */
+/* The name lives at the top left of the first viewport; the gap before the
+   content is three times the name's 44px top margin. */
 .hero {
-  height: calc(var(--name-bottom, 38vh) + 52vh);
+  height: calc(var(--name-bottom, 38vh) + 132px);
 }
 
 .container {
@@ -161,7 +161,7 @@ a:visited {
 /* Content blocks: particles ring these like the reference center circle. */
 .pblock {
   padding: 18px 22px;
-  margin: 0 0 44px;
+  margin: 0 0 64px;
   border-radius: 12px;
 }
 
@@ -322,21 +322,29 @@ a:visited {
   margin-bottom: 10px;
 }
 
-.settings-close {
+.settings-icon {
   position: absolute;
   top: 6px;
-  right: 8px;
   border: none;
   background: transparent;
   color: var(--muted);
-  font-size: 18px;
   line-height: 1;
   padding: 4px;
   cursor: pointer;
 }
 
-.settings-close:hover {
+.settings-icon:hover {
   color: var(--fg);
+}
+
+.settings-close {
+  right: 8px;
+  font-size: 18px;
+}
+
+.settings-copy {
+  right: 32px;
+  top: 8px;
 }
 
 .settings-row {
@@ -363,26 +371,9 @@ a:visited {
   accent-color: #000;
 }
 
-.settings-copy {
-  margin-top: 12px;
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-size: 12px;
-  padding: 6px 0;
-  cursor: pointer;
-}
-
-.settings-copy:hover {
-  border-color: rgba(0, 0, 0, 0.35);
-}
-
 @media (max-width: 768px) {
   .hero {
-    height: calc(var(--name-bottom, 30vh) + 46vh);
+    height: calc(var(--name-bottom, 30vh) + 132px);
   }
 
   /* On mobile the mode selector sits right below the name, in the flow of
