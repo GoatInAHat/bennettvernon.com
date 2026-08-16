@@ -60,6 +60,12 @@ const MODE_SLIDERS: SliderDef<ModeSettingKey>[] = [
 /** Slider value readout, truncated to two decimals. */
 const fmt = (v: number) => String(Number(v.toFixed(2)))
 
+/** Native range-knob width (px): the knob's center travels from THUMB_W/2 to
+ * trackWidth - THUMB_W/2, so live markers must map onto that span — a plain
+ * percentage of the track misses at both ends. */
+const THUMB_W = 11
+const SLIDER_BY_KEY = new Map(MODE_SLIDERS.map((s) => [s.key, s]))
+
 const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'particleCount', label: 'particles', min: 500, max: 80000, step: 500 },
   { key: 'dragStrength', label: 'drag power', min: 0, max: 200000, step: 1000 },
@@ -93,7 +99,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [autoRotate, setAutoRotate] = useState(bridge.autoRotateOn)
   const [debug, setDebug] = useState(bridge.debugOn)
   const [copied, setCopied] = useState(false)
-  const [live, setLive] = useState<Partial<ModeSettings> | null>(null)
   const [runtimePref, setRuntimePref] = useState(bridge.runtimePref)
   const [autoResolved, setAutoResolved] = useState(bridge.autoResolved)
 
@@ -120,11 +125,38 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('party:demo', onDemo)
   }, [])
 
-  // The knob shows the target value; a second marker tracks the value the
-  // simulation is actually applying while a mode transition eases over.
+  // The knob shows the target value; an outline ghost of the knob tracks the
+  // value the simulation is actually applying (transition easing, preset
+  // oscillators). Positions update imperatively at frame rate — routing them
+  // through React state capped them at the poll interval and re-rendered the
+  // whole panel for every movement.
   useEffect(() => {
-    const iv = window.setInterval(() => setLive(bridge.getLiveSettings()), 100)
-    return () => window.clearInterval(iv)
+    let raf = 0
+    const loop = () => {
+      const liveVals = bridge.getLiveSettings()
+      const targets = bridge.getCurrentSettings()
+      const root = ref.current
+      if (liveVals && targets && root) {
+        for (const el of root.querySelectorAll<HTMLElement>('.slider-live')) {
+          const key = el.dataset.key as ModeSettingKey
+          const def = SLIDER_BY_KEY.get(key)
+          const lv = liveVals[key]
+          if (!def || lv === undefined) {
+            el.style.visibility = 'hidden'
+            continue
+          }
+          const show = Math.abs(lv - targets[key]) > def.step / 2
+          el.style.visibility = show ? 'visible' : 'hidden'
+          if (show) {
+            const f = Math.min(1, Math.max(0, (lv - def.min) / (def.max - def.min)))
+            el.style.left = `calc(${f} * (100% - ${THUMB_W}px) + ${THUMB_W / 2}px)`
+          }
+        }
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
   }, [])
 
   const copy = async () => {
@@ -175,8 +207,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
 
       <div className="settings-subtitle">mode {modeIndex + 1}</div>
       {MODE_SLIDERS.map((s, i) => {
-        const liveV = live?.[s.key]
-        const showLive = liveV !== undefined && Math.abs(liveV - values[s.key]) > s.step / 2
         const groupHead =
           s.group && s.group !== MODE_SLIDERS[i - 1]?.group ? (
             <div className="settings-group">{s.group}</div>
@@ -200,14 +230,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                   setValues((prev) => (prev ? { ...prev, [s.key]: v } : prev))
                 }}
               />
-              {showLive ? (
-                <span
-                  className="slider-live"
-                  style={{
-                    left: `${Math.min(100, Math.max(0, ((liveV - s.min) / (s.max - s.min)) * 100))}%`,
-                  }}
-                />
-              ) : null}
+              <span className="slider-live" data-key={s.key} style={{ visibility: 'hidden' }} />
             </span>
             </label>
           </Fragment>

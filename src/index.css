@@ -426,15 +426,18 @@ a:visited {
   min-width: 0;
 }
 
-/* The value currently applied to the simulation, easing toward the knob. */
+/* The value currently applied to the simulation: an outline ghost of the
+ * native range knob (measured ~11x15px pill in Chrome). */
 .slider-live {
   position: absolute;
   top: 50%;
-  width: 2px;
-  height: 12px;
+  width: 11px;
+  height: 15px;
+  box-sizing: border-box;
   transform: translate(-50%, -50%);
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 1px;
+  border: 1.5px solid rgba(0, 0, 0, 0.55);
+  border-radius: 999px;
+  background: transparent;
   pointer-events: none;
 }
 
