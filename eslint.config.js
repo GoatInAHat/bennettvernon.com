@@ -6,7 +6,9 @@ import tseslint from 'typescript-eslint'
 import { globalIgnores } from 'eslint/config'
 
 export default tseslint.config([
-  globalIgnores(['dist', '.agents']),
+  // vendor/ keeps upstream code style (see vendor/party/README.md); tsc
+  // still typechecks it as part of the app project.
+  globalIgnores(['dist', '.agents', 'vendor']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

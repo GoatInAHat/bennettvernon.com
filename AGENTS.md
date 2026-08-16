@@ -11,6 +11,10 @@ extended with pinned-particle typography and DOM-anchored force effectors.
 
 - `src/` — Application code. `src/party/` holds the engine wiring, demo
   presets, and the custom multi-effector force module.
+- `vendor/party/` — Vendored fork of the `@cazala/party` engine core;
+  imports keep the upstream package name via aliases. Every divergence from
+  upstream is listed in `vendor/party/README.md`. Kept in upstream code
+  style (exempt from repo ESLint, still typechecked).
 - `public/` — Static assets, `CNAME`, and site content JSON.
 - `.agents/` — Canonical shared skills, MCP definitions, and adapter scripts.
 - `.claude/`, `.cursor/`, `.codex/`, `.mcp.json` — Agent-specific adapters;
