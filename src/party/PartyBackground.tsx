@@ -53,15 +53,6 @@ const PARTICLE_POOL = (webgpu: boolean) => (webgpu ? 80_000 : 8_000)
 /** Backing-store cap; taller pages render uniformly downscaled so the
  * simulation always reaches the bottom of the page. */
 const MAX_CANVAS_HEIGHT = 8_000
-/** Whatever slows the GPU — Safari's hard 30Hz demotion tier when frames
- * miss the 60Hz deadline, macOS Low Power Mode, a weak machine — the tick
- * loop ratchets the render resolution down (CSS stretches it back) until
- * frames fit the budget again, so the quality/smoothness tradeoff tunes
- * itself per machine. Measured on an M-series MacBook: Safari in Low Power
- * Mode ran a hard 30fps at full resolution and ~60fps at half; with it
- * off, full resolution holds 60fps and the ratchet never engages. */
-const RENDER_SCALE_FLOOR = 0.34
-
 /** Reach of the name's attraction field beyond the letter surface. */
 const NAME_FIELD_RANGE_PX = 90
 
@@ -334,8 +325,6 @@ export function PartyBackground() {
       cellOf: Int16Array
     } | null = null
     let particleCountTouched = false
-    let renderScale = 1
-    let lastScaleCheck = 0
     /** Overlay canvases render at native device resolution, capped by an
      * area budget so very tall pages don't allocate absurd backing stores. */
     let debugDpr = 1
@@ -922,19 +911,6 @@ export function PartyBackground() {
         teleportCount = 0
         teleportWindowStart = now
       }
-      // Downward-only resolution ratchet, on every browser: whatever slows
-      // the GPU (Safari's 30Hz demotion tier, Low Power Mode, a weak
-      // machine), shrink the backing store until frames fit the budget.
-      if (renderScale > RENDER_SCALE_FLOOR) {
-        if (lastScaleCheck === 0) lastScaleCheck = now
-        else if (now - lastScaleCheck > 3000) {
-          lastScaleCheck = now
-          if (engine.getFPS() < 45) {
-            renderScale = Math.max(RENDER_SCALE_FLOOR, renderScale * 0.8)
-            layout()
-          }
-        }
-      }
       enforceDensity()
       // Ease the displayed per-cell opacity toward the density targets;
       // the damping setting controls how much it may move per frame.
@@ -975,7 +951,7 @@ export function PartyBackground() {
       const w = holder.clientWidth
       const h = holder.clientHeight
       if (w < 1 || h < 1) return
-      const scale = Math.min(1, MAX_CANVAS_HEIGHT / h) * renderScale
+      const scale = Math.min(1, MAX_CANVAS_HEIGHT / h)
       for (const c of [canvas, debugCanvas]) {
         c.style.width = `${w}px`
         c.style.height = `${h}px`
