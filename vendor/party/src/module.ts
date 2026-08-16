@@ -76,6 +76,12 @@ export type VizPrimitive =
       inner: number;
       outer: number;
       intensity: number;
+      /** Falloff exponent of the normalized force between inner and outer
+       * (default 1: linear ramp). Viewers shape the gradient with it. */
+      exponent?: number;
+      /** Force inside the body relative to the ramp's value at `inner`
+       * (default 1: full). Viewers scale the body's fill with it. */
+      innerScale?: number;
     };
 
 export interface VizGroup {

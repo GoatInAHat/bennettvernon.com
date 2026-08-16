@@ -73,6 +73,10 @@ type EffectorsInputs = {
   dynamic: number[]
   field: number[]
   nameField: number[]
+  /** Name-pull tuning [strength, range, sharpness, relax], separate from the
+   * multi-MB nameField array so slider drags re-upload four floats, not the
+   * whole distance grid. */
+  nameParams: number[]
 }
 
 function packEffectors(effectors: Effector[]): number[] {
@@ -105,11 +109,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     dynamic: DataType.ARRAY,
     field: DataType.ARRAY,
     nameField: DataType.ARRAY,
+    nameParams: DataType.ARRAY,
   } as const
 
   constructor() {
     super()
-    this.write({ data: [], dynamic: [], field: [], nameField: [] })
+    this.write({ data: [], dynamic: [], field: [], nameField: [], nameParams: [] })
   }
 
   /** Static effectors: rewritten only on layout/hover changes. */
@@ -145,10 +150,21 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   }
 
   /** The name's signed distance field: particles outside the letters are
-   * pulled toward the glyph surface (force fades over `falloff`); inside
-   * the letters no force applies. The physics IS the font's vector shape. */
+   * pulled toward the glyph surface. The physics IS the font's vector
+   * shape; strength/range/shape live in `nameParams` so the big array
+   * stays byte-stable across slider drags. */
   setNameField(field: DistanceField | null): void {
     this.write({ nameField: field ? this.packField(field) : [] })
+  }
+
+  /** Name-pull tuning, all world units where applicable:
+   * strength — peak pull at the letter surface;
+   * range — reach beyond the surface (force is zero past it);
+   * sharpness — falloff exponent from the surface out (1 = linear;
+   *   higher concentrates the pull near the letters).
+   * Inside the letters no force applies. */
+  setNameParams(strength: number, range: number, sharpness: number): void {
+    this.write({ nameParams: [strength, range, sharpness] })
   }
 
   /** Debug description decoded from the same packed arrays the shaders
@@ -160,6 +176,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       dynamic?: number[]
       field?: number[]
       nameField?: number[]
+      nameParams?: number[]
     }
     const groups = new Map<string, VizGroup>()
     const add = (key: string, dynamic: boolean, prim: VizPrimitive) => {
@@ -227,7 +244,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     }
 
     const nameField = state.nameField
-    if (nameField && nameField.length > FIELD_HEADER) {
+    const nameParams = state.nameParams
+    if (nameField && nameField.length > FIELD_HEADER && nameParams && nameParams.length >= 3) {
+      // The gradient profile mirrors the force exactly: falloff exponent =
+      // sharpness, zero fill inside the letters (no force applies there).
       add('effectors:name', false, {
         kind: 'field',
         originX: nameField[0],
@@ -238,8 +258,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         values: nameField,
         valuesStart: FIELD_HEADER,
         inner: 0, // the letter surface itself
-        outer: nameField[7],
-        intensity: nameField[5],
+        outer: nameParams[1],
+        intensity: nameParams[0],
+        exponent: nameParams[2],
+        innerScale: 0,
       })
     }
     return [...groups.values()]
@@ -383,18 +405,20 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     }
   }`
     // Pull toward the name's letter surface: outside the glyphs the force
-    // points down the distance gradient, fading linearly over the falloff;
-    // inside the letters no force applies.
+    // points down the distance gradient, fading over the range with the
+    // sharpness exponent; inside the letters no force applies.
     const namePart = ({ particleVar, getUniform, getLength }: WgslArgs) => `
   let nflen = ${getLength('nameField')};
-  if (nflen > ${FIELD_HEADER}u) {
+  let nplen = ${getLength('nameParams')};
+  if (nflen > ${FIELD_HEADER}u && nplen >= 3u) {
     let nox = ${getUniform('nameField', '0u')};
     let noy = ${getUniform('nameField', '1u')};
     let ncw = ${getUniform('nameField', '2u')};
     let ncols = u32(${getUniform('nameField', '3u')});
     let nrows = u32(${getUniform('nameField', '4u')});
-    let nstrength = ${getUniform('nameField', '5u')};
-    let nrange = ${getUniform('nameField', '7u')};
+    let nstrength = ${getUniform('nameParams', '0u')};
+    let nrange = ${getUniform('nameParams', '1u')};
+    let nsharp = ${getUniform('nameParams', '2u')};
     let nfx = (${particleVar}.position.x - nox) / ncw;
     let nfy = (${particleVar}.position.y - noy) / ncw;
     if (nfx >= 1.5 && nfy >= 1.5 && nfx < f32(ncols) - 2.5 && nfy < f32(nrows) - 2.5) {
@@ -413,7 +437,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         let ngy = mix(nd01 - nd00, nd11 - nd10, ntx);
         let ngl = sqrt(ngx * ngx + ngy * ngy);
         if (ngl > 0.0) {
-          let nm = nstrength * (1.0 - nd / nrange);
+          let nm = nstrength * pow(1.0 - nd / nrange, nsharp);
           ${particleVar}.acceleration -= vec2<f32>(ngx, ngy) / ngl * nm;
         }
       }
@@ -556,14 +580,16 @@ ${namePart(args)}
           }
         }
         const nf = input.nameField
-        if (nf && nf.length > FIELD_HEADER) {
+        const np = input.nameParams
+        if (nf && nf.length > FIELD_HEADER && np && np.length >= 3) {
           const ox = nf[0]
           const oy = nf[1]
           const cw = nf[2]
           const cols = nf[3]
           const rows = nf[4]
-          const strength = nf[5]
-          const range = nf[7]
+          const strength = np[0]
+          const range = np[1]
+          const sharp = np[2]
           const fx = (px - ox) / cw
           const fy = (py - oy) / cw
           if (fx >= 1.5 && fy >= 1.5 && fx < cols - 2.5 && fy < rows - 2.5) {
@@ -580,9 +606,9 @@ ${namePart(args)}
               const gy = (nf[i00 + cols] - nf[i00]) * (1 - tx) + (nf[i00 + cols + 1] - nf[i00 + 1]) * tx
               const gl = Math.hypot(gx, gy)
               if (gl > 0) {
-                const m = (strength * (1 - d / range)) / gl
-                particle.acceleration.x -= gx * m
-                particle.acceleration.y -= gy * m
+                const nm = strength * Math.pow(1 - d / range, sharp)
+                particle.acceleration.x -= (gx / gl) * nm
+                particle.acceleration.y -= (gy / gl) * nm
               }
             }
           }

@@ -72,6 +72,8 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'dragStrength', label: 'drag power', min: 0, max: 200000, step: 1000 },
   { key: 'dragRadius', label: 'drag radius', min: 100, max: 2000, step: 10 },
   { key: 'nameAttraction', label: 'name pull', min: 0, max: 50000, step: 500 },
+  { key: 'nameRange', label: 'name pull radius', min: 10, max: 300, step: 5 },
+  { key: 'nameSharpness', label: 'name sharpness', min: 0.2, max: 6, step: 0.05 },
   { key: 'boxAttraction', label: 'text repel', min: 0, max: 200000, step: 1000 },
   { key: 'textPaddingInner', label: 'inner padding', min: 0, max: 60, step: 1 },
   { key: 'textPaddingOuter', label: 'outer padding', min: 2, max: 150, step: 1 },

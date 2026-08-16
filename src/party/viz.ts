@@ -279,11 +279,13 @@ function drawField(
   const [cr, cg, cb] = vizRgb(key)
   const img = new ImageData(cols, rows)
   const band = Math.max(p.outer - p.inner, 1e-6)
+  const exponent = p.exponent ?? 1
+  const innerScale = p.innerScale ?? 1
   for (let i = 0; i < cols * rows; i++) {
     const d = Number(p.values[p.valuesStart + i])
     let a = 0
-    if (d < p.inner) a = 0.3
-    else if (d < p.outer) a = 0.3 * (1 - (d - p.inner) / band)
+    if (d < p.inner) a = 0.3 * innerScale
+    else if (d < p.outer) a = 0.3 * Math.pow(1 - (d - p.inner) / band, exponent)
     if (a > 0) {
       img.data[i * 4] = cr
       img.data[i * 4 + 1] = cg

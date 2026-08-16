@@ -53,8 +53,6 @@ const PARTICLE_POOL = (webgpu: boolean) => (webgpu ? 80_000 : 8_000)
 /** Backing-store cap; taller pages render uniformly downscaled so the
  * simulation always reaches the bottom of the page. */
 const MAX_CANVAS_HEIGHT = 8_000
-/** Reach of the name's attraction field beyond the letter surface. */
-const NAME_FIELD_RANGE_PX = 90
 
 /** Effector tuning (world units are CSS px / zoom). */
 const PANEL_RANGE_PX = 6
@@ -87,6 +85,8 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   dragStrength: 50_000,
   dragRadius: 400,
   nameAttraction: 10_000,
+  nameRange: 90,
+  nameSharpness: 1,
   boxAttraction: 100_000,
   textPaddingInner: 4,
   textPaddingOuter: 44,
@@ -273,6 +273,9 @@ export function PartyBackground() {
     let demoIndex = 0
     let demoTimer = 0
     let maxParticlesRaf = 0
+    /** Field-grid reach the name field was last built with. */
+    let builtNameRange = 0
+    let nameRangeRebuildTimer = 0
     let syncScheduled = false
     const globals: GlobalSettings = { ...GLOBAL_DEFAULTS, dragRadius: isMobile() ? 350 : 400 }
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
@@ -995,7 +998,8 @@ export function PartyBackground() {
 
       const step = FIELD_CELL_PX
       // Margin wide enough for the attraction field's reach.
-      const margin = NAME_FIELD_RANGE_PX + step * 4
+      const margin = globals.nameRange + step * 4
+      builtNameRange = globals.nameRange
       const minX = NAME_MARGIN_PX - margin
       const minY = name.topY - margin
       const cols = Math.ceil((name.width + margin * 2) / step)
@@ -1140,7 +1144,17 @@ export function PartyBackground() {
       renderNameOpacity()
     }
 
-    /** Uploads the name field with the current strength/range header. */
+    /** Name-pull tuning (world units); tiny upload, safe to call per slider
+     * tick — the multi-MB distance array itself stays byte-stable. */
+    const pushNameParams = () => {
+      effectors.setNameParams(
+        globals.nameAttraction,
+        globals.nameRange / zoom,
+        globals.nameSharpness,
+      )
+    }
+
+    /** Uploads the name distance field; tuning lives in nameParams. */
     const pushNameField = () => {
       if (!nameField) {
         effectors.setNameField(null)
@@ -1151,14 +1165,17 @@ export function PartyBackground() {
       effectors.setNameField({
         originX: nameField.minX / zoom,
         originY: nameField.minY / zoom,
-        cell: nameField.cell / zoom,
         cols: nameField.cols,
         rows: nameField.rows,
-        strength: globals.nameAttraction,
+        cell: nameField.cell / zoom,
+        // Vestigial header slots (tuning moved to nameParams): fixed zeros
+        // keep the big array's bytes stable across slider drags.
+        strength: 0,
         padding: 0,
-        falloff: NAME_FIELD_RANGE_PX / zoom,
+        falloff: 0,
         distances: world,
       })
+      pushNameParams()
     }
 
     /** Crisp vector text mask used to clip the per-cell opacity field,
@@ -1690,10 +1707,16 @@ export function PartyBackground() {
         buildTextField()
         staticVizDirty = true
         scheduleSync()
-      } else if (key === 'nameAttraction') {
-        pushNameField()
+      } else if (key === 'nameAttraction' || key === 'nameRange' || key === 'nameSharpness') {
+        pushNameParams()
         staticVizDirty = true
         if (bridge.debugOn) drawDebug()
+        // A radius past the built grid margin needs a wider field; rebuild
+        // once the slider settles.
+        if (key === 'nameRange' && value > builtNameRange) {
+          window.clearTimeout(nameRangeRebuildTimer)
+          nameRangeRebuildTimer = window.setTimeout(() => rebuildVoronoi(), 250)
+        }
       } else if (key === 'nameBaseOpacity' || key === 'nameDensityOpacity') {
         renderNameOpacity()
       } else if (key === 'particleCount') {
@@ -2025,6 +2048,7 @@ export function PartyBackground() {
       window.removeEventListener('pointercancel', onPointerUp)
       document.documentElement.removeEventListener('pointerleave', onLeaveWindow)
       document.documentElement.removeEventListener('pointerenter', onEnterWindow)
+      window.clearTimeout(nameRangeRebuildTimer)
     })
 
     // pressure.js supplies cross-platform mouse pressure: real Force Touch

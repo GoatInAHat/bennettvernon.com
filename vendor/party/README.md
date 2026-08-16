@@ -39,6 +39,9 @@ Every divergence from upstream is listed here.
   limits, and falloff gradients for any physics without viewer changes.
   Groups can declare `blend: 'max'` when their primitives combine by
   strongest-wins rather than summing (viewers render the exact max-field).
+  Field primitives can carry a falloff `exponent` and an `innerScale`
+  (force inside the body relative to the ramp) so viewers draw the true
+  force profile, not an assumed linear one.
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
 - `modules/forces/fluids.ts`, `collisions.ts`, `sensors.ts` — each gains a

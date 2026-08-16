@@ -41,6 +41,8 @@ export const GLOBAL_SETTING_KEYS = [
   'dragStrength',
   'dragRadius',
   'nameAttraction',
+  'nameRange',
+  'nameSharpness',
   'boxAttraction',
   'textPaddingInner',
   'textPaddingOuter',
