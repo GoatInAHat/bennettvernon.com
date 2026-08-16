@@ -287,7 +287,7 @@ a:visited {
   top: 24px;
   right: 68px;
   z-index: 210;
-  width: 260px;
+  width: 390px;
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   background: var(--bg);
