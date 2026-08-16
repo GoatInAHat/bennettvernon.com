@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Engine, Interaction, type IParticle } from '@cazala/party'
+import { Engine, Interaction, type IParticle, type ParticleQuery } from '@cazala/party'
 import {
   bridge,
   NAME_FONTS,
@@ -58,7 +58,11 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   transitionLength: 2.5,
   nameFont: 0,
   nameWeight: 700,
+  nameDensity: 30,
+  nameDensityRes: 36,
 }
+const DENSITY_INTERVAL_MS = 400
+const DENSITY_TELEPORT_BUDGET = 250
 
 function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
@@ -176,6 +180,18 @@ export function PartyBackground() {
     let transition: { from: Record<string, number>; to: Record<string, number>; t0: number; ms: number; preset: (typeof DEMO_PRESETS)[number] } | null = null
     let name: NameLayout | null = null
     let charBalls: CharBall[] = []
+    let voroSeeds: { x: number; y: number }[] = []
+    let voroCellPoints: number[][] = []
+    let glyphGrid: {
+      minX: number
+      minY: number
+      cols: number
+      rows: number
+      step: number
+      cellOf: Int16Array
+    } | null = null
+    let densityBusy = false
+    let lastDensity = 0
     let staticEffectors: Effector[] = []
     let trail: { x: number; y: number; t: number }[] = []
     let cursor: { x: number; y: number } | null = null
@@ -268,6 +284,11 @@ export function PartyBackground() {
       NAME_LINES.forEach((text, i) => {
         dctx.strokeText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
       })
+      // Voronoi seeds of the name-density cells.
+      dctx.fillStyle = 'rgba(40, 90, 220, 0.8)'
+      for (const s of voroSeeds) {
+        dctx.fillRect(s.x - 1.5, s.y - 1.5, 3, 3)
+      }
       // Separator lines and the settings panel.
       for (const t of getTargets()) {
         const r = toPageRect(t.el.getBoundingClientRect())
@@ -408,6 +429,7 @@ export function PartyBackground() {
       if (cursor || trail.length > 0) {
         effectors.set([...staticEffectors, ...cursorEffectors(now)])
       }
+      enforceDensity(now)
     }
 
     const layout = () => {
@@ -433,9 +455,144 @@ export function PartyBackground() {
       engine.setCamera(w / (2 * zoom), h / (2 * zoom))
     }
 
+    // Voronoi cells over the name glyphs (seeded with best-candidate points
+    // so the pattern is even rather than pixel-grid aligned). Each grid cell
+    // of the glyph mask stores its nearest seed for O(1) classification.
+    const rebuildVoronoi = () => {
+      voroSeeds = []
+      voroCellPoints = []
+      glyphGrid = null
+      if (!name || name.points.length === 0) return
+      const pts = name.points
+      const target = Math.max(4, Math.min(Math.round(globals.nameDensityRes), pts.length))
+      voroSeeds.push({ ...pts[Math.floor(Math.random() * pts.length)] })
+      while (voroSeeds.length < target) {
+        let best = pts[0]
+        let bestD = -1
+        for (let c = 0; c < 10; c++) {
+          const cand = pts[Math.floor(Math.random() * pts.length)]
+          let d = Infinity
+          for (const s of voroSeeds) {
+            d = Math.min(d, (cand.x - s.x) ** 2 + (cand.y - s.y) ** 2)
+          }
+          if (d > bestD) {
+            bestD = d
+            best = cand
+          }
+        }
+        voroSeeds.push({ ...best })
+      }
+      const step = name.step
+      const minX = Math.min(...pts.map((p) => p.x)) - step
+      const minY = Math.min(...pts.map((p) => p.y)) - step
+      const cols = Math.ceil((Math.max(...pts.map((p) => p.x)) - minX) / step) + 2
+      const rows = Math.ceil((Math.max(...pts.map((p) => p.y)) - minY) / step) + 2
+      const cellOf = new Int16Array(cols * rows).fill(-1)
+      voroCellPoints = voroSeeds.map(() => [])
+      pts.forEach((p, pi) => {
+        let si = 0
+        let sd = Infinity
+        for (let i = 0; i < voroSeeds.length; i++) {
+          const d = (p.x - voroSeeds[i].x) ** 2 + (p.y - voroSeeds[i].y) ** 2
+          if (d < sd) {
+            sd = d
+            si = i
+          }
+        }
+        const gx = Math.floor((p.x - minX) / step)
+        const gy = Math.floor((p.y - minY) / step)
+        cellOf[gy * cols + gx] = si
+        voroCellPoints[si].push(pi)
+      })
+      glyphGrid = { minX, minY, cols, rows, step, cellOf }
+    }
+
+    /** Voronoi cell index for a page position, or -1 outside the glyphs. */
+    const cellAt = (px: number, py: number): number => {
+      if (!glyphGrid) return -1
+      const gx = Math.floor((px - glyphGrid.minX) / glyphGrid.step)
+      const gy = Math.floor((py - glyphGrid.minY) / glyphGrid.step)
+      if (gx < 0 || gy < 0 || gx >= glyphGrid.cols || gy >= glyphGrid.rows) return -1
+      return glyphGrid.cellOf[gy * glyphGrid.cols + gx]
+    }
+
+    // Keeps every Voronoi cell of the name at the minimum particle count by
+    // teleporting donors — first from the densest name cells, then from
+    // particles outside the name. The heavy filtering runs on the GPU via
+    // the engine's bounded radius query; writes are targeted setParticle
+    // calls. Physics is untouched — only positions move.
+    const enforceDensity = (now: number) => {
+      if (!engine || !name || !glyphGrid || voroSeeds.length === 0) return
+      const min = Math.round(globals.nameDensity)
+      if (min <= 0 || densityBusy || now - lastDensity < DENSITY_INTERVAL_MS) return
+      densityBusy = true
+      lastDensity = now
+      const w = name.width
+      const h = name.bottom - name.topY
+      const center = pageToWorld(NAME_MARGIN_PX + w / 2, name.topY + h / 2)
+      const radius = (Math.hypot(w, h) / 2 + 300) / zoom
+      engine
+        .getParticlesInRadius(center, radius, { maxResults: 6000 })
+        .then((res) => {
+          if (disposed || !engine || !name) return
+          const members: number[][] = voroSeeds.map(() => [])
+          const outside: ParticleQuery[] = []
+          for (const q of res.particles) {
+            const ci = cellAt(q.position.x * zoom, q.position.y * zoom)
+            if (ci >= 0) members[ci].push(q.index)
+            else outside.push(q)
+          }
+          let budget = DENSITY_TELEPORT_BUDGET
+          for (let ci = 0; ci < members.length && budget > 0; ci++) {
+            const cellPts = voroCellPoints[ci]
+            if (cellPts.length === 0) continue
+            let need = min - members[ci].length
+            while (need > 0 && budget > 0) {
+              let donor = -1
+              let densest = -1
+              let densestCount = min
+              for (let i = 0; i < members.length; i++) {
+                if (members[i].length > densestCount) {
+                  densestCount = members[i].length
+                  densest = i
+                }
+              }
+              if (densest >= 0) {
+                const list = members[densest]
+                donor = list.splice(Math.floor(Math.random() * list.length), 1)[0]
+              } else if (outside.length > 0) {
+                donor = outside.splice(Math.floor(Math.random() * outside.length), 1)[0].index
+              } else {
+                break
+              }
+              const pt = name.points[cellPts[Math.floor(Math.random() * cellPts.length)]]
+              const jitter = name.step
+              engine.setParticle(donor, {
+                position: pageToWorld(
+                  pt.x + (Math.random() - 0.5) * jitter,
+                  pt.y + (Math.random() - 0.5) * jitter,
+                ),
+                velocity: { x: 0, y: 0 },
+                size: 3,
+                mass: 1,
+                color: { r: 1, g: 1, b: 1, a: 1 },
+              })
+              members[ci].push(donor)
+              need--
+              budget--
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          densityBusy = false
+        })
+    }
+
     const measureName = () => {
       name = sampleName(holder.clientWidth, window.innerHeight, nameFontStack(), globals.nameWeight)
       document.documentElement.style.setProperty('--name-bottom', `${Math.round(name.bottom)}px`)
+      rebuildVoronoi()
     }
 
     const measureContent = () => {
@@ -576,6 +733,9 @@ export function PartyBackground() {
       else if (key === 'textPadding' || key === 'textSmoothing') {
         blobCacheDirty = true
         scheduleSync()
+      } else if (key === 'nameDensityRes') {
+        rebuildVoronoi()
+        scheduleSync()
       } else scheduleSync()
     }
     bridge.getGlobals = () => ({ ...globals })
@@ -639,6 +799,12 @@ export function PartyBackground() {
       }
       engine = eng
       webgpu = engine.getActualRuntime() === 'webgpu'
+      if (import.meta.env.DEV) {
+        ;(window as unknown as Record<string, unknown>).__party = {
+          engine: eng,
+          probe: () => ({ zoom, seeds: voroSeeds.length, name: !!name, points: name?.points.length }),
+        }
+      }
       layout()
       measureName()
       measureContent()

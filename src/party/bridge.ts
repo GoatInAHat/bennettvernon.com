@@ -26,6 +26,8 @@ export const GLOBAL_SETTING_KEYS = [
   'transitionLength',
   'nameFont',
   'nameWeight',
+  'nameDensity',
+  'nameDensityRes',
 ] as const
 
 export type ModeSettingKey = (typeof MODE_SETTING_KEYS)[number]

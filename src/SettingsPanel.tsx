@@ -42,6 +42,8 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'cursorFalloff', label: 'trail falloff', min: 0, max: 1, step: 0.01 },
   { key: 'modeDuration', label: 'mode time (s)', min: 3, max: 60, step: 1 },
   { key: 'transitionLength', label: 'fade time (s)', min: 0, max: 8, step: 0.1 },
+  { key: 'nameDensity', label: 'name density', min: 0, max: 80, step: 1 },
+  { key: 'nameDensityRes', label: 'density cells', min: 8, max: 120, step: 2 },
 ]
 
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
