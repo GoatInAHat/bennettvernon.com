@@ -49,11 +49,12 @@ export interface DistanceField {
 }
 
 /**
- * One sample of the cursor-trail curve: a cone of pull with its own radius
- * and peak strength. The trail field is the MAX of the sample cones (not
+ * One sample of the cursor-trail curve: a cone of force with its own radius
+ * and peak strength. The trail field is the MAX-magnitude sample cone (not
  * the sum), so the densely sampled curve forms one smooth tapered blob
  * with no seams where samples overlap, and a stationary cursor is simply
- * the single-cone degenerate case. Attract-only.
+ * the single-cone degenerate case. Strength is SIGNED: positive pulls,
+ * negative pushes (drag trails).
  */
 export interface TrailNode {
   x: number
@@ -196,11 +197,15 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     const dyn = state.dynamic ?? []
     for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
       const [x, y, r, s] = dyn.slice(base, base + NODE_STRIDE)
-      if (r <= 0 || s <= 0) continue
-      add('effectors:trail', true, { kind: 'ring', x, y, r0: 0, r1: r, intensity: s })
+      if (r <= 0 || s === 0) continue
+      // Pull and push samples get their own deterministic colors.
+      const key = s > 0 ? 'effectors:trail' : 'effectors:trail-push'
+      add(key, true, { kind: 'ring', x, y, r0: 0, r1: r, intensity: Math.abs(s) })
     }
-    const trailGroup = groups.get('effectors:trail')
-    if (trailGroup) trailGroup.blend = 'max'
+    for (const key of ['effectors:trail', 'effectors:trail-push']) {
+      const g = groups.get(key)
+      if (g) g.blend = 'max'
+    }
 
     const field = state.field
     if (field && field.length > FIELD_HEADER) {
@@ -306,9 +311,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       }
     }
   }`
-    // The trail field is the MAX of the sample cones along the cursor
+    // The trail field is the MAX-magnitude sample cone along the cursor
     // curve — the strongest sample wins at each point, so overlapping
     // samples form one smooth tapered blob instead of summing into seams.
+    // Positive strength pulls toward the sample, negative pushes away.
     const trailLoop = ({ particleVar, getUniform, getLength }: WgslArgs) => `
   let n_dyn = ${getLength('dynamic')} / ${NODE_STRIDE}u;
   var t_best = 0.0;
@@ -320,17 +326,18 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     let ny = ${getUniform('dynamic', 'base + 1u')};
     let nr = ${getUniform('dynamic', 'base + 2u')};
     let ns = ${getUniform('dynamic', 'base + 3u')};
-    if (nr <= 0.0 || ns <= 0.0) { continue; }
+    if (nr <= 0.0 || ns == 0.0) { continue; }
     let dx = nx - ${particleVar}.position.x;
     let dy = ny - ${particleVar}.position.y;
     let dist2 = dx * dx + dy * dy;
     if (dist2 > 0.0 && dist2 < nr * nr) {
       let dist = sqrt(dist2);
-      let c = ns * (1.0 - dist / nr);
+      let c = abs(ns) * (1.0 - dist / nr);
       if (c > t_best) {
         t_best = c;
-        t_dx = dx / dist;
-        t_dy = dy / dist;
+        let sgn = sign(ns);
+        t_dx = sgn * dx / dist;
+        t_dy = sgn * dy / dist;
       }
     }
   }
@@ -483,7 +490,8 @@ ${namePart(args)}
         applyList(input.data)
         {
           // Trail curve samples (dynamic layout: x,y,radius,strength); the
-          // strongest cone wins, mirroring the WGSL max-field.
+          // strongest-magnitude cone wins, mirroring the WGSL max-field.
+          // Positive strength pulls, negative pushes.
           const dyn = input.dynamic
           if (dyn && dyn.length >= NODE_STRIDE) {
             let best = 0
@@ -492,17 +500,18 @@ ${namePart(args)}
             for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
               const nr = dyn[base + 2]
               const ns = dyn[base + 3]
-              if (nr <= 0 || ns <= 0) continue
+              if (nr <= 0 || ns === 0) continue
               const dx = dyn[base] - px
               const dy = dyn[base + 1] - py
               const dist2 = dx * dx + dy * dy
               if (dist2 <= 0 || dist2 >= nr * nr) continue
               const dist = Math.sqrt(dist2)
-              const c = ns * (1 - dist / nr)
+              const c = Math.abs(ns) * (1 - dist / nr)
               if (c > best) {
                 best = c
-                bx = dx / dist
-                by = dy / dist
+                const sgn = Math.sign(ns)
+                bx = (sgn * dx) / dist
+                by = (sgn * dy) / dist
               }
             }
             if (best > 0) {

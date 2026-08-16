@@ -64,6 +64,20 @@ const TRAIL_BASE_TTL_MS = 900
 const TRAIL_POINT_RANGE_PX = 80
 const TRAIL_MIN_SPACING_PX = 10
 const TRAIL_MAX_POINTS = 32
+
+/** Cursor speed and trackpad pressure modulate the cursor forces. Speed
+ * saturates around SPEED_HALF px/s; analog pressure comes from Safari's
+ * Force Touch events (other browsers only report a binary press). Each
+ * trail point remembers the boosts it was born with. */
+const SPEED_HALF_PX_S = 900
+const SPEED_STRENGTH_GAIN = 1.2
+const SPEED_RADIUS_GAIN = 0.7
+const PRESSURE_STRENGTH_GAIN = 1.6
+const PRESSURE_RADIUS_GAIN = 0.9
+/** Pressed-hard trail points live this much longer (×pressure). */
+const PRESSURE_TTL_GAIN = 2
+/** Drag trail push strength as a fraction of the drag repel setting. */
+const DRAG_TRAIL_SCALE = 0.08
 /** Fixed dynamic-array size: (points+head-1) spans x 3 samples + tail. */
 const TRAIL_NODES_PAD = (TRAIL_MAX_POINTS + 1) * 3 + 2
 
@@ -331,9 +345,26 @@ export function PartyBackground() {
     const frameDts = new Float32Array(120)
     let frameDtIndex = 0
     let lastTickAt = 0
-    let trail: { x: number; y: number; t: number }[] = []
+    /** Trail points remember the speed/pressure boosts and the mode (pull
+     * vs push) they were born with, for as long as they live. */
+    let trail: {
+      x: number
+      y: number
+      t: number
+      sb: number // strength boost at birth
+      rb: number // radius boost at birth
+      press: number // pressure at birth (extends lifetime)
+      push: boolean // captured while dragging: repels instead of pulls
+    }[] = []
     let cursor: { x: number; y: number } | null = null
     let dragging = false
+    let pressure = 0
+    let pressureTarget = 0
+    let webkitForceNorm = 0
+    let cursorSpeed = 0 // EMA, page px/s
+    let lastMoveAt = 0
+    let lastMoveX = 0
+    let lastMoveY = 0
     // Debug overlay layers, cached separately because they invalidate on
     // different events (name geometry vs static physics layout).
     let voroCache: HTMLCanvasElement | null = null
@@ -646,46 +677,67 @@ export function PartyBackground() {
       requestAnimationFrame(syncEffectors)
     }
 
-    /** The cursor pull as one smooth tapered blob: a Catmull-Rom curve
+    /** Saturating cursor-speed fraction (0..1). */
+    const speedNorm = () => cursorSpeed / (cursorSpeed + SPEED_HALF_PX_S)
+    const strengthBoost = () =>
+      1 + speedNorm() * SPEED_STRENGTH_GAIN + pressure * PRESSURE_STRENGTH_GAIN
+    const radiusBoost = () =>
+      1 + speedNorm() * SPEED_RADIUS_GAIN + pressure * PRESSURE_RADIUS_GAIN
+
+    /** The cursor force as one smooth tapered blob: a Catmull-Rom curve
      * through the trail points, sampled densely, each sample a cone whose
-     * radius and strength shrink down the tail. The field takes the MAX
-     * cone at every point, so overlapping samples never seam, and a
-     * stationary cursor is simply the single head cone — no transition in
-     * physics or debug when motion stops. Ages the trail every frame, so
-     * it keeps fading after the cursor leaves the window. Padded to a
-     * fixed length so the module's array offsets stay stable. */
+     * radius and strength shrink down the tail. The field takes the MAX-
+     * magnitude cone at every point, so overlapping samples never seam,
+     * and a stationary cursor is simply the single head cone. Every point
+     * carries the speed/pressure boosts and pull-vs-push mode it was born
+     * with; points born under pressure live longer. Padded to a fixed
+     * length so the module's array offsets stay stable. */
     const trailNodes = (now: number): TrailNode[] => {
       let pathLen = 0
       for (let i = 1; i < trail.length; i++) {
         pathLen += Math.hypot(trail[i].x - trail[i - 1].x, trail[i].y - trail[i - 1].y)
       }
-      // Longer trails expire faster, scaled by the falloff setting.
+      // Longer trails expire faster, scaled by the falloff setting;
+      // points born under trackpad pressure hold on longer.
       const ttl = TRAIL_BASE_TTL_MS / (1 + globals.cursorFalloff * 4 * (pathLen / 600))
-      trail = trail.filter((p) => now - p.t < ttl)
+      trail = trail.filter((p) => now - p.t < ttl * (1 + p.press * PRESSURE_TTL_GAIN))
 
-      const pts: { x: number; y: number; s: number }[] = []
-      if (!dragging && globals.cursorStrength > 0) {
-        const gamma = 0.4 + (1 - globals.trailIntensity) * 2.6
-        const n = trail.length
-        trail.forEach((p, i) => {
-          const fromHead = (n - i) / (n + 1)
-          const fade = Math.max(0, 1 - (now - p.t) / ttl)
-          pts.push({ x: p.x, y: p.y, s: Math.pow(1 - fromHead, gamma) * fade })
+      // Signed per-point strength (pull positive, drag-push negative) and
+      // radius, ready for spline interpolation.
+      const pts: { x: number; y: number; s: number; r: number }[] = []
+      const gamma = 0.4 + (1 - globals.trailIntensity) * 2.6
+      const n = trail.length
+      const baseOf = (push: boolean) =>
+        push ? -globals.dragStrength * DRAG_TRAIL_SCALE : globals.cursorStrength
+      trail.forEach((p, i) => {
+        const fromHead = (n - i) / (n + 1)
+        const pttl = ttl * (1 + p.press * PRESSURE_TTL_GAIN)
+        const fade = Math.max(0, 1 - (now - p.t) / pttl)
+        const f = Math.pow(1 - fromHead, gamma) * fade
+        pts.push({
+          x: p.x,
+          y: p.y,
+          s: baseOf(p.push) * f * p.sb,
+          r: TRAIL_POINT_RANGE_PX * (0.3 + 0.7 * f) * p.rb,
         })
-        if (cursor) pts.push({ x: cursor.x, y: cursor.y, s: 1 })
+      })
+      // The live head: pulls while hovering (the drag head is the
+      // Interaction repel field, which scales with the same boosts).
+      if (cursor && !dragging && globals.cursorStrength > 0) {
+        pts.push({
+          x: cursor.x,
+          y: cursor.y,
+          s: globals.cursorStrength * strengthBoost(),
+          r: TRAIL_POINT_RANGE_PX * radiusBoost(),
+        })
       }
+
       const nodes: TrailNode[] = []
-      const push = (x: number, y: number, s: number) => {
-        // Radius and strength both taper toward the tail.
-        nodes.push({
-          x: x / zoom,
-          y: y / zoom,
-          r: (TRAIL_POINT_RANGE_PX * (0.3 + 0.7 * s)) / zoom,
-          s: globals.cursorStrength * s,
-        })
+      const push = (x: number, y: number, s: number, r: number) => {
+        nodes.push({ x: x / zoom, y: y / zoom, r: r / zoom, s })
       }
       if (pts.length === 1) {
-        push(pts[0].x, pts[0].y, pts[0].s)
+        push(pts[0].x, pts[0].y, pts[0].s, pts[0].r)
       } else if (pts.length > 1) {
         // Catmull-Rom through the points, three samples per span, so the
         // cone chain follows a smooth curve rather than the raw polyline.
@@ -701,11 +753,16 @@ export function PartyBackground() {
             const u3 = u2 * u
             const cr = (a: number, b: number, c: number, d: number) =>
               0.5 * (2 * b + (c - a) * u + (2 * a - 5 * b + 4 * c - d) * u2 + (3 * b - a - 3 * c + d) * u3)
-            push(cr(p0.x, p1.x, p2.x, p3.x), cr(p0.y, p1.y, p2.y, p3.y), p1.s + (p2.s - p1.s) * u)
+            push(
+              cr(p0.x, p1.x, p2.x, p3.x),
+              cr(p0.y, p1.y, p2.y, p3.y),
+              p1.s + (p2.s - p1.s) * u,
+              p1.r + (p2.r - p1.r) * u,
+            )
           }
         }
         const last = pts[pts.length - 1]
-        push(last.x, last.y, last.s)
+        push(last.x, last.y, last.s, last.r)
       }
       while (nodes.length < TRAIL_NODES_PAD) {
         nodes.push({ x: 0, y: 0, r: 0, s: 0 })
@@ -737,11 +794,30 @@ export function PartyBackground() {
           transition = null
         }
       }
+      // Ease the boost inputs every frame so force changes stay continuous:
+      // speed decays toward zero once movement stops, pressure eases toward
+      // its latest reading.
+      const dtF = Math.min(
+        4,
+        Math.max(0.25, frameDts[(frameDtIndex + frameDts.length - 1) % frameDts.length] / 16.7),
+      )
+      if (now - lastMoveAt > 90) cursorSpeed *= Math.pow(0.82, dtF)
+      pressure += (pressureTarget - pressure) * Math.min(1, 0.25 * dtF)
+      // Live pressure/speed scaling of the drag repel field.
+      if (dragging) {
+        interaction.setStrength(globals.dragStrength * strengthBoost())
+        interaction.setRadius(
+          globals.dragRadius * (1 + pressure * PRESSURE_RADIUS_GAIN + speedNorm() * 0.3),
+        )
+      }
       // Only the small dynamic array is written per frame; the static list
-      // stays untouched. Skip entirely when the trail is idle.
-      if (trail.length > 0 || dynamicDirty) {
+      // stays untouched. Skip entirely when the cursor field is idle (the
+      // head keeps animating while its boosts decay).
+      const trailActive =
+        trail.length > 0 || (cursor !== null && (cursorSpeed > 5 || pressure > 0.005))
+      if (trailActive || dynamicDirty) {
         effectors.setDynamic(trailNodes(now))
-        dynamicDirty = trail.length > 0
+        dynamicDirty = trailActive
         if (bridge.debugOn) drawDebug()
       }
       if (now - teleportWindowStart > 1000) {
@@ -1718,37 +1794,73 @@ export function PartyBackground() {
       bridge.setRuntime = () => {}
     })
 
-    // While pressed the pointer is the classic repel field; released, it is
-    // an attractor with a fading trail.
+    // While pressed the pointer is the classic repel field (leaving a
+    // pushing trail); released, it is an attractor with a pulling trail.
+    // Both scale with cursor speed and trackpad pressure.
     const isInteractive = (target: EventTarget | null) =>
       target instanceof Element && target.closest('a, button, input, select, .settings-panel')
+    const updatePressureFromPointer = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse') {
+        // Chrome reports a constant 0.5 while any button is held and 0 on
+        // hover; Safari's Force Touch events below supply the analog value.
+        if (webkitForceNorm > 0) pressureTarget = webkitForceNorm
+        else pressureTarget = e.buttons > 0 ? 0.35 : 0
+      } else {
+        pressureTarget = e.pressure
+      }
+    }
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0 || isInteractive(e.target)) return
       dragging = true
-      trail = []
       dynamicDirty = true
+      updatePressureFromPointer(e)
       const { x, y } = pageToWorld(e.pageX, e.pageY)
       interaction.setPosition(x, y)
       interaction.setActive(true)
     }
     const onPointerMove = (e: PointerEvent) => {
+      const now = performance.now()
+      if (lastMoveAt > 0) {
+        const dt = now - lastMoveAt
+        if (dt > 0) {
+          const v = (Math.hypot(e.pageX - lastMoveX, e.pageY - lastMoveY) / dt) * 1000
+          cursorSpeed += (v - cursorSpeed) * Math.min(1, dt / 120)
+        }
+      }
+      lastMoveAt = now
+      lastMoveX = e.pageX
+      lastMoveY = e.pageY
+      updatePressureFromPointer(e)
       cursor = { x: e.pageX, y: e.pageY }
       dynamicDirty = true
       if (dragging) {
         const { x, y } = pageToWorld(e.pageX, e.pageY)
         interaction.setPosition(x, y)
         interaction.setActive(true)
-        return
       }
+      // The trail collects in both modes; points remember their boosts and
+      // whether they push (drag) or pull (hover).
       const last = trail[trail.length - 1]
       if (!last || Math.hypot(e.pageX - last.x, e.pageY - last.y) >= TRAIL_MIN_SPACING_PX) {
-        trail.push({ x: e.pageX, y: e.pageY, t: performance.now() })
+        trail.push({
+          x: e.pageX,
+          y: e.pageY,
+          t: now,
+          sb: strengthBoost(),
+          rb: radiusBoost(),
+          press: pressure,
+          push: dragging,
+        })
         if (trail.length > TRAIL_MAX_POINTS) trail.shift()
       }
     }
     const stopDrag = () => {
       dragging = false
       interaction.setActive(false)
+      // Restore the unboosted drag field for the next press.
+      interaction.setStrength(globals.dragStrength)
+      interaction.setRadius(globals.dragRadius)
+      pressureTarget = webkitForceNorm
       // One more dynamic-viz redraw so the interaction ring clears.
       dynamicDirty = true
     }
@@ -1757,16 +1869,30 @@ export function PartyBackground() {
       cursor = null
       dynamicDirty = true
     }
+    // Safari reports analog Force Touch pressure through these events;
+    // everywhere else pressure stays the binary press fallback.
+    const onForceChanged = (e: Event) => {
+      const f = (e as MouseEvent & { webkitForce?: number }).webkitForce ?? 0
+      webkitForceNorm = Math.min(1, Math.max(0, (f - 1) / 1.5))
+      if (webkitForceNorm > 0) pressureTarget = webkitForceNorm
+    }
+    const onForceUp = () => {
+      webkitForceNorm = 0
+    }
     window.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', stopDrag)
     window.addEventListener('pointercancel', stopDrag)
+    window.addEventListener('webkitmouseforcechanged', onForceChanged)
+    window.addEventListener('webkitmouseforceup', onForceUp)
     document.documentElement.addEventListener('pointerleave', onLeaveWindow)
     cleanups.push(() => {
       window.removeEventListener('pointerdown', onPointerDown)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', stopDrag)
       window.removeEventListener('pointercancel', stopDrag)
+      window.removeEventListener('webkitmouseforcechanged', onForceChanged)
+      window.removeEventListener('webkitmouseforceup', onForceUp)
       document.documentElement.removeEventListener('pointerleave', onLeaveWindow)
     })
 
