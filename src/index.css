@@ -42,7 +42,7 @@ body {
 h1,
 h2,
 h3 {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   margin: 0;
 }
 
@@ -315,7 +315,6 @@ a:visited {
 }
 
 .settings-title {
-  font-family: var(--font-sans);
   font-size: 16px;
   color: var(--faint);
   margin-bottom: 10px;

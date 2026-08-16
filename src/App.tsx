@@ -51,6 +51,12 @@ function useGlitchText() {
 
     const run = (el: HTMLElement, st: GlitchState) => {
       const tick = () => {
+        // A missed pointerout (window blur, layout shifts) must never leave
+        // a character cycling forever: trust the live :hover state.
+        if (st.hovering && !el.matches(':hover')) {
+          st.hovering = false
+          st.leftAt = Date.now()
+        }
         if (st.hovering) {
           el.textContent = randChar()
           st.timer = window.setTimeout(tick, 100)

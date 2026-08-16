@@ -35,7 +35,6 @@ const MAX_CANVAS_HEIGHT = 8_000
 const PANEL_RANGE_PX = 6
 const BOX_CORNER_PX = 6
 const SEPARATOR_RANGE_PX = 90
-const SEPARATOR_HALF_H_PX = 2
 const SPAWN_SPREAD_PX = 60
 const SPAWN_SPEED = 100
 const TRAIL_BASE_TTL_MS = 900
@@ -61,8 +60,14 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameDensity: 30,
   nameDensityRes: 36,
 }
-const DENSITY_INTERVAL_MS = 400
-const DENSITY_TELEPORT_BUDGET = 250
+// Continuous trickle: as fast as GPU readbacks complete, small batches per
+// pass, so density stays satisfied without visible pulses.
+const DENSITY_INTERVAL_MS = 50
+const DENSITY_TELEPORT_BUDGET = 40
+/** Distance-field raster resolution in page px per cell. */
+const FIELD_CELL_PX = 3
+const FIELD_MARGIN_PX = 60
+const FIELD_FALLOFF_PX = 36
 
 function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
@@ -151,6 +156,54 @@ function collectCharBalls(): CharBall[] {
   return balls
 }
 
+/** Felzenszwalb 1D squared distance transform, applied in place. */
+function edt1d(f: Float32Array, n: number, out: Float32Array) {
+  const v = new Int32Array(n)
+  const z = new Float32Array(n + 1)
+  let k = 0
+  v[0] = 0
+  z[0] = -Infinity
+  z[1] = Infinity
+  for (let q = 1; q < n; q++) {
+    let s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k])
+    while (s <= z[k]) {
+      k--
+      s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k])
+    }
+    k++
+    v[k] = q
+    z[k] = s
+    z[k + 1] = Infinity
+  }
+  k = 0
+  for (let q = 0; q < n; q++) {
+    while (z[k + 1] < q) k++
+    const dq = q - v[k]
+    out[q] = dq * dq + f[v[k]]
+  }
+}
+
+/** 2D Euclidean distance (in cells) to the nearest true cell of `mask`. */
+function edt2d(mask: Uint8Array, cols: number, rows: number): Float32Array {
+  const INF = 1e12
+  const g = new Float32Array(cols * rows)
+  const col = new Float32Array(rows)
+  const out = new Float32Array(rows)
+  for (let x = 0; x < cols; x++) {
+    for (let y = 0; y < rows; y++) col[y] = mask[y * cols + x] ? 0 : INF
+    edt1d(col, rows, out)
+    for (let y = 0; y < rows; y++) g[y * cols + x] = out[y]
+  }
+  const row = new Float32Array(cols)
+  const rowOut = new Float32Array(cols)
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) row[x] = g[y * cols + x]
+    edt1d(row, cols, rowOut)
+    for (let x = 0; x < cols; x++) g[y * cols + x] = Math.sqrt(rowOut[x])
+  }
+  return g
+}
+
 const easeInOutCubic = (p: number) =>
   p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2
 
@@ -211,13 +264,6 @@ export function PartyBackground() {
 
     const nameFontStack = () => NAME_FONTS[globals.nameFont]?.stack ?? NAME_FONTS[0].stack
     const pageToWorld = (px: number, py: number) => ({ x: px / zoom, y: py / zoom })
-    const kernelRadius = (b: CharBall) => (b.r + globals.textPadding) * globals.textSmoothing
-    // Iso threshold so an isolated ball's surface sits at r + padding.
-    const isoThreshold = () => {
-      const k = Math.max(1.05, globals.textSmoothing)
-      const q = 1 - 1 / (k * k)
-      return q * q
-    }
 
     const toPageRect = (r: DOMRect) => ({
       x: r.left + window.scrollX,
@@ -226,45 +272,123 @@ export function PartyBackground() {
       h: r.height,
     })
 
-    /** Renders the merged metaball field once into an offscreen layer. */
+    interface TextField {
+      /** Page-space origin and cell size of the distance grid. */
+      minX: number
+      minY: number
+      cell: number
+      cols: number
+      rows: number
+      /** Distances in page px, negative inside the closed text shape. */
+      d: Float32Array
+    }
+    let textField: TextField | null = null
+
+    // Rasterizes the real vector glyphs of every content character, closes
+    // the shape morphologically (dilate+erode) so pockets between lines fill
+    // in, and derives a signed distance field. The blob-smoothing setting is
+    // the closing radius.
+    const buildTextField = () => {
+      textField = null
+      const spans = [...document.querySelectorAll<HTMLElement>('main .g')]
+      if (spans.length === 0) {
+        effectors.setField(null)
+        return
+      }
+      const rects = spans.map((el) => toPageRect(el.getBoundingClientRect()))
+      const minX = Math.min(...rects.map((r) => r.x)) - FIELD_MARGIN_PX
+      const minY = Math.min(...rects.map((r) => r.y)) - FIELD_MARGIN_PX
+      const maxX = Math.max(...rects.map((r) => r.x + r.w)) + FIELD_MARGIN_PX
+      const maxY = Math.max(...rects.map((r) => r.y + r.h)) + FIELD_MARGIN_PX
+      const cell = FIELD_CELL_PX
+      const cols = Math.ceil((maxX - minX) / cell)
+      const rows = Math.ceil((maxY - minY) / cell)
+      if (cols < 4 || rows < 4 || cols * rows > 2_000_000) return
+
+      const raster = document.createElement('canvas')
+      raster.width = cols
+      raster.height = rows
+      const ctx = raster.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return
+      ctx.setTransform(1 / cell, 0, 0, 1 / cell, -minX / cell, -minY / cell)
+      ctx.fillStyle = '#fff'
+      ctx.textBaseline = 'top'
+      const fontCache = new Map<Element, string>()
+      spans.forEach((el, i) => {
+        const parent = el.parentElement
+        if (!parent) return
+        let font = fontCache.get(parent)
+        if (!font) {
+          font = getComputedStyle(parent).font
+          fontCache.set(parent, font)
+        }
+        ctx.font = font
+        ctx.fillText(el.textContent ?? '', rects[i].x, rects[i].y)
+      })
+      const alpha = ctx.getImageData(0, 0, cols, rows).data
+      const mask = new Uint8Array(cols * rows)
+      for (let i = 0; i < mask.length; i++) mask[i] = alpha[i * 4 + 3] > 64 ? 1 : 0
+
+      // Morphological closing in cell units fills pockets between lines.
+      const rc = Math.max(1, ((3 + globals.textSmoothing * 5) / cell) * 1.5)
+      const distToText = edt2d(mask, cols, rows)
+      const dilated = new Uint8Array(cols * rows)
+      for (let i = 0; i < dilated.length; i++) dilated[i] = distToText[i] <= rc ? 1 : 0
+      const inverseDilated = new Uint8Array(cols * rows)
+      for (let i = 0; i < dilated.length; i++) inverseDilated[i] = dilated[i] ? 0 : 1
+      const distToOutside = edt2d(inverseDilated, cols, rows)
+      const closed = new Uint8Array(cols * rows)
+      for (let i = 0; i < closed.length; i++) closed[i] = distToOutside[i] > rc ? 1 : 0
+
+      const inverseClosed = new Uint8Array(cols * rows)
+      for (let i = 0; i < closed.length; i++) inverseClosed[i] = closed[i] ? 0 : 1
+      const outerDist = edt2d(closed, cols, rows)
+      const innerDist = edt2d(inverseClosed, cols, rows)
+      const d = new Float32Array(cols * rows)
+      for (let i = 0; i < d.length; i++) {
+        d[i] = (closed[i] ? -innerDist[i] : outerDist[i]) * cell
+      }
+      textField = { minX, minY, cell, cols, rows, d }
+      pushField()
+    }
+
+    /** Uploads the field with the current strength/padding header. */
+    const pushField = () => {
+      if (!textField) {
+        effectors.setField(null)
+        return
+      }
+      const world = new Float32Array(textField.d.length)
+      for (let i = 0; i < world.length; i++) world[i] = textField.d[i] / zoom
+      effectors.setField({
+        originX: textField.minX / zoom,
+        originY: textField.minY / zoom,
+        cell: textField.cell / zoom,
+        cols: textField.cols,
+        rows: textField.rows,
+        strength: globals.boxAttraction,
+        padding: globals.textPadding / zoom,
+        falloff: FIELD_FALLOFF_PX / zoom,
+        distances: world,
+      })
+    }
+
+    /** Renders the closed text shape (field < padding) into a cached layer. */
     const renderBlobCache = () => {
       blobCacheDirty = false
       if (!blobCache) blobCache = document.createElement('canvas')
       blobCache.width = debugCanvas.width
       blobCache.height = debugCanvas.height
       const ctx = blobCache.getContext('2d')
-      if (!ctx || charBalls.length === 0) return
+      if (!ctx || !textField) return
       ctx.fillStyle = 'rgba(220, 40, 40, 0.22)'
-      const iso = isoThreshold()
-      const sorted = [...charBalls].sort((a, b) => a.y - b.y)
-      const maxR = Math.max(...sorted.map(kernelRadius))
-      const minX = Math.min(...sorted.map((b) => b.x - kernelRadius(b)))
-      const maxX = Math.max(...sorted.map((b) => b.x + kernelRadius(b)))
-      const minY = sorted[0].y - maxR
-      const maxY = sorted[sorted.length - 1].y + maxR
-      const G = 3
-      let lo = 0
-      for (let y = minY; y <= maxY && y < blobCache.height; y += G) {
-        while (lo < sorted.length && sorted[lo].y < y - maxR) lo++
-        const row: { x: number; y: number; R2: number }[] = []
-        for (let i = lo; i < sorted.length && sorted[i].y <= y + maxR; i++) {
-          const R = kernelRadius(sorted[i])
-          if (Math.abs(sorted[i].y - y) <= R) row.push({ x: sorted[i].x, y: sorted[i].y, R2: R * R })
-        }
-        if (row.length === 0) continue
-        for (let x = minX; x <= maxX; x += G) {
-          let S = 0
-          for (const b of row) {
-            const dx = x - b.x
-            const dy = y - b.y
-            const d2 = dx * dx + dy * dy
-            if (d2 < b.R2) {
-              const q = 1 - d2 / b.R2
-              S += q * q
-              if (S > iso) break
-            }
+      const { minX, minY, cell, cols, rows, d } = textField
+      const pad = globals.textPadding
+      for (let gy = 0; gy < rows; gy++) {
+        for (let gx = 0; gx < cols; gx++) {
+          if (d[gy * cols + gx] < pad) {
+            ctx.fillRect(minX + gx * cell, minY + gy * cell, cell, cell)
           }
-          if (S > iso) ctx.fillRect(x, y, G, G)
         }
       }
     }
@@ -274,28 +398,70 @@ export function PartyBackground() {
       if (!dctx) return
       dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
       if (!bridge.debugOn || !name) return
+      // Red: the closed text exclusion shape.
       if (blobCacheDirty) renderBlobCache()
       if (blobCache) dctx.drawImage(blobCache, 0, 0)
       dctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
       dctx.lineWidth = 1
-      // Name: outline of the type the attractor points were sampled from.
+      // Red outline: the type the name attractor points were sampled from.
       dctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
       dctx.textBaseline = 'top'
       NAME_LINES.forEach((text, i) => {
         dctx.strokeText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
       })
-      // Voronoi seeds of the name-density cells.
+      // Blue: Voronoi divisions and seeds of the name-density cells.
+      dctx.strokeStyle = 'rgba(40, 90, 220, 0.7)'
+      if (glyphGrid) {
+        const { minX, minY, cols, rows, step, cellOf } = glyphGrid
+        dctx.beginPath()
+        for (let gy = 0; gy < rows; gy++) {
+          for (let gx = 0; gx < cols; gx++) {
+            const c = cellOf[gy * cols + gx]
+            if (c < 0) continue
+            const right = gx + 1 < cols ? cellOf[gy * cols + gx + 1] : -1
+            const below = gy + 1 < rows ? cellOf[(gy + 1) * cols + gx] : -1
+            const x = minX + gx * step
+            const y = minY + gy * step
+            if (right >= 0 && right !== c) {
+              dctx.moveTo(x + step, y)
+              dctx.lineTo(x + step, y + step)
+            }
+            if (below >= 0 && below !== c) {
+              dctx.moveTo(x, y + step)
+              dctx.lineTo(x + step, y + step)
+            }
+          }
+        }
+        dctx.stroke()
+      }
       dctx.fillStyle = 'rgba(40, 90, 220, 0.8)'
       for (const s of voroSeeds) {
         dctx.fillRect(s.x - 1.5, s.y - 1.5, 3, 3)
       }
-      // Separator lines and the settings panel.
+      // Green: the cursor attraction trail.
+      dctx.strokeStyle = 'rgba(30, 160, 60, 0.7)'
+      for (const p of trail) {
+        dctx.beginPath()
+        dctx.arc(p.x, p.y, TRAIL_POINT_RANGE_PX / 3, 0, Math.PI * 2)
+        dctx.stroke()
+      }
+      if (cursor && !dragging) {
+        dctx.beginPath()
+        dctx.arc(cursor.x, cursor.y, TRAIL_POINT_RANGE_PX / 2, 0, Math.PI * 2)
+        dctx.stroke()
+      }
+      // Purple: separator attractor lines; orange: the settings panel box.
       for (const t of getTargets()) {
         const r = toPageRect(t.el.getBoundingClientRect())
         if (r.w === 0) continue
         if (t.kind === 'separator') {
-          dctx.strokeRect(r.x, r.y + r.h / 2 - SEPARATOR_HALF_H_PX, r.w, SEPARATOR_HALF_H_PX * 2)
+          dctx.strokeStyle = 'rgba(140, 60, 200, 0.8)'
+          dctx.beginPath()
+          dctx.moveTo(r.x, r.y + r.h / 2)
+          dctx.lineTo(r.x + r.w, r.y + r.h / 2)
+          dctx.stroke()
         } else {
+          dctx.strokeStyle = 'rgba(230, 130, 30, 0.8)'
           const pad = PANEL_RANGE_PX
           dctx.beginPath()
           dctx.roundRect(r.x - pad, r.y - pad, r.w + pad * 2, r.h + pad * 2, BOX_CORNER_PX + pad)
@@ -318,31 +484,19 @@ export function PartyBackground() {
         halfH: 0,
         strength: globals.nameAttraction,
       }))
-      const iso = isoThreshold()
-      for (const b of charBalls) {
-        list.push({
-          shape: 'ball',
-          mode: 'repel',
-          x: b.x / zoom,
-          y: b.y / zoom,
-          range: kernelRadius(b) / zoom,
-          halfW: iso,
-          halfH: 0,
-          strength: globals.boxAttraction,
-        })
-      }
       for (const t of getTargets()) {
         const r = toPageRect(t.el.getBoundingClientRect())
         if (r.w === 0 && r.h === 0) continue
         if (t.kind === 'separator') {
+          // A genuine line: the pill kernel attracts to a segment.
           list.push({
-            shape: 'rect',
+            shape: 'pill',
             mode: 'attract',
             x: (r.x + r.w / 2) / zoom,
             y: (r.y + r.h / 2) / zoom,
             range: SEPARATOR_RANGE_PX / zoom,
             halfW: r.w / 2 / zoom,
-            halfH: SEPARATOR_HALF_H_PX / zoom,
+            halfH: 0,
             strength: globals.separatorAttraction,
           })
         } else {
@@ -428,6 +582,7 @@ export function PartyBackground() {
       }
       if (cursor || trail.length > 0) {
         effectors.set([...staticEffectors, ...cursorEffectors(now)])
+        if (bridge.debugOn) drawDebug()
       }
       enforceDensity(now)
     }
@@ -597,6 +752,7 @@ export function PartyBackground() {
 
     const measureContent = () => {
       charBalls = collectCharBalls()
+      buildTextField()
       blobCacheDirty = true
     }
 
@@ -730,7 +886,12 @@ export function PartyBackground() {
         blobCacheDirty = true
         scheduleSync()
       } else if (key === 'modeDuration') scheduleNextDemo()
-      else if (key === 'textPadding' || key === 'textSmoothing') {
+      else if (key === 'textPadding' || key === 'boxAttraction') {
+        pushField()
+        blobCacheDirty = true
+        scheduleSync()
+      } else if (key === 'textSmoothing') {
+        buildTextField()
         blobCacheDirty = true
         scheduleSync()
       } else if (key === 'nameDensityRes') {
