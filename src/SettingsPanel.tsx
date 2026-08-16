@@ -97,6 +97,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffectorTarget('settings-panel', 'panel', ref)
   const [values, setValues] = useState<ModeSettings | null>(bridge.getCurrentSettings)
+  const [oscs, setOscs] = useState<Partial<Record<ModeSettingKey, { min: number; max: number }>>>(
+    bridge.getModeOscillators,
+  )
   const [globals, setGlobals] = useState<GlobalSettings | null>(bridge.getGlobals)
   const [modes, setModes] = useState<boolean[]>(() => [...bridge.enabledModes])
   const [modeIndex, setModeIndex] = useState(0)
@@ -113,6 +116,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       setAutoResolved(bridge.autoResolved)
       setGlobals(bridge.getGlobals())
       setValues(bridge.getCurrentSettings())
+      setOscs(bridge.getModeOscillators())
     }
     window.addEventListener('party:runtime', onRuntime)
     return () => window.removeEventListener('party:runtime', onRuntime)
@@ -124,6 +128,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     const onDemo = (e: Event) => {
       setModeIndex((e as CustomEvent<number>).detail)
       setValues(bridge.getCurrentSettings())
+      setOscs(bridge.getModeOscillators())
     }
     window.addEventListener('party:demo', onDemo)
     return () => window.removeEventListener('party:demo', onDemo)
@@ -215,6 +220,62 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           s.group && s.group !== MODE_SLIDERS[i - 1]?.group ? (
             <div className="settings-group">{s.group}</div>
           ) : null
+        // Positions of a value's knob center along the track travel span.
+        const frac = (v: number) => (Math.min(Math.max(v, s.min), s.max) - s.min) / (s.max - s.min)
+        const stop = (v: number) => `calc((100% - ${THUMB_W}px) * ${frac(v)} + ${THUMB_W / 2}px)`
+        const osc = oscs[s.key]
+        if (osc) {
+          // Preset-oscillated param: a range slider tuning the swing's
+          // min/max; the live ghost dances between the two knobs.
+          const setRange = (lo: number, hi: number) => {
+            bridge.applyOscRange(s.key, lo, hi)
+            setOscs((prev) => ({ ...prev, [s.key]: { min: lo, max: hi } }))
+          }
+          return (
+            <Fragment key={s.key}>
+              {groupHead}
+              <label className="settings-row">
+                <span>{s.label}</span>
+                <span className="settings-value">
+                  {fmt(osc.min)}–{fmt(osc.max)}
+                </span>
+                <span className="slider-wrap range">
+                  <span
+                    className="slider-track"
+                    style={{
+                      backgroundImage: `linear-gradient(to right, #ececec ${stop(osc.min)}, #000 0, #000 ${stop(osc.max)}, #ececec 0)`,
+                    }}
+                  />
+                  <span className="slider-live" data-key={s.key} style={{ visibility: 'hidden' }} />
+                  <input
+                    type="range"
+                    aria-label={`${s.label} minimum`}
+                    min={s.min}
+                    max={s.max}
+                    step={s.step}
+                    value={osc.min}
+                    onChange={(e) => {
+                      const v = Math.min(Number(e.target.value), osc.max)
+                      setRange(v, osc.max)
+                    }}
+                  />
+                  <input
+                    type="range"
+                    aria-label={`${s.label} maximum`}
+                    min={s.min}
+                    max={s.max}
+                    step={s.step}
+                    value={osc.max}
+                    onChange={(e) => {
+                      const v = Math.max(Number(e.target.value), osc.min)
+                      setRange(osc.min, v)
+                    }}
+                  />
+                </span>
+              </label>
+            </Fragment>
+          )
+        }
         return (
           <Fragment key={s.key}>
             {groupHead}
@@ -228,9 +289,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                 // stylesheet's background-clip and bleed the fill under the
                 // border at the rounded caps.
                 style={{
-                  backgroundImage: `linear-gradient(to right, #000 calc((100% - ${THUMB_W}px) * ${
-                    (Math.min(Math.max(values[s.key], s.min), s.max) - s.min) / (s.max - s.min)
-                  } + ${THUMB_W / 2}px), #ececec 0)`,
+                  backgroundImage: `linear-gradient(to right, #000 ${stop(values[s.key])}, #ececec 0)`,
                 }}
               />
               <span className="slider-live" data-key={s.key} style={{ visibility: 'hidden' }} />

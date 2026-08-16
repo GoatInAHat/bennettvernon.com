@@ -280,6 +280,8 @@ export function PartyBackground() {
     let syncScheduled = false
     const globals: GlobalSettings = { ...GLOBAL_DEFAULTS, dragRadius: isMobile() ? 350 : 400 }
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
+    /** Per-mode user retunes of preset oscillator swings (range sliders). */
+    const oscOverrides: Partial<Record<number, Record<string, { min: number; max: number }>>> = {}
     const currentParams: Record<string, number> = {}
     let transition: {
       from: Record<string, number>
@@ -1717,10 +1719,18 @@ export function PartyBackground() {
           (modeOverrides as Record<string, number | undefined>)[def.key] ??
           def.from(preset, isMobile())
       }
-      // User-overridden params stay static; their preset oscillator is dropped.
+      // User-overridden params stay static; their preset oscillator is
+      // dropped. Range-slider retunes replace the oscillator's swing.
       const osc = presetOscillators(preset).filter(
         (o) => (modeOverrides as Record<string, number | undefined>)[o.key] === undefined,
       )
+      for (const o of osc) {
+        const ov = oscOverrides[index]?.[o.key]
+        if (ov) {
+          o.min = ov.min
+          o.max = ov.max
+        }
+      }
       const ms = instant ? 0 : globals.transitionLength * 1000
       if (ms <= 0 || !discreteNow) {
         applyDiscrete(engine, mods, next, { isWebGPU: webgpu })
@@ -1769,6 +1779,30 @@ export function PartyBackground() {
         transition.osc = transition.osc.filter((o) => o.key !== key)
       }
       activeOsc = activeOsc.filter((o) => o.key !== key)
+    }
+    bridge.getModeOscillators = () => {
+      const preset = DEMO_PRESETS[demoIndex]
+      const modeOverrides = (overrides[demoIndex] ?? {}) as Record<string, number | undefined>
+      const out: Partial<Record<ModeSettingKey, { min: number; max: number }>> = {}
+      for (const o of presetOscillators(preset)) {
+        if (modeOverrides[o.key] !== undefined) continue
+        const ov = oscOverrides[demoIndex]?.[o.key]
+        out[o.key as ModeSettingKey] = { min: ov?.min ?? o.min, max: ov?.max ?? o.max }
+      }
+      return out
+    }
+    bridge.applyOscRange = (key: ModeSettingKey, min: number, max: number) => {
+      oscOverrides[demoIndex] = { ...oscOverrides[demoIndex], [key]: { min, max } }
+      // Live retune: the transition's osc list and activeOsc share entry
+      // objects, so mutating both collections covers every phase.
+      for (const list of [activeOsc, transition?.osc ?? []]) {
+        for (const o of list) {
+          if (o.key === key) {
+            o.min = min
+            o.max = max
+          }
+        }
+      }
     }
     bridge.getCurrentSettings = () => getSettings(demoIndex)
     bridge.getLiveSettings = () => ({ ...currentParams }) as Partial<ModeSettings>
@@ -1837,7 +1871,18 @@ export function PartyBackground() {
         debugView: bridge.debugOn,
         runtime: bridge.runtimePref,
       },
-      modes: Object.fromEntries(DEMO_PRESETS.map((p, i) => [p.session.name, getSettings(i)])),
+      modes: Object.fromEntries(
+        DEMO_PRESETS.map((p, i) => {
+          const modeOverrides = (overrides[i] ?? {}) as Record<string, number | undefined>
+          const oscillators: Record<string, { min: number; max: number }> = {}
+          for (const o of presetOscillators(p)) {
+            if (modeOverrides[o.key] !== undefined) continue
+            const ov = oscOverrides[i]?.[o.key]
+            oscillators[o.key] = { min: ov?.min ?? o.min, max: ov?.max ?? o.max }
+          }
+          return [p.session.name, { ...getSettings(i), oscillators }]
+        }),
+      ),
     })
     bridge.setDebug = (on) => {
       bridge.debugOn = on

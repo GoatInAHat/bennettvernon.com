@@ -35,21 +35,24 @@ export function vizRgb(key: string): [number, number, number] {
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
 }
 
-/** Max intensity per group, for relative alpha scaling. */
-function groupScale(g: VizGroup): number {
-  let max = 0
-  for (const p of g.primitives) {
-    if (p.kind === 'capsule') max = Math.max(max, Math.abs(p.i1), Math.abs(p.i2))
-    else max = Math.max(max, Math.abs(p.intensity))
-  }
-  return max > 0 ? max : 1
+/** Absolute force magnitude -> gradient alpha. Log-mapped so the system's
+ * wildly different strengths (hundreds to hundreds of thousands) all stay
+ * legible while still ordering by strength; the strongest point of every
+ * gradient carries its force's true mapped opacity, and weak sources render
+ * genuinely fainter (no more per-group normalization that promoted every
+ * group's strongest primitive to the same peak). */
+const ALPHA_REF = 200_000
+const ALPHA_PEAK = 0.35
+export function vizAlpha(intensity: number): number {
+  if (!intensity) return 0
+  const a = Math.log10(1 + Math.abs(intensity)) / Math.log10(1 + ALPHA_REF)
+  return ALPHA_PEAK * Math.min(1, a)
 }
 
 function drawRing(
   ctx: CanvasRenderingContext2D,
   key: string,
   p: Extract<VizPrimitive, { kind: 'ring' }>,
-  norm: number,
   zoom: number,
   gradientOnly = false,
 ) {
@@ -59,8 +62,11 @@ function drawRing(
   const r1 = p.r1 * zoom
   if (r1 <= 0) return
   const grad = ctx.createRadialGradient(x, y, Math.max(r0, 0), x, y, r1)
-  grad.addColorStop(0, vizCss(key, 0.3 * norm))
-  grad.addColorStop(1, vizCss(key, 0))
+  // Multi-stop so the alpha tracks vizAlpha of the true local force
+  // strength * (1 - d/range) instead of a linear fade.
+  for (let t = 0; t <= 1; t += 0.25) {
+    grad.addColorStop(t, vizCss(key, vizAlpha(p.intensity * (1 - t))))
+  }
   ctx.fillStyle = grad
   ctx.beginPath()
   ctx.arc(x, y, r1, 0, Math.PI * 2)
@@ -69,7 +75,7 @@ function drawRing(
   // union gradient IS the geometry, so per-sample outlines are just noise.
   if (gradientOnly) return
   // Body geometry (a dot for point sources) and the range limit.
-  ctx.fillStyle = vizCss(key, Math.min(1, 0.5 + 0.5 * norm))
+  ctx.fillStyle = vizCss(key, Math.min(1, 0.55 + vizAlpha(p.intensity)))
   ctx.strokeStyle = ctx.fillStyle
   ctx.lineWidth = 1
   if (r0 >= 1) {
@@ -91,7 +97,6 @@ function drawCapsule(
   ctx: CanvasRenderingContext2D,
   key: string,
   p: Extract<VizPrimitive, { kind: 'capsule' }>,
-  norm: number,
   zoom: number,
 ) {
   const x1 = p.x1 * zoom
@@ -99,26 +104,26 @@ function drawCapsule(
   const x2 = p.x2 * zoom
   const y2 = p.y2 * zoom
   const r = p.range * zoom
-  const i1 = Math.abs(p.i1) * norm
-  const i2 = Math.abs(p.i2) * norm
+  const i1 = Math.abs(p.i1)
+  const i2 = Math.abs(p.i2)
   const len = Math.hypot(x2 - x1, y2 - y1)
   if (len < 0.5) {
-    drawRing(ctx, key, { kind: 'ring', x: p.x1, y: p.y1, r0: 0, r1: p.range, intensity: Math.max(i1, i2) / (norm || 1) }, Math.max(i1, i2), zoom)
+    drawRing(ctx, key, { kind: 'ring', x: p.x1, y: p.y1, r0: 0, r1: p.range, intensity: Math.max(i1, i2) }, zoom)
     return
   }
   const mid = (i1 + i2) / 2
   const ang0 = Math.atan2(y2 - y1, x2 - x1)
   // Exact capsule falloff: the distance field of a segment is a
   // perpendicular linear ramp along the middle slab plus radial ramps
-  // around the end caps — rendered with real gradients, matching the
-  // shader's strength * (1 - dist / range).
+  // around the end caps — alpha tracks vizAlpha of the shader's true
+  // strength * (1 - dist / range).
   ctx.save()
   ctx.translate(x1, y1)
   ctx.rotate(ang0)
   const slab = ctx.createLinearGradient(0, -r, 0, r)
-  slab.addColorStop(0, vizCss(key, 0))
-  slab.addColorStop(0.5, vizCss(key, 0.3 * mid))
-  slab.addColorStop(1, vizCss(key, 0))
+  for (let t = 0; t <= 1; t += 0.125) {
+    slab.addColorStop(t, vizCss(key, vizAlpha(mid * (1 - Math.abs(2 * t - 1)))))
+  }
   ctx.fillStyle = slab
   ctx.fillRect(0, -r, len, r * 2)
   const cap = (cxo: number, intensity: number, side: -1 | 1) => {
@@ -127,8 +132,9 @@ function drawCapsule(
     ctx.rect(side < 0 ? cxo - r : cxo, -r, r, r * 2)
     ctx.clip()
     const g = ctx.createRadialGradient(cxo, 0, 0, cxo, 0, r)
-    g.addColorStop(0, vizCss(key, 0.3 * intensity))
-    g.addColorStop(1, vizCss(key, 0))
+    for (let t = 0; t <= 1; t += 0.25) {
+      g.addColorStop(t, vizCss(key, vizAlpha(intensity * (1 - t))))
+    }
     ctx.fillStyle = g
     ctx.fillRect(cxo - r, -r, r * 2, r * 2)
     ctx.restore()
@@ -143,7 +149,7 @@ function drawCapsule(
   const nx = -(y2 - y1) / len
   const ny = (x2 - x1) / len
   const ang = Math.atan2(y2 - y1, x2 - x1)
-  ctx.strokeStyle = vizCss(key, 0.22 * Math.min(1, mid + 0.3))
+  ctx.strokeStyle = vizCss(key, 0.22)
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(x1 + nx * r, y1 + ny * r)
@@ -159,7 +165,6 @@ function drawRectRing(
   ctx: CanvasRenderingContext2D,
   key: string,
   p: Extract<VizPrimitive, { kind: 'rectRing' }>,
-  norm: number,
   zoom: number,
 ) {
   const x = p.x * zoom
@@ -173,7 +178,7 @@ function drawRectRing(
   const steps = 6
   for (let k = 1; k < steps; k++) {
     const o = (k / steps) * r
-    ctx.strokeStyle = vizCss(key, 0.3 * norm * (1 - k / steps))
+    ctx.strokeStyle = vizCss(key, vizAlpha(p.intensity * (1 - k / steps)))
     ctx.lineWidth = Math.max(1, r / steps)
     ctx.beginPath()
     ctx.roundRect(x - hw - o, y - hh - o, (hw + o) * 2, (hh + o) * 2, o)
@@ -181,7 +186,7 @@ function drawRectRing(
   }
   // Body geometry and range limit.
   ctx.lineWidth = 1
-  ctx.strokeStyle = vizCss(key, Math.min(1, 0.5 + 0.5 * norm))
+  ctx.strokeStyle = vizCss(key, Math.min(1, 0.55 + vizAlpha(p.intensity)))
   ctx.strokeRect(x - hw, y - hh, hw * 2, hh * 2)
   ctx.strokeStyle = vizCss(key, 0.22)
   ctx.beginPath()
@@ -284,8 +289,8 @@ function drawField(
   for (let i = 0; i < cols * rows; i++) {
     const d = Number(p.values[p.valuesStart + i])
     let a = 0
-    if (d < p.inner) a = 0.3 * innerScale
-    else if (d < p.outer) a = 0.3 * Math.pow(1 - (d - p.inner) / band, exponent)
+    if (d < p.inner) a = vizAlpha(p.intensity * innerScale)
+    else if (d < p.outer) a = vizAlpha(p.intensity * Math.pow(1 - (d - p.inner) / band, exponent))
     if (a > 0) {
       img.data[i * 4] = cr
       img.data[i * 4 + 1] = cg
@@ -323,7 +328,6 @@ function rasterMaxRings(
   ctx: CanvasRenderingContext2D,
   key: string,
   rings: Extract<VizPrimitive, { kind: 'ring' }>[],
-  scale: number,
   zoom: number,
 ) {
   let minX = Infinity
@@ -346,7 +350,7 @@ function rasterMaxRings(
     const r = p.r1 * zoom
     const cx = p.x * zoom - minX
     const cy = p.y * zoom - minY
-    const s = Math.abs(p.intensity) / scale
+    const s = Math.abs(p.intensity)
     const gx0 = Math.max(0, Math.floor((cx - r) / cell))
     const gx1 = Math.min(cols - 1, Math.ceil((cx + r) / cell))
     const gy0 = Math.max(0, Math.floor((cy - r) / cell))
@@ -370,7 +374,7 @@ function rasterMaxRings(
       img.data[i * 4] = cr
       img.data[i * 4 + 1] = cg
       img.data[i * 4 + 2] = cb
-      img.data[i * 4 + 3] = Math.round(Math.min(1, 0.3 * field[i]) * 255)
+      img.data[i * 4 + 3] = Math.round(vizAlpha(field[i]) * 255)
     }
   }
   const small = document.createElement('canvas')
@@ -382,11 +386,10 @@ function rasterMaxRings(
 }
 
 function drawGroup(ctx: CanvasRenderingContext2D, g: VizGroup, zoom: number, gradientOnly: boolean) {
-  const scale = groupScale(g)
   for (const p of g.primitives) {
-    if (p.kind === 'ring') drawRing(ctx, g.key, p, Math.abs(p.intensity) / scale, zoom, gradientOnly)
-    else if (p.kind === 'capsule') drawCapsule(ctx, g.key, p, 1 / scale, zoom)
-    else if (p.kind === 'rectRing') drawRectRing(ctx, g.key, p, Math.abs(p.intensity) / scale, zoom)
+    if (p.kind === 'ring') drawRing(ctx, g.key, p, zoom, gradientOnly)
+    else if (p.kind === 'capsule') drawCapsule(ctx, g.key, p, zoom)
+    else if (p.kind === 'rectRing') drawRectRing(ctx, g.key, p, zoom)
     else drawField(ctx, g.key, p, zoom)
   }
 }
@@ -400,7 +403,7 @@ export function drawViz(ctx: CanvasRenderingContext2D, groups: VizGroup[], zoom:
       )
       // The strongest sample wins at each point, so the gradient is the
       // exact per-pixel max-field of the sources.
-      if (rings.length > 0) rasterMaxRings(ctx, g.key, rings, groupScale(g), zoom)
+      if (rings.length > 0) rasterMaxRings(ctx, g.key, rings, zoom)
       // Range-limit outline: the silhouette of the union of the sample
       // ranges — the field's zero-force boundary — drawn as one blob
       // (enlarged union minus shrunk union), never per-sample circles.

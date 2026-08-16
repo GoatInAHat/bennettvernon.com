@@ -105,6 +105,11 @@ export const bridge: {
   setAutoRotate: (on: boolean) => void
   autoRotateOn: boolean
   applySetting: (key: ModeSettingKey, value: number) => void
+  /** Params the current mode's preset oscillators animate: their live
+   * min/max swing. The panel renders these as range sliders. */
+  getModeOscillators: () => Partial<Record<ModeSettingKey, { min: number; max: number }>>
+  /** Retune an oscillated param's swing for the current mode. */
+  applyOscRange: (key: ModeSettingKey, min: number, max: number) => void
   getCurrentSettings: () => ModeSettings | null
   /** Values currently applied to the simulation (mid-transition they lag the
    * targets shown on the slider knobs). */
@@ -133,6 +138,8 @@ export const bridge: {
   setAutoRotate: () => {},
   autoRotateOn: true,
   applySetting: () => {},
+  getModeOscillators: () => ({}),
+  applyOscRange: () => {},
   getCurrentSettings: () => null,
   getLiveSettings: () => null,
   applyGlobal: () => {},
