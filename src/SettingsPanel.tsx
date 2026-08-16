@@ -29,6 +29,9 @@ const MODE_SLIDERS: SliderDef<ModeSettingKey>[] = [
   { key: 'trailDecay', label: 'trail decay', min: 1, max: 100, step: 1 },
 ]
 
+/** Slider value readout, truncated to two decimals. */
+const fmt = (v: number) => String(Number(v.toFixed(2)))
+
 const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'dragStrength', label: 'drag power', min: 0, max: 200000, step: 1000 },
   { key: 'dragRadius', label: 'drag radius', min: 100, max: 2000, step: 10 },
@@ -118,6 +121,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       {MODE_SLIDERS.map((s) => (
         <label key={s.key} className="settings-row">
           <span>{s.label}</span>
+          <span className="settings-value">{fmt(values[s.key])}</span>
           <input
             type="range"
             min={s.min}
@@ -154,6 +158,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       {GLOBAL_SLIDERS.map((s) => (
         <label key={s.key} className="settings-row">
           <span>{s.label}</span>
+          <span className="settings-value">{fmt(globals[s.key])}</span>
           <input
             type="range"
             min={s.min}
@@ -187,6 +192,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       </label>
       <label className="settings-row">
         <span>name weight</span>
+        <span className="settings-value">{fmt(globals.nameWeight)}</span>
         <input
           type="range"
           min={100}

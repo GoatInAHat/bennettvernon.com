@@ -282,6 +282,8 @@ a:visited {
 }
 
 /* Physics settings popup; the particles flow around its edges. */
+/* One shared grid: the label column sizes to the longest label so labels
+   never wrap; the value column is fixed; sliders take the rest. */
 .settings-panel {
   position: fixed;
   top: 24px;
@@ -294,6 +296,13 @@ a:visited {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px 18px 18px;
+  display: grid;
+  grid-template-columns: max-content 6.5ch minmax(0, 1fr);
+  align-content: start;
+}
+
+.settings-panel > * {
+  grid-column: 1 / -1;
 }
 
 .settings-subtitle {
@@ -347,12 +356,28 @@ a:visited {
 
 .settings-row {
   display: grid;
-  grid-template-columns: 100px 1fr;
+  grid-template-columns: subgrid;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   line-height: 24px;
   color: var(--muted);
+}
+
+.settings-row > span:first-child {
+  white-space: nowrap;
+}
+
+/* Rows without a value readout (selects, toggles) span the remaining columns. */
+.settings-row > :nth-child(2):last-child {
+  grid-column: 2 / -1;
+}
+
+.settings-value {
+  font-size: 11px;
+  color: var(--faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .settings-row input[type='range'] {
