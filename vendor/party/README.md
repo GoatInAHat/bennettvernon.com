@@ -38,12 +38,12 @@ Every divergence from upstream is listed here.
   spatial influence so a generic viewer can render body geometry, range
   limits, and falloff gradients for any physics without viewer changes.
   Groups can declare `blend: 'max'` when their primitives combine by
-  strongest-wins rather than summing (viewers composite with lighten).
-  `Interaction` implements the contract in-fork.
+  strongest-wins rather than summing (viewers render the exact max-field).
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
-- Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`
-  modules, `Spawner`, and `LocalQuery`/`getParticlesInRadius` (the cell
-  census replaced the site's only bounded-query use; the query API's
-  three serial full-queue-drain readbacks made it a per-call pipeline
-  stall anyway).
+- Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`,
+  `Interaction` modules, `Spawner`, and `LocalQuery`/`getParticlesInRadius`
+  (the cell census replaced the site's only bounded-query use; the query
+  API's three serial full-queue-drain readbacks made it a per-call
+  pipeline stall anyway; the site's unified pointer-field system replaced
+  Interaction with signed trail nodes).
