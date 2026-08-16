@@ -420,19 +420,77 @@ a:visited {
   grid-column: 3 / -1;
 }
 
+/* Mode sliders are a three-layer stack so the live ghost sits between the
+ * track and the knob: track div (bottom) < ghost < input whose styled thumb
+ * paints on top over a transparent track. Replicates the native look
+ * (8px rounded track, 16px circle knob). */
 .slider-wrap {
   position: relative;
   display: block;
   min-width: 0;
+  height: 16px;
+}
+
+.slider-track {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  /* The fill gradient must not bleed under the semi-transparent border at
+   * the rounded caps (renders as a dark crescent). */
+  background-clip: padding-box;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.slider-wrap input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  z-index: 2;
+  display: block;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+}
+
+.slider-wrap input[type='range']::-webkit-slider-runnable-track {
+  height: 16px;
+  background: transparent;
+}
+
+.slider-wrap input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #000;
+  border: none;
+}
+
+.slider-wrap input[type='range']::-moz-range-track {
+  height: 16px;
+  background: transparent;
+}
+
+.slider-wrap input[type='range']::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #000;
+  border: none;
 }
 
 /* The value currently applied to the simulation: an outline ghost of the
- * native range knob (Chrome renders a 16px circle). The difference blend
- * keeps the ring visible over both the black filled track and the light
- * unfilled track. */
+ * knob, layered between the track and the knob. The difference blend keeps
+ * the ring visible over both the black filled and light unfilled track. */
 .slider-live {
   position: absolute;
-  top: 50%;
+  top: 8px;
   width: 16px;
   height: 16px;
   box-sizing: border-box;
@@ -442,6 +500,7 @@ a:visited {
   background: transparent;
   mix-blend-mode: difference;
   pointer-events: none;
+  z-index: 1;
 }
 
 .settings-value {

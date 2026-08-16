@@ -73,10 +73,15 @@ type EffectorsInputs = {
   dynamic: number[]
   field: number[]
   nameField: number[]
-  /** Name-pull tuning [strength, range, sharpness, relax], separate from the
-   * multi-MB nameField array so slider drags re-upload four floats, not the
-   * whole distance grid. */
+  /** Name-pull tuning [strength, range, sharpness, concave], separate from
+   * the multi-MB nameField array so slider drags re-upload four floats, not
+   * the whole distance grid. */
   nameParams: number[]
+  /** Concave-pocket mask on the nameField grid (no header, row-major 0..1):
+   * 1 inside a letter's convex hull but outside the letter itself. The name
+   * pull is multiplied by `concave` there (bilinearly sampled, so the
+   * boost fades smoothly at pocket edges). */
+  nameZone: number[]
 }
 
 function packEffectors(effectors: Effector[]): number[] {
@@ -110,11 +115,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     field: DataType.ARRAY,
     nameField: DataType.ARRAY,
     nameParams: DataType.ARRAY,
+    nameZone: DataType.ARRAY,
   } as const
 
   constructor() {
     super()
-    this.write({ data: [], dynamic: [], field: [], nameField: [], nameParams: [] })
+    this.write({ data: [], dynamic: [], field: [], nameField: [], nameParams: [], nameZone: [] })
   }
 
   /** Static effectors: rewritten only on layout/hover changes. */
@@ -161,10 +167,16 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
    * strength — peak pull at the letter surface;
    * range — reach beyond the surface (force is zero past it);
    * sharpness — falloff exponent from the surface out (1 = linear;
-   *   higher concentrates the pull near the letters).
+   *   higher concentrates the pull near the letters);
+   * concave — pull multiplier inside the nameZone pockets (1 = none).
    * Inside the letters no force applies. */
-  setNameParams(strength: number, range: number, sharpness: number): void {
-    this.write({ nameParams: [strength, range, sharpness] })
+  setNameParams(strength: number, range: number, sharpness: number, concave: number): void {
+    this.write({ nameParams: [strength, range, sharpness, concave] })
+  }
+
+  /** Concave-pocket mask, same grid as the name field (see inputs doc). */
+  setNameZone(zone: ArrayLike<number>): void {
+    this.write({ nameZone: Array.from(zone) })
   }
 
   /** Debug description decoded from the same packed arrays the shaders
@@ -177,6 +189,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       field?: number[]
       nameField?: number[]
       nameParams?: number[]
+      nameZone?: number[]
     }
     const groups = new Map<string, VizGroup>()
     const add = (key: string, dynamic: boolean, prim: VizPrimitive) => {
@@ -263,6 +276,31 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         exponent: nameParams[2],
         innerScale: 0,
       })
+      // Concave pockets (per-letter convex hull minus the letter), shown
+      // only while the multiplier actually boosts the pull there. Values
+      // are inverted so the field convention (smaller = stronger) fills
+      // the pockets.
+      const zone = state.nameZone
+      const concave = nameParams[3] ?? 1
+      const cols = nameField[3]
+      const rows = nameField[4]
+      if (zone && zone.length >= cols * rows && concave !== 1) {
+        const inverted = new Float32Array(cols * rows)
+        for (let i = 0; i < inverted.length; i++) inverted[i] = 1 - zone[i]
+        add('effectors:concave', false, {
+          kind: 'field',
+          originX: nameField[0],
+          originY: nameField[1],
+          cell: nameField[2],
+          cols,
+          rows,
+          values: inverted,
+          valuesStart: 0,
+          inner: 0,
+          outer: 1,
+          intensity: concave,
+        })
+      }
     }
     return [...groups.values()]
   }
@@ -419,6 +457,8 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     let nstrength = ${getUniform('nameParams', '0u')};
     let nrange = ${getUniform('nameParams', '1u')};
     let nsharp = ${getUniform('nameParams', '2u')};
+    let nconcave = select(1.0, ${getUniform('nameParams', '3u')}, nplen >= 4u);
+    let nzlen = ${getLength('nameZone')};
     let nfx = (${particleVar}.position.x - nox) / ncw;
     let nfy = (${particleVar}.position.y - noy) / ncw;
     if (nfx >= 1.5 && nfy >= 1.5 && nfx < f32(ncols) - 2.5 && nfy < f32(nrows) - 2.5) {
@@ -437,7 +477,17 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         let ngy = mix(nd01 - nd00, nd11 - nd10, ntx);
         let ngl = sqrt(ngx * ngx + ngy * ngy);
         if (ngl > 0.0) {
-          let nm = nstrength * pow(1.0 - nd / nrange, nsharp);
+          var nm = nstrength * pow(1.0 - nd / nrange, nsharp);
+          if (nconcave != 1.0 && nzlen >= ncols * nrows) {
+            // Concave-pocket boost, bilinearly faded at pocket edges.
+            let zi00 = u32(nuy) * ncols + u32(nux);
+            let z00 = ${getUniform('nameZone', 'zi00')};
+            let z10 = ${getUniform('nameZone', 'zi00 + 1u')};
+            let z01 = ${getUniform('nameZone', 'zi00 + ncols')};
+            let z11 = ${getUniform('nameZone', 'zi00 + ncols + 1u')};
+            let zf = mix(mix(z00, z10, ntx), mix(z01, z11, ntx), nty);
+            nm = nm * (1.0 + (nconcave - 1.0) * zf);
+          }
           ${particleVar}.acceleration -= vec2<f32>(ngx, ngy) / ngl * nm;
         }
       }
@@ -590,6 +640,8 @@ ${namePart(args)}
           const strength = np[0]
           const range = np[1]
           const sharp = np[2]
+          const concave = np.length >= 4 ? np[3] : 1
+          const zone = input.nameZone
           const fx = (px - ox) / cw
           const fy = (py - oy) / cw
           if (fx >= 1.5 && fy >= 1.5 && fx < cols - 2.5 && fy < rows - 2.5) {
@@ -606,7 +658,15 @@ ${namePart(args)}
               const gy = (nf[i00 + cols] - nf[i00]) * (1 - tx) + (nf[i00 + cols + 1] - nf[i00 + 1]) * tx
               const gl = Math.hypot(gx, gy)
               if (gl > 0) {
-                const nm = strength * Math.pow(1 - d / range, sharp)
+                let nm = strength * Math.pow(1 - d / range, sharp)
+                if (concave !== 1 && zone && zone.length >= cols * rows) {
+                  // Concave-pocket boost, bilinearly faded at pocket edges.
+                  const zi00 = Math.floor(uy) * cols + Math.floor(ux)
+                  const zf =
+                    (zone[zi00] * (1 - tx) + zone[zi00 + 1] * tx) * (1 - ty) +
+                    (zone[zi00 + cols] * (1 - tx) + zone[zi00 + cols + 1] * tx) * ty
+                  nm *= 1 + (concave - 1) * zf
+                }
                 particle.acceleration.x -= (gx / gl) * nm
                 particle.acceleration.y -= (gy / gl) * nm
               }

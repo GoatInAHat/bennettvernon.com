@@ -74,6 +74,7 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'nameAttraction', label: 'name pull', min: 0, max: 50000, step: 500 },
   { key: 'nameRange', label: 'name pull radius', min: 10, max: 300, step: 5 },
   { key: 'nameSharpness', label: 'name sharpness', min: 0.2, max: 6, step: 0.05 },
+  { key: 'concaveAvoidance', label: 'concave avoidance', min: 1, max: 10, step: 0.1 },
   { key: 'boxAttraction', label: 'text repel', min: 0, max: 200000, step: 1000 },
   { key: 'textPaddingInner', label: 'inner padding', min: 0, max: 60, step: 1 },
   { key: 'textPaddingOuter', label: 'outer padding', min: 2, max: 150, step: 1 },
@@ -221,6 +222,18 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             <span>{s.label}</span>
             <span className="settings-value">{fmt(values[s.key])}</span>
             <span className="slider-wrap">
+              <span
+                className="slider-track"
+                // Longhand only: the `background` shorthand would reset the
+                // stylesheet's background-clip and bleed the fill under the
+                // border at the rounded caps.
+                style={{
+                  backgroundImage: `linear-gradient(to right, #000 calc((100% - ${THUMB_W}px) * ${
+                    (Math.min(Math.max(values[s.key], s.min), s.max) - s.min) / (s.max - s.min)
+                  } + ${THUMB_W / 2}px), #ececec 0)`,
+                }}
+              />
+              <span className="slider-live" data-key={s.key} style={{ visibility: 'hidden' }} />
               <input
                 type="range"
                 min={s.min}
@@ -233,7 +246,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                   setValues((prev) => (prev ? { ...prev, [s.key]: v } : prev))
                 }}
               />
-              <span className="slider-live" data-key={s.key} style={{ visibility: 'hidden' }} />
             </span>
             </label>
           </Fragment>

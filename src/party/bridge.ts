@@ -43,6 +43,7 @@ export const GLOBAL_SETTING_KEYS = [
   'nameAttraction',
   'nameRange',
   'nameSharpness',
+  'concaveAvoidance',
   'boxAttraction',
   'textPaddingInner',
   'textPaddingOuter',

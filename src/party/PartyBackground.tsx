@@ -87,6 +87,7 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameAttraction: 10_000,
   nameRange: 90,
   nameSharpness: 1,
+  concaveAvoidance: 1,
   boxAttraction: 100_000,
   textPaddingInner: 4,
   textPaddingOuter: 44,
@@ -1137,6 +1138,84 @@ export function PartyBackground() {
       nameField = { minX, minY, cell: step, cols, rows, d }
       pushNameField()
 
+      // Concave pockets: inside a letter's convex hull but outside the
+      // letter itself (the notch of an N, the bays of an E). Per connected
+      // component: monotone-chain hull of its cells, scanline-filled, minus
+      // the glyph mask.
+      const zone = new Float32Array(cols * rows)
+      {
+        const label = new Int32Array(cols * rows).fill(-1)
+        const stack: number[] = []
+        let comp = 0
+        for (let seed = 0; seed < mask.length; seed++) {
+          if (!mask[seed] || label[seed] >= 0) continue
+          const cells: number[] = []
+          stack.length = 0
+          stack.push(seed)
+          label[seed] = comp
+          while (stack.length) {
+            const c = stack.pop()!
+            cells.push(c)
+            const cx = c % cols
+            for (const nb of [
+              cx > 0 ? c - 1 : -1,
+              cx < cols - 1 ? c + 1 : -1,
+              c - cols,
+              c + cols,
+            ]) {
+              if (nb >= 0 && nb < mask.length && mask[nb] && label[nb] < 0) {
+                label[nb] = comp
+                stack.push(nb)
+              }
+            }
+          }
+          comp++
+          if (cells.length < 24) continue
+          const pts = cells.map((c) => [c % cols, (c / cols) | 0])
+          pts.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+          const cross = (o: number[], a: number[], b: number[]) =>
+            (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+          const half = (list: number[][]) => {
+            const h: number[][] = []
+            for (const p of list) {
+              while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], p) <= 0) h.pop()
+              h.push(p)
+            }
+            h.pop()
+            return h
+          }
+          const hull = [...half(pts), ...half([...pts].reverse())]
+          if (hull.length < 3) continue
+          let hy0 = rows
+          let hy1 = 0
+          for (const p of hull) {
+            hy0 = Math.min(hy0, p[1])
+            hy1 = Math.max(hy1, p[1])
+          }
+          for (let gy = hy0; gy <= hy1; gy++) {
+            const xs: number[] = []
+            for (let e = 0; e < hull.length; e++) {
+              const [x1, y1] = hull[e]
+              const [x2, y2] = hull[(e + 1) % hull.length]
+              if (y1 === y2) continue
+              if (gy >= Math.min(y1, y2) && gy < Math.max(y1, y2)) {
+                xs.push(x1 + ((gy - y1) * (x2 - x1)) / (y2 - y1))
+              }
+            }
+            xs.sort((a, b) => a - b)
+            for (let s = 0; s + 1 < xs.length; s += 2) {
+              const a = Math.ceil(xs[s])
+              const b = Math.floor(xs[s + 1])
+              for (let gx = a; gx <= b; gx++) {
+                const i = gy * cols + gx
+                if (!mask[i]) zone[i] = 1
+              }
+            }
+          }
+        }
+      }
+      effectors.setNameZone(zone)
+
       cellWeights = new Float32Array(target)
       cellWeightsShown = new Float32Array(target)
       renderNameMask()
@@ -1151,6 +1230,7 @@ export function PartyBackground() {
         globals.nameAttraction,
         globals.nameRange / zoom,
         globals.nameSharpness,
+        globals.concaveAvoidance,
       )
     }
 
@@ -1707,7 +1787,12 @@ export function PartyBackground() {
         buildTextField()
         staticVizDirty = true
         scheduleSync()
-      } else if (key === 'nameAttraction' || key === 'nameRange' || key === 'nameSharpness') {
+      } else if (
+        key === 'nameAttraction' ||
+        key === 'nameRange' ||
+        key === 'nameSharpness' ||
+        key === 'concaveAvoidance'
+      ) {
         pushNameParams()
         staticVizDirty = true
         if (bridge.debugOn) drawDebug()
