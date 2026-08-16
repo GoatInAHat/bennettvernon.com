@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   bridge,
   NAME_FONTS,
@@ -16,17 +16,45 @@ interface SliderDef<K> {
   min: number
   max: number
   step: number
+  /** Sliders sharing a group render under one small heading. */
+  group?: string
 }
 
+// Ranges cover every session value and oscillator swing in the demo presets
+// with headroom. Angles are radians.
 const MODE_SLIDERS: SliderDef<ModeSettingKey>[] = [
-  { key: 'gravity', label: 'gravity', min: 0, max: 4000, step: 50 },
-  { key: 'wander', label: 'wander', min: 0, max: 100, step: 1 },
-  { key: 'cohesion', label: 'cohesion', min: 0, max: 10, step: 0.1 },
-  { key: 'alignment', label: 'alignment', min: 0, max: 10, step: 0.1 },
-  { key: 'separation', label: 'separation', min: 0, max: 100, step: 1 },
-  { key: 'viscosity', label: 'viscosity', min: 0, max: 10, step: 0.05 },
-  { key: 'pressure', label: 'pressure', min: 0, max: 200, step: 1 },
-  { key: 'trailDecay', label: 'trail decay', min: 1, max: 100, step: 1 },
+  { group: 'environment', key: 'gravity', label: 'gravity', min: 0, max: 4000, step: 50 },
+  { group: 'environment', key: 'inertia', label: 'inertia', min: 0, max: 100, step: 1 },
+  { group: 'environment', key: 'envFriction', label: 'friction', min: 0, max: 2, step: 0.01 },
+  { group: 'environment', key: 'damping', label: 'damping', min: 0, max: 1, step: 0.01 },
+  { group: 'boundary', key: 'restitution', label: 'restitution', min: 0, max: 1, step: 0.05 },
+  { group: 'boundary', key: 'boundaryFriction', label: 'friction', min: 0, max: 1, step: 0.05 },
+  { group: 'collisions', key: 'collisionRestitution', label: 'restitution', min: 0, max: 1, step: 0.05 },
+  { group: 'fluids', key: 'influenceRadius', label: 'influence radius', min: 1, max: 200, step: 1 },
+  { group: 'fluids', key: 'targetDensity', label: 'target density', min: 0, max: 10, step: 0.1 },
+  { group: 'fluids', key: 'pressure', label: 'pressure', min: 0, max: 200, step: 1 },
+  { group: 'fluids', key: 'viscosity', label: 'viscosity', min: 0, max: 10, step: 0.05 },
+  { group: 'fluids', key: 'nearPressure', label: 'near pressure', min: 0, max: 200, step: 1 },
+  { group: 'fluids', key: 'nearThreshold', label: 'near threshold', min: 0, max: 100, step: 1 },
+  { group: 'fluids', key: 'maxAcceleration', label: 'max acceleration', min: 0, max: 200, step: 1 },
+  { group: 'fluids', key: 'flipRatio', label: 'flip ratio', min: 0, max: 1, step: 0.01 },
+  { group: 'behavior', key: 'wander', label: 'wander', min: 0, max: 100, step: 1 },
+  { group: 'behavior', key: 'cohesion', label: 'cohesion', min: 0, max: 10, step: 0.1 },
+  { group: 'behavior', key: 'alignment', label: 'alignment', min: 0, max: 10, step: 0.1 },
+  { group: 'behavior', key: 'repulsion', label: 'repulsion', min: 0, max: 20, step: 0.1 },
+  { group: 'behavior', key: 'chase', label: 'chase', min: 0, max: 10, step: 0.1 },
+  { group: 'behavior', key: 'avoid', label: 'avoid', min: 0, max: 10, step: 0.1 },
+  { group: 'behavior', key: 'separation', label: 'separation', min: 0, max: 100, step: 1 },
+  { group: 'behavior', key: 'viewRadius', label: 'view radius', min: 0, max: 300, step: 5 },
+  { group: 'behavior', key: 'viewAngle', label: 'view angle', min: 0, max: 6.3, step: 0.05 },
+  { group: 'sensors', key: 'sensorDistance', label: 'distance', min: 0, max: 200, step: 1 },
+  { group: 'sensors', key: 'sensorAngle', label: 'angle', min: 0, max: 1.57, step: 0.01 },
+  { group: 'sensors', key: 'sensorRadius', label: 'radius', min: 1, max: 20, step: 0.5 },
+  { group: 'sensors', key: 'sensorThreshold', label: 'threshold', min: 0, max: 1, step: 0.01 },
+  { group: 'sensors', key: 'sensorStrength', label: 'strength', min: 0, max: 5000, step: 50 },
+  { group: 'sensors', key: 'colorSimilarity', label: 'color similarity', min: 0, max: 1, step: 0.01 },
+  { group: 'sensors', key: 'fleeAngle', label: 'flee angle', min: 0, max: 3.14, step: 0.01 },
+  { group: 'trails', key: 'trailDecay', label: 'trail decay', min: 1, max: 100, step: 1 },
 ]
 
 /** Slider value readout, truncated to two decimals. */
@@ -146,11 +174,17 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       <div className="settings-title">physics</div>
 
       <div className="settings-subtitle">mode {modeIndex + 1}</div>
-      {MODE_SLIDERS.map((s) => {
+      {MODE_SLIDERS.map((s, i) => {
         const liveV = live?.[s.key]
         const showLive = liveV !== undefined && Math.abs(liveV - values[s.key]) > s.step / 2
+        const groupHead =
+          s.group && s.group !== MODE_SLIDERS[i - 1]?.group ? (
+            <div className="settings-group">{s.group}</div>
+          ) : null
         return (
-          <label key={s.key} className="settings-row">
+          <Fragment key={s.key}>
+            {groupHead}
+            <label className="settings-row">
             <span>{s.label}</span>
             <span className="settings-value">{fmt(values[s.key])}</span>
             <span className="slider-wrap">
@@ -175,7 +209,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                 />
               ) : null}
             </span>
-          </label>
+            </label>
+          </Fragment>
         )
       })}
       <label className="settings-row settings-toggle">

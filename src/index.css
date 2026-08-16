@@ -348,6 +348,13 @@ a:visited {
   margin: 12px 0 4px;
 }
 
+.settings-group {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  margin: 8px 0 0;
+}
+
 .mode-checks {
   display: flex;
   gap: 5px;
