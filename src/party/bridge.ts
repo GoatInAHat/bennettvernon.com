@@ -1,4 +1,5 @@
-export const SETTING_KEYS = [
+/** Per-mode physics settings (defaults come from each demo preset). */
+export const MODE_SETTING_KEYS = [
   'gravity',
   'wander',
   'cohesion',
@@ -7,16 +8,30 @@ export const SETTING_KEYS = [
   'viscosity',
   'pressure',
   'trailDecay',
+] as const
+
+/** Site-wide settings, independent of the active mode. */
+export const GLOBAL_SETTING_KEYS = [
   'dragStrength',
   'dragRadius',
   'nameAttraction',
   'boxAttraction',
   'textPadding',
+  'textSmoothing',
   'separatorAttraction',
+  'cursorStrength',
+  'trailIntensity',
+  'cursorFalloff',
+  'modeDuration',
+  'transitionLength',
+  'nameFont',
+  'nameWeight',
 ] as const
 
-export type SettingKey = (typeof SETTING_KEYS)[number]
-export type ModeSettings = Record<SettingKey, number>
+export type ModeSettingKey = (typeof MODE_SETTING_KEYS)[number]
+export type GlobalSettingKey = (typeof GLOBAL_SETTING_KEYS)[number]
+export type ModeSettings = Record<ModeSettingKey, number>
+export type GlobalSettings = Record<GlobalSettingKey, number>
 
 /** Popular design font stacks selectable for the name. */
 export const NAME_FONTS = [
@@ -34,27 +49,22 @@ export const NAME_FONTS = [
   { label: 'Impact', stack: 'Impact, "Arial Black", sans-serif' },
 ]
 
-export interface GlobalSettings {
-  /** Index into NAME_FONTS. */
-  nameFont: number
-  nameWeight: number
-}
-
 /**
  * Runtime handles the settings panel uses to read and tweak the live physics.
- * PartyBackground assigns these once the engine is up. Numeric settings are
- * per demo mode (edits persist as overrides across mode switches); the name
- * font and weight are global.
+ * PartyBackground assigns these once the engine is up. Mode settings persist
+ * as per-mode overrides across switches; global settings apply site-wide.
  */
 export const bridge: {
-  /** Turns the automatic demo rotation on or off. */
   setAutoRotate: (on: boolean) => void
   autoRotateOn: boolean
-  /** Applies a value to the current mode and stores it as that mode's override. */
-  applySetting: (key: SettingKey, value: number) => void
+  applySetting: (key: ModeSettingKey, value: number) => void
   getCurrentSettings: () => ModeSettings | null
-  applyGlobal: (key: keyof GlobalSettings, value: number) => void
-  getGlobals: () => GlobalSettings
+  applyGlobal: (key: GlobalSettingKey, value: number) => void
+  getGlobals: () => GlobalSettings | null
+  /** Enable/disable a demo mode; disabled modes lose their dot and are
+   * skipped by the rotation. */
+  setModeEnabled: (index: number, on: boolean) => void
+  enabledModes: boolean[]
   /** Effective settings of every mode plus globals (for copy/export). */
   getAllSettings: () => Record<string, unknown>
   setDebug: (on: boolean) => void
@@ -65,7 +75,9 @@ export const bridge: {
   applySetting: () => {},
   getCurrentSettings: () => null,
   applyGlobal: () => {},
-  getGlobals: () => ({ nameFont: 0, nameWeight: 700 }),
+  getGlobals: () => null,
+  setModeEnabled: () => {},
+  enabledModes: [true, true, true, true, true, true, true],
   getAllSettings: () => ({}),
   setDebug: () => {},
   debugOn: false,

@@ -127,104 +127,109 @@ interface SessionData {
 
 export interface DemoPreset {
   session: SessionData
-  /** Auto-advance delay in ms (desktop, mobile). */
-  duration: [number, number]
   /** Fraction of the device particle budget this demo simulates. */
   budgetFactor: number
-  /** maxParticles interpolation duration in ms. */
-  transitionMs: number
 }
 
-// Same order, durations, budgets, and transitions as the caza.la/party
-// homepage rotation (playground useDemo.ts).
+// Same order and particle budgets as the caza.la/party homepage rotation
+// (playground useDemo.ts); timing is user-configurable and lives in settings.
 export const DEMO_PRESETS: DemoPreset[] = [
-  { session: demo3 as SessionData, duration: [15000, 12000], budgetFactor: 1, transitionMs: 5000 },
-  { session: demo1 as SessionData, duration: [15000, 12000], budgetFactor: 1 / 4, transitionMs: 0 },
-  { session: demo4 as SessionData, duration: [15000, 15000], budgetFactor: 1, transitionMs: 5000 },
-  { session: demo5 as SessionData, duration: [15000, 15000], budgetFactor: 1 / 4, transitionMs: 0 },
-  { session: demo6 as SessionData, duration: [15000, 15000], budgetFactor: 1 / 6, transitionMs: 0 },
-  { session: demo7 as SessionData, duration: [20000, 20000], budgetFactor: 1 / 4, transitionMs: 0 },
-  { session: demo2 as SessionData, duration: [20000, 20000], budgetFactor: 1 / 2.5, transitionMs: 2500 },
+  { session: demo3 as SessionData, budgetFactor: 1 },
+  { session: demo1 as SessionData, budgetFactor: 1 / 4 },
+  { session: demo4 as SessionData, budgetFactor: 1 },
+  { session: demo5 as SessionData, budgetFactor: 1 / 4 },
+  { session: demo6 as SessionData, budgetFactor: 1 / 6 },
+  { session: demo7 as SessionData, budgetFactor: 1 / 4 },
+  { session: demo2 as SessionData, budgetFactor: 1 / 2.5 },
 ]
 
-/** Applies a demo session's module settings, engine tuning, and oscillators. */
-export function applyPreset(
+/**
+ * Every numeric physics parameter that smoothly interpolates during a mode
+ * transition. Keys overlapping the mode sliders share their names.
+ */
+export interface ParamDef {
+  key: string
+  from: (preset: DemoPreset, isMobile: boolean) => number
+  set: (mods: PartyModules, v: number) => void
+}
+
+export const PARAM_DEFS: ParamDef[] = [
+  {
+    key: 'gravity',
+    // Mobile lowers Demo3's inward gravity, matching the playground.
+    from: (p, mobile) =>
+      p.session.name === 'Demo3' && mobile ? 1000 : p.session.modules.environment.gravityStrength,
+    set: (m, v) => m.environment.setGravityStrength(v),
+  },
+  { key: 'inertia', from: (p) => p.session.modules.environment.inertia, set: (m, v) => m.environment.setInertia(v) },
+  { key: 'envFriction', from: (p) => p.session.modules.environment.friction, set: (m, v) => m.environment.setFriction(v) },
+  { key: 'damping', from: (p) => p.session.modules.environment.damping, set: (m, v) => m.environment.setDamping(v) },
+  { key: 'restitution', from: (p) => p.session.modules.boundary.restitution, set: (m, v) => m.boundary.setRestitution(v) },
+  { key: 'boundaryFriction', from: (p) => p.session.modules.boundary.friction, set: (m, v) => m.boundary.setFriction(v) },
+  { key: 'collisionRestitution', from: (p) => p.session.modules.collisions.restitution, set: (m, v) => m.collisions.setRestitution(v) },
+  { key: 'influenceRadius', from: (p) => p.session.modules.fluids.influenceRadius, set: (m, v) => m.fluids.setInfluenceRadius(v) },
+  { key: 'targetDensity', from: (p) => p.session.modules.fluids.targetDensity, set: (m, v) => m.fluids.setTargetDensity(v) },
+  { key: 'pressure', from: (p) => p.session.modules.fluids.pressureMultiplier, set: (m, v) => m.fluids.setPressureMultiplier(v) },
+  { key: 'viscosity', from: (p) => p.session.modules.fluids.viscosity, set: (m, v) => m.fluids.setViscosity(v) },
+  { key: 'nearPressure', from: (p) => p.session.modules.fluids.nearPressureMultiplier, set: (m, v) => m.fluids.setNearPressureMultiplier(v) },
+  { key: 'nearThreshold', from: (p) => p.session.modules.fluids.nearThreshold, set: (m, v) => m.fluids.setNearThreshold(v) },
+  { key: 'maxAcceleration', from: (p) => p.session.modules.fluids.maxAcceleration, set: (m, v) => m.fluids.setMaxAcceleration(v) },
+  { key: 'flipRatio', from: (p) => p.session.modules.fluids.flipRatio ?? 0.9, set: (m, v) => m.fluids.setFlipRatio(v) },
+  { key: 'wander', from: (p) => p.session.modules.behavior.wander, set: (m, v) => m.behavior.setWander(v) },
+  { key: 'cohesion', from: (p) => p.session.modules.behavior.cohesion, set: (m, v) => m.behavior.setCohesion(v) },
+  { key: 'alignment', from: (p) => p.session.modules.behavior.alignment, set: (m, v) => m.behavior.setAlignment(v) },
+  { key: 'repulsion', from: (p) => p.session.modules.behavior.repulsion, set: (m, v) => m.behavior.setRepulsion(v) },
+  { key: 'chase', from: (p) => p.session.modules.behavior.chase, set: (m, v) => m.behavior.setChase(v) },
+  { key: 'avoid', from: (p) => p.session.modules.behavior.avoid, set: (m, v) => m.behavior.setAvoid(v) },
+  { key: 'separation', from: (p) => p.session.modules.behavior.separation, set: (m, v) => m.behavior.setSeparation(v) },
+  { key: 'viewRadius', from: (p) => p.session.modules.behavior.viewRadius, set: (m, v) => m.behavior.setViewRadius(v) },
+  { key: 'viewAngle', from: (p) => p.session.modules.behavior.viewAngle, set: (m, v) => m.behavior.setViewAngle(v) },
+  { key: 'sensorDistance', from: (p) => p.session.modules.sensors.sensorDistance, set: (m, v) => m.sensors.setSensorDistance(v) },
+  { key: 'sensorAngle', from: (p) => p.session.modules.sensors.sensorAngle, set: (m, v) => m.sensors.setSensorAngle(v) },
+  { key: 'sensorRadius', from: (p) => p.session.modules.sensors.sensorRadius, set: (m, v) => m.sensors.setSensorRadius(v) },
+  { key: 'sensorThreshold', from: (p) => p.session.modules.sensors.sensorThreshold, set: (m, v) => m.sensors.setSensorThreshold(v) },
+  { key: 'sensorStrength', from: (p) => p.session.modules.sensors.sensorStrength, set: (m, v) => m.sensors.setSensorStrength(v) },
+  { key: 'colorSimilarity', from: (p) => p.session.modules.sensors.colorSimilarityThreshold, set: (m, v) => m.sensors.setColorSimilarityThreshold(v) },
+  { key: 'fleeAngle', from: (p) => p.session.modules.sensors.fleeAngle, set: (m, v) => m.sensors.setFleeAngle(v) },
+  {
+    key: 'trailDecay',
+    // Demo5/Demo6 historically disabled trails, which froze stale smears on
+    // the scene texture; a high decay gives the same trail-less look while
+    // the texture keeps fading all the way back to the background.
+    from: (p) =>
+      p.session.name === 'Demo5' || p.session.name === 'Demo6'
+        ? 80
+        : p.session.modules.trails.trailDecay,
+    set: (m, v) => m.trails.setTrailDecay(v),
+  },
+]
+
+/** Applies everything that cannot interpolate: enable flags, enum modes, and
+ * spatial-grid engine settings. Runs at the start of a transition. */
+export function applyDiscretePreset(
   engine: Engine,
   mods: PartyModules,
   preset: DemoPreset,
-  opts: { isMobile: boolean; isWebGPU: boolean },
+  opts: { isWebGPU: boolean },
 ): void {
   const m = preset.session.modules
-  const name = preset.session.name
-
-  const env = m.environment
-  mods.environment.setEnabled(env.enabled)
-  // Mobile lowers Demo3's inward gravity, matching the playground.
-  const gravity =
-    name === 'Demo3' && opts.isMobile ? 1000 : env.gravityStrength
-  mods.environment.setGravityStrength(gravity)
-  mods.environment.setGravityDirection(env.mode as GravityDirection)
-  if (env.mode === 'custom') {
-    mods.environment.setDirection(env.dirX, env.dirY)
+  mods.environment.setEnabled(m.environment.enabled)
+  mods.environment.setGravityDirection(m.environment.mode as GravityDirection)
+  if (m.environment.mode === 'custom') {
+    mods.environment.setDirection(m.environment.dirX, m.environment.dirY)
   }
-  mods.environment.setInertia(env.inertia)
-  mods.environment.setFriction(env.friction)
-  mods.environment.setDamping(env.damping)
-
-  const bounds = m.boundary
-  mods.boundary.setEnabled(bounds.enabled)
-  mods.boundary.setMode(bounds.mode as 'bounce' | 'warp' | 'kill' | 'none')
-  mods.boundary.setRestitution(bounds.restitution)
-  mods.boundary.setFriction(bounds.friction)
-  mods.boundary.setRepelDistance(bounds.repelDistance)
-  mods.boundary.setRepelStrength(bounds.repelStrength)
-
+  mods.boundary.setEnabled(m.boundary.enabled)
+  mods.boundary.setMode(m.boundary.mode as 'bounce' | 'warp' | 'kill' | 'none')
   mods.collisions.setEnabled(m.collisions.enabled)
-  mods.collisions.setRestitution(m.collisions.restitution)
-
-  const fl = m.fluids
-  mods.fluids.setEnabled(fl.enabled)
-  mods.fluids.setMethod(fl.method === 'picflip' ? FluidsMethod.Picflip : FluidsMethod.Sph)
-  mods.fluids.setInfluenceRadius(fl.influenceRadius)
-  mods.fluids.setTargetDensity(fl.targetDensity)
-  mods.fluids.setPressureMultiplier(fl.pressureMultiplier)
-  mods.fluids.setViscosity(fl.viscosity)
-  mods.fluids.setNearPressureMultiplier(fl.nearPressureMultiplier)
-  mods.fluids.setNearThreshold(fl.nearThreshold)
-  mods.fluids.setEnableNearPressure(fl.enableNearPressure)
-  mods.fluids.setMaxAcceleration(fl.maxAcceleration)
-  if ('flipRatio' in fl && typeof fl.flipRatio === 'number') {
-    mods.fluids.setFlipRatio(fl.flipRatio)
-  }
-
-  const be = m.behavior
-  mods.behavior.setEnabled(be.enabled)
-  mods.behavior.setWander(be.wander)
-  mods.behavior.setCohesion(be.cohesion)
-  mods.behavior.setAlignment(be.alignment)
-  mods.behavior.setRepulsion(be.repulsion)
-  mods.behavior.setChase(be.chase)
-  mods.behavior.setAvoid(be.avoid)
-  mods.behavior.setSeparation(be.separation)
-  mods.behavior.setViewRadius(be.viewRadius)
-  mods.behavior.setViewAngle(be.viewAngle)
-
-  const se = m.sensors
-  mods.sensors.setEnabled(se.enabled)
-  mods.sensors.setSensorDistance(se.sensorDistance)
-  mods.sensors.setSensorAngle(se.sensorAngle)
-  mods.sensors.setSensorRadius(se.sensorRadius)
-  mods.sensors.setSensorThreshold(se.sensorThreshold)
-  mods.sensors.setSensorStrength(se.sensorStrength)
-  mods.sensors.setFollowBehavior(se.followValue as SensorBehavior)
-  mods.sensors.setFleeBehavior(se.fleeValue as SensorBehavior)
-  mods.sensors.setColorSimilarityThreshold(se.colorSimilarityThreshold)
-  mods.sensors.setFleeAngle(se.fleeAngle)
-
-  // Render settings are not loaded from sessions (like the homepage quickload):
-  // particles stay per-particle white (black after CSS inversion) and trails
-  // keep their startup decay. Demo5/Demo6 run without trails.
-  mods.trails.setEnabled(name !== 'Demo5' && name !== 'Demo6')
+  mods.fluids.setEnabled(m.fluids.enabled)
+  mods.fluids.setMethod(m.fluids.method === 'picflip' ? FluidsMethod.Picflip : FluidsMethod.Sph)
+  mods.fluids.setEnableNearPressure(m.fluids.enableNearPressure)
+  mods.behavior.setEnabled(m.behavior.enabled)
+  mods.sensors.setEnabled(m.sensors.enabled)
+  mods.sensors.setFollowBehavior(m.sensors.followValue as SensorBehavior)
+  mods.sensors.setFleeBehavior(m.sensors.fleeValue as SensorBehavior)
+  // Trails stay enabled so the scene texture always decays to background.
+  mods.trails.setEnabled(true)
 
   const eng = preset.session.engine
   // ponytail: CPU fallback caps constraint iterations, heavy demos assume GPU
@@ -233,8 +238,10 @@ export function applyPreset(
   )
   engine.setCellSize(eng.gridCellSize)
   engine.setMaxNeighbors(opts.isWebGPU ? eng.maxNeighbors : Math.min(eng.maxNeighbors, 100))
+}
 
-  engine.clearOscillators()
+/** Registers a preset's oscillators; call after a transition completes. */
+export function applyPresetOscillators(engine: Engine, preset: DemoPreset): void {
   const oscillators = (preset.session.oscillators ?? {}) as Record<
     string,
     { moduleName?: string; inputName?: string; customMin: number; customMax: number; speedHz: number }

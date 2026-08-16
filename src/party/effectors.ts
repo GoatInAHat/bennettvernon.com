@@ -6,7 +6,7 @@ import {
   type CPUDescriptor,
 } from '@cazala/party'
 
-export type EffectorShape = 'circle' | 'rect' | 'pill'
+export type EffectorShape = 'circle' | 'rect' | 'pill' | 'ball'
 export type EffectorMode = 'attract' | 'repel'
 
 export interface Effector {
@@ -15,25 +15,24 @@ export interface Effector {
   /** World-space center. */
   x: number
   y: number
-  /** Influence distance beyond the shape edge (circle: from center). */
+  /** Influence distance (circle/pill/rect: beyond the shape; ball: kernel radius). */
   range: number
-  /** Rect half extents, or pill half segment length, in world units. */
+  /** Rect half extents / pill half segment length / ball iso threshold. */
   halfW: number
   halfH: number
   strength: number
 }
 
-const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 }
-
+const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2, ball: 3 }
 const STRIDE = 8
 
 type EffectorsInputs = { data: number[] }
 
 /**
- * Multi-instance attract/repel field. Same force math as the built-in
- * Interaction module (linear falloff), extended to N simultaneous circles
- * and rectangles so DOM elements (buttons, content blocks) can each push
- * particles away or gather them, like the caza.la/party center circle.
+ * Multi-instance force field. Circles, rects, and pills use the same linear
+ * falloff as the built-in Interaction module. Balls are metaballs: their
+ * kernels sum into one implicit field, so overlapping character shapes merge
+ * into smooth blobs whose iso-surface repels particles.
  */
 export class Effectors extends Module<'effectors', EffectorsInputs> {
   readonly name = 'effectors' as const
@@ -68,6 +67,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     return {
       apply: ({ particleVar, getUniform, getLength }) => `{
   let n = ${getLength('data')} / ${STRIDE}u;
+  var ballS = 0.0;
+  var ballGrad = vec2<f32>(0.0, 0.0);
+  var ballIso = 1.0;
+  var ballStrength = 0.0;
   for (var i: u32 = 0u; i < n; i = i + 1u) {
     let base = i * ${STRIDE}u;
     let kind = ${getUniform('data', 'base + 0u')};
@@ -80,7 +83,20 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     let strength = ${getUniform('data', 'base + 7u')};
     let px = ${particleVar}.position.x;
     let py = ${particleVar}.position.y;
-    if (kind < 0.5 || kind > 1.5) {
+    if (kind > 2.5) {
+      // Metaball: accumulate a Wyvill-style kernel and its gradient.
+      let dx = px - ex;
+      let dy = py - ey;
+      let d2 = dx * dx + dy * dy;
+      let R2 = range * range;
+      if (d2 < R2) {
+        let q = 1.0 - d2 / R2;
+        ballS += q * q;
+        ballGrad += vec2<f32>(dx, dy) * (4.0 * q / R2);
+        ballIso = hw;
+        ballStrength = strength;
+      }
+    } else if (kind < 0.5 || kind > 1.5) {
       // Circle (or pill: distance to a horizontal segment), Interaction falloff.
       let sx = clamp(px - ex, -hw, hw) * select(0.0, 1.0, kind > 1.5);
       let dx = (ex + sx) - px;
@@ -123,6 +139,13 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       }
     }
   }
+  if (ballStrength > 0.0 && ballS > ballIso * 0.55) {
+    let g = length(ballGrad);
+    if (g > 0.0) {
+      let m = clamp((ballS / ballIso - 0.55) / 0.65, 0.0, 1.4);
+      ${particleVar}.acceleration += (ballGrad / g) * (-ballStrength * m);
+    }
+  }
 }`,
     }
   }
@@ -134,6 +157,11 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         if (!data || data.length < STRIDE) return
         const px = particle.position.x
         const py = particle.position.y
+        let ballS = 0
+        let ballGX = 0
+        let ballGY = 0
+        let ballIso = 1
+        let ballStrength = 0
         for (let base = 0; base + STRIDE <= data.length; base += STRIDE) {
           const kind = data[base]
           const mode = data[base + 1]
@@ -143,7 +171,20 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
           const hw = data[base + 5]
           const hh = data[base + 6]
           const strength = data[base + 7]
-          if (kind < 0.5 || kind > 1.5) {
+          if (kind > 2.5) {
+            const dx = px - ex
+            const dy = py - ey
+            const d2 = dx * dx + dy * dy
+            const R2 = range * range
+            if (d2 < R2) {
+              const q = 1 - d2 / R2
+              ballS += q * q
+              ballGX += dx * ((4 * q) / R2)
+              ballGY += dy * ((4 * q) / R2)
+              ballIso = hw
+              ballStrength = strength
+            }
+          } else if (kind < 0.5 || kind > 1.5) {
             const sx = kind > 1.5 ? Math.max(-hw, Math.min(hw, px - ex)) : 0
             const dx = ex + sx - px
             const dy = ey - py
@@ -180,6 +221,14 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
               particle.acceleration.x += s * dx * f
               particle.acceleration.y += s * dy * f
             }
+          }
+        }
+        if (ballStrength > 0 && ballS > ballIso * 0.55) {
+          const g = Math.hypot(ballGX, ballGY)
+          if (g > 0) {
+            const m = Math.min(Math.max((ballS / ballIso - 0.55) / 0.65, 0), 1.4)
+            particle.acceleration.x += (ballGX / g) * -ballStrength * m
+            particle.acceleration.y += (ballGY / g) * -ballStrength * m
           }
         }
       },

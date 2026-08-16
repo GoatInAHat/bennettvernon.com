@@ -287,11 +287,31 @@ a:visited {
   top: 24px;
   right: 68px;
   z-index: 210;
-  width: 250px;
+  width: 260px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px 18px 18px;
+}
+
+.settings-subtitle {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 12px 0 4px;
+}
+
+.mode-checks {
+  display: flex;
+  gap: 5px;
+}
+
+.mode-checks input {
+  accent-color: #000;
+  margin: 0;
 }
 
 .settings-title {

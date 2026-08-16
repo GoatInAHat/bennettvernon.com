@@ -1,9 +1,25 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { PartyBackground } from './party/PartyBackground'
+import { bridge } from './party/bridge'
 import { DEMO_PRESETS } from './party/presets'
 import { useEffectorTarget } from './party/targets'
 import { SettingsPanel } from './SettingsPanel'
 import { site, projects, research, work, type WorkItem } from './content'
+
+/** Wraps every non-space character in a glitchable span. */
+function Chars({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('').map((ch, i) =>
+        ch === ' ' ? ch : (
+          <span key={i} className="g">
+            {ch}
+          </span>
+        ),
+      )}
+    </>
+  )
+}
 
 /** The site descriptions only use **bold** and _italic_. */
 function Rich({ text }: { text: string }) {
@@ -11,12 +27,75 @@ function Rich({ text }: { text: string }) {
   return (
     <>
       {parts.map((part, i) => {
-        if (part.startsWith('**')) return <strong key={i}>{part.slice(2, -2)}</strong>
-        if (part.startsWith('_')) return <em key={i}>{part.slice(1, -1)}</em>
-        return part
+        if (part.startsWith('**')) return <strong key={i}><Chars text={part.slice(2, -2)} /></strong>
+        if (part.startsWith('_')) return <em key={i}><Chars text={part.slice(1, -1)} /></em>
+        return <Chars key={i} text={part} />
       })}
     </>
   )
+}
+
+interface GlitchState {
+  orig: string
+  timer: number
+  hovering: boolean
+  leftAt: number
+}
+
+/** Hovered characters rapidly cycle through ASCII, slowing to a stop over
+ * half a second once the cursor moves off them. */
+function useGlitchText() {
+  useEffect(() => {
+    const states = new WeakMap<HTMLElement, GlitchState>()
+    const randChar = () => String.fromCharCode(33 + Math.floor(Math.random() * 94))
+
+    const run = (el: HTMLElement, st: GlitchState) => {
+      const tick = () => {
+        if (st.hovering) {
+          el.textContent = randChar()
+          st.timer = window.setTimeout(tick, 100)
+          return
+        }
+        const u = (Date.now() - st.leftAt) / 500
+        if (u >= 1) {
+          el.textContent = st.orig
+          st.timer = 0
+          return
+        }
+        el.textContent = randChar()
+        // Switching rate falls off smoothly over the half second.
+        st.timer = window.setTimeout(tick, Math.min(400, 100 / (1 - u * u)))
+      }
+      tick()
+    }
+
+    const onOver = (e: Event) => {
+      const el = (e.target as Element).closest?.('.g') as HTMLElement | null
+      if (!el) return
+      let st = states.get(el)
+      if (!st) {
+        st = { orig: el.textContent ?? '', timer: 0, hovering: true, leftAt: 0 }
+        states.set(el, st)
+      }
+      st.hovering = true
+      if (!st.timer) run(el, st)
+    }
+    const onOut = (e: Event) => {
+      const el = (e.target as Element).closest?.('.g') as HTMLElement | null
+      if (!el) return
+      const st = states.get(el)
+      if (st) {
+        st.hovering = false
+        st.leftAt = Date.now()
+      }
+    }
+    document.addEventListener('pointerover', onOver)
+    document.addEventListener('pointerout', onOut)
+    return () => {
+      document.removeEventListener('pointerover', onOver)
+      document.removeEventListener('pointerout', onOut)
+    }
+  }, [])
 }
 
 function GearButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
@@ -51,25 +130,33 @@ function DemoDots({
   onToggleSettings: () => void
 }) {
   const [active, setActive] = useState(0)
+  const [enabled, setEnabled] = useState<boolean[]>(() => [...bridge.enabledModes])
   useEffect(() => {
     const onDemo = (e: Event) => setActive((e as CustomEvent<number>).detail)
+    const onModes = (e: Event) => setEnabled([...(e as CustomEvent<boolean[]>).detail])
     window.addEventListener('party:demo', onDemo)
-    return () => window.removeEventListener('party:demo', onDemo)
+    window.addEventListener('party:modes', onModes)
+    return () => {
+      window.removeEventListener('party:demo', onDemo)
+      window.removeEventListener('party:modes', onModes)
+    }
   }, [])
   return (
     <div className="demo-dots" aria-label="Simulation mode selector">
       <GearButton open={settingsOpen} onToggle={onToggleSettings} />
-      {DEMO_PRESETS.map((_, index) => (
-        <button
-          key={index}
-          className={`demo-dot-button ${index === active ? 'active' : ''}`}
-          onClick={() => window.dispatchEvent(new CustomEvent('party:select', { detail: index }))}
-          aria-pressed={index === active}
-          aria-label={`Simulation mode ${index + 1}`}
-        >
-          <span className="demo-dot" />
-        </button>
-      ))}
+      {DEMO_PRESETS.map((_, index) =>
+        enabled[index] ? (
+          <button
+            key={index}
+            className={`demo-dot-button ${index === active ? 'active' : ''}`}
+            onClick={() => window.dispatchEvent(new CustomEvent('party:select', { detail: index }))}
+            aria-pressed={index === active}
+            aria-label={`Simulation mode ${index + 1}`}
+          >
+            <span className="demo-dot" />
+          </button>
+        ) : null,
+      )}
     </div>
   )
 }
@@ -84,7 +171,9 @@ function SectionSeparator({ title }: { title: string }) {
   useEffectorTarget(`separator-${title}`, 'separator', ref)
   return (
     <div className="section-sep">
-      <h2>{title}</h2>
+      <h2>
+        <Chars text={title} />
+      </h2>
       <div ref={ref} className="sep-rule" />
     </div>
   )
@@ -96,10 +185,16 @@ function WorkItemBlock({ item }: { item: WorkItem }) {
       <article>
         <div className="work-head">
           <div>
-            <div className="meta subtitle">{item.subtitle}</div>
-            <h3>{item.title}</h3>
+            <div className="meta subtitle">
+              <Chars text={item.subtitle} />
+            </div>
+            <h3>
+              <Chars text={item.title} />
+            </h3>
           </div>
-          <div className="meta">{item.date}</div>
+          <div className="meta">
+            <Chars text={item.date} />
+          </div>
         </div>
         <p className="md-muted">
           <Rich text={item.description} />
@@ -117,6 +212,7 @@ const SECTIONS: { title: string; items: WorkItem[] }[] = [
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
+  useGlitchText()
   return (
     <>
       <PartyBackground />
@@ -127,12 +223,14 @@ export default function App() {
       </header>
       <main className="container">
         <Block>
-          <p className="lede">{site.description}</p>
+          <p className="lede">
+            <Chars text={site.description} />
+          </p>
           <div className="hero-links">
             {site.links.map((link, index) => (
               <span key={link.href}>
                 <a href={link.href} target="_blank" rel="noreferrer">
-                  {link.label}
+                  <Chars text={link.label} />
                 </a>
                 {index < site.links.length - 1 ? (
                   <span className="dot" aria-hidden="true">
