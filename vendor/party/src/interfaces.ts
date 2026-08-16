@@ -1,6 +1,5 @@
 import { View } from "./view";
 import type { Module } from "./module";
-import { OscillatorManager, AddOscillatorOptions } from "./oscillators";
 
 export interface IParticle {
   position: { x: number; y: number };
@@ -75,6 +74,7 @@ export interface IEngine {
    * Intended for tool/undo operations; avoids full-scene readbacks on WebGPU.
    */
   setParticle(index: number, p: IParticle): void;
+  setParticleRange(start: number, list: IParticle[]): void;
   /**
    * Fast path to "remove" (mass=0) or pin/unpin (mass<0 / mass>0) without
    * fetching all particles.
@@ -108,67 +108,6 @@ export interface IEngine {
   getConstrainIterations(): number;
   setConstrainIterations(iterations: number): void;
   getModule(name: string): Module | undefined;
-
-  // Oscillator API
-  addOscillator(params: {
-    moduleName: string;
-    inputName: string;
-    min: number;
-    max: number;
-    speedHz: number;
-    options?: AddOscillatorOptions;
-  }): string;
-  removeOscillator(moduleName: string, inputName: string): void;
-  updateOscillatorSpeed(
-    moduleName: string,
-    inputName: string,
-    speedHz: number
-  ): void;
-  updateOscillatorBounds(
-    moduleName: string,
-    inputName: string,
-    min: number,
-    max: number
-  ): void;
-  hasOscillator(moduleName: string, inputName: string): boolean;
-  getOscillator(
-    moduleName: string,
-    inputName: string
-  ):
-    | {
-        moduleName: string;
-        inputName: string;
-        min: number;
-        max: number;
-        speedHz: number;
-        curveExponent: number;
-        jitterMultiplier: number;
-        phaseOffset: number;
-        lastDirection: -1 | 0 | 1;
-        lastValue: number;
-        active: boolean;
-      }
-    | undefined;
-  clearOscillators(): void;
-  clearModuleOscillators(moduleName: string): void;
-  addOscillatorListener(
-    moduleName: string,
-    inputName: string,
-    handler: (value: number) => void
-  ): void;
-  removeOscillatorListener(
-    moduleName: string,
-    inputName: string,
-    handler: (value: number) => void
-  ): void;
-  setOscillatorState(
-    moduleName: string,
-    inputName: string,
-    lastValue: number,
-    lastDirection: -1 | 0 | 1
-  ): boolean;
-  getOscillatorsElapsedSeconds(): number;
-  setOscillatorsElapsedSeconds(seconds: number): void;
 }
 
 export abstract class AbstractEngine implements IEngine {
@@ -184,7 +123,6 @@ export abstract class AbstractEngine implements IEngine {
   protected view: View;
   protected modules: Module[];
   protected maxSize: number = 0;
-  protected oscillatorManager: OscillatorManager;
   /** Host callback invoked once per animation frame, before the simulation
    * step, so host-side writes (uniforms, particle edits) land in the same
    * frame. Runs even while paused (rendering continues while paused). */
@@ -207,18 +145,6 @@ export abstract class AbstractEngine implements IEngine {
     this.cellSize = options.cellSize ?? 16;
     this.maxNeighbors = options.maxNeighbors ?? 100;
     this.onFrame = options.onFrame;
-    // Initialize oscillator manager with a setter bound to module input writes
-    this.oscillatorManager = new OscillatorManager(
-      (moduleName: string, inputName: string, value: number) => {
-        const module = this.getModule(moduleName);
-        if (!module) return;
-        // Write input and notify settings change
-        (module as Module<any, Record<string, number>>).write({
-          [inputName]: value,
-        } as Record<string, number>);
-        this.onModuleSettingsChanged();
-      }
-    );
   }
 
   // Abstract methods that must be implemented by subclasses
@@ -227,6 +153,7 @@ export abstract class AbstractEngine implements IEngine {
   abstract setSize(width: number, height: number): void;
   abstract addParticle(p: IParticle): number;
   abstract setParticle(index: number, p: IParticle): void;
+  abstract setParticleRange(start: number, list: IParticle[]): void;
   abstract setParticleMass(index: number, mass: number): void;
   abstract setParticles(p: IParticle[]): void;
   abstract getParticles(): Promise<IParticle[]>;
@@ -290,100 +217,6 @@ export abstract class AbstractEngine implements IEngine {
     return this.fpsEstimate;
   }
 
-  // Oscillator API implementations
-  addOscillator(params: {
-    moduleName: string;
-    inputName: string;
-    min: number;
-    max: number;
-    speedHz: number;
-    options?: AddOscillatorOptions;
-  }): string {
-    return this.oscillatorManager.addOscillator(params);
-  }
-  removeOscillator(moduleName: string, inputName: string): void {
-    this.oscillatorManager.removeOscillator(moduleName, inputName);
-  }
-  updateOscillatorSpeed(
-    moduleName: string,
-    inputName: string,
-    speedHz: number
-  ): void {
-    this.oscillatorManager.updateOscillatorSpeed(
-      moduleName,
-      inputName,
-      speedHz
-    );
-  }
-  updateOscillatorBounds(
-    moduleName: string,
-    inputName: string,
-    min: number,
-    max: number
-  ): void {
-    this.oscillatorManager.updateOscillatorBounds(
-      moduleName,
-      inputName,
-      min,
-      max
-    );
-  }
-  hasOscillator(moduleName: string, inputName: string): boolean {
-    return this.oscillatorManager.hasOscillator(moduleName, inputName);
-  }
-  getOscillator(moduleName: string, inputName: string) {
-    return this.oscillatorManager.getOscillator(moduleName, inputName);
-  }
-  clearOscillators(): void {
-    this.oscillatorManager.clear();
-  }
-  clearModuleOscillators(moduleName: string): void {
-    this.oscillatorManager.clearModule(moduleName);
-  }
-  addOscillatorListener(
-    moduleName: string,
-    inputName: string,
-    handler: (value: number) => void
-  ): void {
-    this.oscillatorManager.addOscillatorListener(
-      moduleName,
-      inputName,
-      handler
-    );
-  }
-  removeOscillatorListener(
-    moduleName: string,
-    inputName: string,
-    handler: (value: number) => void
-  ): void {
-    this.oscillatorManager.removeOscillatorListener(
-      moduleName,
-      inputName,
-      handler
-    );
-  }
-  setOscillatorState(
-    moduleName: string,
-    inputName: string,
-    lastValue: number,
-    lastDirection: -1 | 0 | 1
-  ): boolean {
-    return this.oscillatorManager.setOscillatorState(
-      moduleName,
-      inputName,
-      lastValue,
-      lastDirection
-    );
-  }
-
-  getOscillatorsElapsedSeconds(): number {
-    return this.oscillatorManager.getElapsedSeconds();
-  }
-
-  setOscillatorsElapsedSeconds(seconds: number): void {
-    this.oscillatorManager.setElapsedSeconds(seconds);
-  }
-
   export(): Record<string, Record<string, number>> {
     const settings: Record<string, Record<string, number>> = {};
     for (const module of this.modules) {
@@ -426,11 +259,6 @@ export abstract class AbstractEngine implements IEngine {
         this.fpsEstimate * (1 - this.fpsSmoothing) +
         instantFps * this.fpsSmoothing;
     }
-  }
-
-  protected updateOscillators(dt: number): void {
-    if (!this.playing) return; // follow global pause
-    this.oscillatorManager.updateAll(dt);
   }
 
   protected getTimeDelta(): number {

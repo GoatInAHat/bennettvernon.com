@@ -36,6 +36,11 @@ type SensorsInputs = {
   followBehavior: number;
   fleeBehavior: number;
   fleeAngle: number;
+  // Master gate (0..1): blends the steering velocity write with the incoming
+  // velocity. Needed because the module SETS velocity on activation —
+  // sensorStrength 0 would freeze activated particles, not disable steering —
+  // so this is the only continuous fade with an exact no-op at 0.
+  strength: number;
 };
 
 export class Sensors extends Module<"sensors", SensorsInputs> {
@@ -51,6 +56,7 @@ export class Sensors extends Module<"sensors", SensorsInputs> {
     followBehavior: DataType.NUMBER,
     fleeBehavior: DataType.NUMBER,
     fleeAngle: DataType.NUMBER,
+    strength: DataType.NUMBER,
   } as const;
 
   constructor(opts?: {
@@ -83,6 +89,7 @@ export class Sensors extends Module<"sensors", SensorsInputs> {
         opts?.fleeBehavior ?? DEFAULT_SENSORS_FLEE_BEHAVIOR
       ),
       fleeAngle: opts?.fleeAngle ?? DEFAULT_SENSORS_FLEE_ANGLE,
+      strength: 1,
     });
 
     if (opts?.enabled !== undefined) {
@@ -139,6 +146,14 @@ export class Sensors extends Module<"sensors", SensorsInputs> {
 
   setFleeAngle(value: number): void {
     this.write({ fleeAngle: value });
+  }
+
+  setStrength(value: number): void {
+    this.write({ strength: value });
+  }
+
+  getStrength(): number {
+    return this.readValue("strength");
   }
 
   getSensorDistance(): number {
@@ -400,8 +415,11 @@ if (fleeBehavior == 0.0) { // "any" (ignore color, compare intensities)
 var totalForce = followForce + fleeForce;
 if (length(totalForce) > 0.0) {
   let dir = normalize(totalForce);
-  // Match CPU: set velocity to direction scaled by sensorStrength/5
-  ${particleVar}.velocity = dir * (sensorStrength / 5.0);
+  // Match CPU: steer toward direction scaled by sensorStrength/5, blended by
+  // the master gate so strength 0 is an exact no-op.
+  ${particleVar}.velocity = mix(${particleVar}.velocity, dir * (sensorStrength / 5.0), ${getUniform(
+        "strength"
+      )});
 }
 `,
     };
@@ -716,9 +734,13 @@ if (length(totalForce) > 0.0) {
             x: totalForce.x / forceMag,
             y: totalForce.y / forceMag,
           };
-          // Match WebGPU: set velocity to direction scaled by sensorStrength/5
-          particle.velocity.x = dir.x * (sensorStrength / 5);
-          particle.velocity.y = dir.y * (sensorStrength / 5);
+          // Match WebGPU: steer toward direction scaled by sensorStrength/5,
+          // blended by the master gate so strength 0 is an exact no-op.
+          const gate = input.strength;
+          const tx = dir.x * (sensorStrength / 5);
+          const ty = dir.y * (sensorStrength / 5);
+          particle.velocity.x += (tx - particle.velocity.x) * gate;
+          particle.velocity.y += (ty - particle.velocity.y) * gate;
         }
       },
     };

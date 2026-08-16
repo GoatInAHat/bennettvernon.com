@@ -56,6 +56,11 @@ type FluidsInputs = {
   maxAcceleration: number;
   // PIC/FLIP-only (still always present as a uniform)
   flipRatio: number;
+  // Master gate (0..1): scales the module's whole velocity effect. Unlike the
+  // pressure/viscosity multipliers, this has an exact no-op at 0 for BOTH
+  // methods (the PIC/FLIP transfer rewrites velocity even at zero pressure),
+  // which lets hosts fade the module in and out continuously.
+  strength: number;
 };
 
 export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
@@ -72,6 +77,7 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
     enableNearPressure: DataType.NUMBER,
     maxAcceleration: DataType.NUMBER,
     flipRatio: DataType.NUMBER,
+    strength: DataType.NUMBER,
   } as const;
 
   constructor(
@@ -125,6 +131,7 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
         enableNearPressure: DEFAULT_FLUIDS_ENABLE_NEAR_PRESSURE ? 1 : 0,
         maxAcceleration: DEFAULT_FLUIDS_MAX_ACCELERATION,
         flipRatio: o?.flipRatio ?? DEFAULT_PICFLIP_FLIP_RATIO,
+        strength: 1,
       });
     } else {
       const o = opts as Exclude<typeof opts, { method: FluidsMethod.Picflip }>;
@@ -144,6 +151,7 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
           o?.maxAcceleration ?? DEFAULT_FLUIDS_MAX_ACCELERATION,
         // Keep PICFLIP-only uniform initialized (unused when method=sph)
         flipRatio: DEFAULT_PICFLIP_FLIP_RATIO,
+        strength: 1,
       });
     }
 
@@ -188,6 +196,12 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
 
   setMaxAcceleration(v: number): void {
     this.write({ maxAcceleration: v });
+  }
+  setStrength(v: number): void {
+    this.write({ strength: v });
+  }
+  getStrength(): number {
+    return this.readValue("strength");
   }
 
   getInfluenceRadius(): number {
@@ -374,8 +388,11 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
       force = force * (maxLen / fLen);
     }
 
-    // Apply directly to velocity (CPU mirrors this behavior)
-    ${particleVar}.velocity = ${particleVar}.velocity + force;
+    // Apply directly to velocity (CPU mirrors this behavior), scaled by the
+    // master gate so strength 0 is an exact no-op.
+    ${particleVar}.velocity = ${particleVar}.velocity + force * ${getUniform(
+        "strength"
+      )};
   } else {
     // ==========================
     // PICFLIP (simplified local-pressure approximation)
@@ -393,6 +410,7 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
     let prevVelX = ${getState("prevVelX")};
     let prevVelY = ${getState("prevVelY")};
 
+    let velIn = ${particleVar}.velocity;
     var newVelX = ${particleVar}.velocity.x;
     var newVelY = ${particleVar}.velocity.y;
 
@@ -479,8 +497,12 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
       newVelY = newVelY + grad.y * ${dtVar};
     }
 
-    ${particleVar}.velocity.x = newVelX;
-    ${particleVar}.velocity.y = newVelY;
+    // Master gate: blend between the incoming velocity and the solved one so
+    // strength 0 is an exact no-op even though the PIC/FLIP transfer always
+    // rewrites velocity.
+    ${particleVar}.velocity = mix(velIn, vec2<f32>(newVelX, newVelY), ${getUniform(
+        "strength"
+      )});
   }
 }`,
     };
@@ -674,9 +696,11 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
             forceY = forceY * (maxAccel / fLen);
           }
 
-          // Apply directly to velocity (matching WebGPU behavior)
-          particle.velocity.x += forceX;
-          particle.velocity.y += forceY;
+          // Apply directly to velocity (matching WebGPU behavior), scaled by
+          // the master gate so strength 0 is an exact no-op.
+          const strength = this.readValue("strength");
+          particle.velocity.x += forceX * strength;
+          particle.velocity.y += forceY * strength;
         } else {
           // PICFLIP
           // Scale UI-friendly values to PIC/FLIP internal tuning:
@@ -692,6 +716,8 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
           const prevVelX = getState("prevVelX");
           const prevVelY = getState("prevVelY");
 
+          const velInX = particle.velocity.x;
+          const velInY = particle.velocity.y;
           let newVelX = particle.velocity.x;
           let newVelY = particle.velocity.y;
 
@@ -780,8 +806,11 @@ export class Fluids extends Module<"fluids", FluidsInputs, FluidStateKeys> {
             newVelY += gradY * dt;
           }
 
-          particle.velocity.x = newVelX;
-          particle.velocity.y = newVelY;
+          // Master gate: blend between the incoming velocity and the solved
+          // one so strength 0 is an exact no-op (matching WebGPU).
+          const strength = this.readValue("strength");
+          particle.velocity.x = velInX + (newVelX - velInX) * strength;
+          particle.velocity.y = velInY + (newVelY - velInY) * strength;
         }
       },
     };

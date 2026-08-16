@@ -146,6 +146,10 @@ export class CPUEngine extends AbstractEngine {
     this.updateMaxSize(p.size);
   }
 
+  setParticleRange(start: number, list: IParticle[]): void {
+    for (let i = 0; i < list.length; i++) this.setParticle(start + i, list[i]);
+  }
+
   setParticleMass(index: number, mass: number): void {
     if (index < 0) return;
     if (index >= this.particles.length) return;
@@ -245,8 +249,6 @@ export class CPUEngine extends AbstractEngine {
     this.onFrame?.(dt);
 
     if (this.playing) {
-      // Update engine-owned oscillators before module updates
-      this.updateOscillators(dt);
       this.update(dt);
     }
 

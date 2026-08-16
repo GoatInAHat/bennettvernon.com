@@ -45,6 +45,15 @@ export class ParticleStore {
     this.writeAtIndex(index, p);
   }
 
+  /** Overwrite a contiguous run of records; returns how many were written
+   * (clamped to the active count). */
+  setParticleRange(start: number, list: IParticle[]): number {
+    if (start < 0 || start >= this.count) return 0;
+    const n = Math.min(list.length, this.count - start);
+    for (let i = 0; i < n; i++) this.writeAtIndex(start + i, list[i]);
+    return n;
+  }
+
   setParticleMass(index: number, mass: number): void {
     if (index < 0 || index >= this.count) return;
     const base = index * this.floatsPerParticle;
@@ -94,6 +103,15 @@ export class ParticleStore {
     if (index < 0 || index >= this.count) return;
     const base = index * this.floatsPerParticle;
     const slice = this.data.subarray(base, base + this.floatsPerParticle);
+    resources.writeParticleSlice(base, slice);
+  }
+
+  /** Write a contiguous run of records into GPU storage as one upload. */
+  syncRangeToGPU(resources: GPUResources, start: number, n: number): void {
+    if (n <= 0 || start < 0 || start >= this.count) return;
+    const count = Math.min(n, this.count - start);
+    const base = start * this.floatsPerParticle;
+    const slice = this.data.subarray(base, base + count * this.floatsPerParticle);
     resources.writeParticleSlice(base, slice);
   }
 

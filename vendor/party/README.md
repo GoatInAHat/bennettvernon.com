@@ -41,9 +41,26 @@ Every divergence from upstream is listed here.
   strongest-wins rather than summing (viewers render the exact max-field).
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
+- `modules/forces/fluids.ts`, `collisions.ts`, `sensors.ts` — each gains a
+  `strength` master-gate uniform (default 1) with an exact no-op at 0, so
+  hosts can fade whole modules in and out continuously. Fluids needs it
+  because the PIC/FLIP transfer rewrites velocity even at zero pressure
+  (the final write blends `mix(velIn, solved, strength)`; SPH scales its
+  force). Collisions is a positional solver with no other magnitude knob
+  (corrections and impulses scale, `correct` is gated). Sensors SETS
+  velocity on activation, so `sensorStrength: 0` would freeze particles
+  rather than disable steering (the write blends by `strength`).
+- `interfaces.ts`, both runtime engines, `particle-store.ts` —
+  `setParticleRange(start, list)`: overwrite a contiguous run of particles
+  with a single GPU buffer upload (per-index `setParticle` costs one
+  `writeBuffer` each; the host respawns hundreds of revealed particles per
+  frame while a rising particle budget animates).
 - Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`,
-  `Interaction` modules, `Spawner`, and `LocalQuery`/`getParticlesInRadius`
+  `Interaction` modules, `Spawner`, `LocalQuery`/`getParticlesInRadius`
   (the cell census replaced the site's only bounded-query use; the query
   API's three serial full-queue-drain readbacks made it a per-call
   pipeline stall anyway; the site's unified pointer-field system replaced
-  Interaction with signed trail nodes).
+  Interaction with signed trail nodes), and the engine-owned oscillator
+  system (`oscillators.ts` and the IEngine/AbstractEngine/facade API).
+  The host now evaluates preset oscillators itself inside its per-frame
+  hook, where they can blend with mode transitions without value snaps.

@@ -19,10 +19,20 @@ import {
 import { Effectors, type Effector, type TrailNode } from './effectors'
 import {
   createPartyModules,
-  applyDiscretePreset,
-  applyPresetOscillators,
+  applyDiscrete,
+  applyDiscreteStart,
+  applyDiscreteMid,
+  applyDiscreteEnd,
+  applyEngineSettings,
+  engineTiming,
+  dipKeys,
+  discreteOf,
+  presetOscillators,
+  oscValue,
   DEMO_PRESETS,
   PARAM_DEFS,
+  type DiscreteState,
+  type OscConfig,
 } from './presets'
 import { getTargets, onTargetsChanged } from './targets'
 
@@ -276,7 +286,23 @@ export function PartyBackground() {
     const globals: GlobalSettings = { ...GLOBAL_DEFAULTS, dragRadius: isMobile() ? 350 : 400 }
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
     const currentParams: Record<string, number> = {}
-    let transition: { from: Record<string, number>; to: Record<string, number>; t0: number; ms: number; preset: (typeof DEMO_PRESETS)[number] } | null = null
+    let transition: {
+      from: Record<string, number>
+      to: Record<string, number>
+      t0: number
+      ms: number
+      next: DiscreteState
+      dip: Set<string>
+      osc: OscConfig[]
+      oscByKey: Map<string, OscConfig>
+      midDone: boolean
+      engineAt: 'start' | 'mid' | 'end'
+    } | null = null
+    /** Discrete module state (enable flags, sub-modes, engine settings)
+     * actually applied right now — the baseline transitions stage against. */
+    let discreteNow: DiscreteState | null = null
+    /** Oscillators of the settled demo, evaluated host-side every tick. */
+    let activeOsc: OscConfig[] = []
     let name: NameLayout | null = null
     let charBalls: CharBall[] = []
     /** Signed distances (page px) of the name glyphs, for the pull field. */
@@ -345,6 +371,8 @@ export function PartyBackground() {
     const frameDts = new Float32Array(120)
     let frameDtIndex = 0
     let lastTickAt = 0
+    /** Accumulated clamped frame time driving host oscillators. */
+    let oscClock = 0
     /** Trail points remember the speed/pressure boosts and the mode (pull
      * vs push) they were born with, for as long as they live. */
     interface TrailPoint {
@@ -806,19 +834,52 @@ export function PartyBackground() {
       if (lastTickAt > 0) {
         frameDts[frameDtIndex] = now - lastTickAt
         frameDtIndex = (frameDtIndex + 1) % frameDts.length
+        // Advance the oscillator clock by clamped frame time (matching the
+        // engine's own 100ms dt clamp): after a hidden tab or a long frame
+        // the phase moves one step, not the whole wall-clock gap — an
+        // unclamped clock would snap every oscillated param on resume.
+        oscClock += Math.min(now - lastTickAt, 100) / 1000
       }
       lastTickAt = now
+      const oscSec = oscClock
       if (transition) {
         const p = Math.min((now - transition.t0) / transition.ms, 1)
         const e = easeInOutCubic(p)
+        // Sub-modes that survive on both sides flip exactly where their
+        // dipped force params cross zero (e = 0.5), so the discrete switch
+        // never applies a force.
+        if (!transition.midDone && e >= 0.5 && discreteNow) {
+          discreteNow = applyDiscreteMid(engine, mods, discreteNow, transition.next, {
+            isWebGPU: webgpu,
+            applyEngine: transition.engineAt === 'mid',
+          })
+          transition.midDone = true
+        }
         for (const def of PARAM_DEFS) {
-          const v = transition.from[def.key] + (transition.to[def.key] - transition.from[def.key]) * e
+          // Oscillated params chase the incoming oscillator's live value, so
+          // the blend lands exactly on the moving curve at p = 1.
+          const o = transition.oscByKey.get(def.key)
+          const target = o ? oscValue(o, oscSec) : transition.to[def.key]
+          const f = transition.from[def.key]
+          const v = transition.dip.has(def.key)
+            ? f * Math.max(0, 1 - 2 * e) + target * Math.max(0, 2 * e - 1)
+            : f + (target - f) * e
           def.set(mods, v)
           currentParams[def.key] = v
         }
         if (p >= 1) {
-          applyPresetOscillators(engine, transition.preset)
+          if (discreteNow) discreteNow = applyDiscreteEnd(mods, discreteNow, transition.next)
+          if (transition.engineAt === 'end') {
+            applyEngineSettings(engine, transition.next, { isWebGPU: webgpu })
+          }
+          activeOsc = transition.osc
           transition = null
+        }
+      } else {
+        for (const o of activeOsc) {
+          const v = oscValue(o, oscSec)
+          paramByKey.get(o.key)?.set(mods, v)
+          currentParams[o.key] = v
         }
       }
       // Ease every pointer's boost inputs so force changes stay
@@ -1476,31 +1537,33 @@ export function PartyBackground() {
     // Like the reference page's spawn-around-the-circle: particles are born
     // scattered around the name and around the content text, with the same
     // random launch speed.
+    const spawnOne = (i: number, anchors: { x: number; y: number }[]): IParticle => {
+      const anchor =
+        anchors.length > 0 && i % 2 === 0
+          ? anchors[Math.floor(Math.random() * anchors.length)]
+          : name!.points[Math.floor(Math.random() * name!.points.length)]
+      const spread = SPAWN_SPREAD_PX * Math.sqrt(Math.random())
+      const angle = Math.random() * Math.PI * 2
+      const { x, y } = pageToWorld(
+        anchor.x + Math.cos(angle) * spread,
+        anchor.y + Math.sin(angle) * spread,
+      )
+      const heading = Math.random() * Math.PI * 2
+      return {
+        position: { x, y },
+        velocity: { x: Math.cos(heading) * SPAWN_SPEED, y: Math.sin(heading) * SPAWN_SPEED },
+        size: 3,
+        mass: 1,
+        color: { r: 1, g: 1, b: 1, a: 1 },
+      }
+    }
+
     const spawnAll = () => {
       if (!engine || !name || name.points.length === 0) return
       const anchors = charBalls.filter((_, i) => i % 3 === 0)
       const count = PARTICLE_POOL(webgpu)
       const particles: IParticle[] = []
-      for (let i = 0; i < count; i++) {
-        const anchor =
-          anchors.length > 0 && i % 2 === 0
-            ? anchors[Math.floor(Math.random() * anchors.length)]
-            : name.points[Math.floor(Math.random() * name.points.length)]
-        const spread = SPAWN_SPREAD_PX * Math.sqrt(Math.random())
-        const angle = Math.random() * Math.PI * 2
-        const { x, y } = pageToWorld(
-          anchor.x + Math.cos(angle) * spread,
-          anchor.y + Math.sin(angle) * spread,
-        )
-        const heading = Math.random() * Math.PI * 2
-        particles.push({
-          position: { x, y },
-          velocity: { x: Math.cos(heading) * SPAWN_SPEED, y: Math.sin(heading) * SPAWN_SPEED },
-          size: 3,
-          mass: 1,
-          color: { r: 1, g: 1, b: 1, a: 1 },
-        })
-      }
+      for (let i = 0; i < count; i++) particles.push(spawnOne(i, anchors))
       engine.setParticles(particles)
     }
 
@@ -1513,10 +1576,25 @@ export function PartyBackground() {
       }
       const start = engine.getMaxParticles() ?? target
       const t0 = performance.now()
+      let prevCap = start
       const step = (t: number) => {
         if (!engine) return
         const p = Math.min((t - t0) / durationMs, 1)
-        engine.setMaxParticles(Math.round(start + (target - start) * easeInOutCubic(p)))
+        const cap = Math.round(start + (target - start) * easeInOutCubic(p))
+        // Particles revealed by a rising cap were frozen at stale positions
+        // with stale velocities from an old mode; respawn them like fresh
+        // particles so they enter as scattered texture, not as a burst. One
+        // range write per frame (the span is contiguous), clamped to the
+        // spawned pool.
+        const revealTo = Math.min(cap, PARTICLE_POOL(webgpu))
+        if (revealTo > prevCap && name && name.points.length > 0) {
+          const anchors = charBalls.filter((_, i) => i % 3 === 0)
+          const fresh: IParticle[] = []
+          for (let i = prevCap; i < revealTo; i++) fresh.push(spawnOne(i, anchors))
+          engine.setParticleRange(prevCap, fresh)
+        }
+        prevCap = cap
+        engine.setMaxParticles(cap)
         if (p < 1) maxParticlesRaf = requestAnimationFrame(step)
       }
       maxParticlesRaf = requestAnimationFrame(step)
@@ -1558,25 +1636,45 @@ export function PartyBackground() {
       if (!engine) return
       demoIndex = index
       const preset = DEMO_PRESETS[index]
-      applyDiscretePreset(engine, mods, preset, { isWebGPU: webgpu })
-      engine.clearOscillators()
       const modeOverrides = overrides[index] ?? {}
+      const next = discreteOf(preset)
       const to: Record<string, number> = {}
       for (const def of PARAM_DEFS) {
         to[def.key] =
           (modeOverrides as Record<string, number | undefined>)[def.key] ??
           def.from(preset, isMobile())
       }
+      // User-overridden params stay static; their preset oscillator is dropped.
+      const osc = presetOscillators(preset).filter(
+        (o) => (modeOverrides as Record<string, number | undefined>)[o.key] === undefined,
+      )
       const ms = instant ? 0 : globals.transitionLength * 1000
-      if (ms <= 0) {
+      if (ms <= 0 || !discreteNow) {
+        applyDiscrete(engine, mods, next, { isWebGPU: webgpu })
+        discreteNow = next
         for (const def of PARAM_DEFS) {
           def.set(mods, to[def.key])
           currentParams[def.key] = to[def.key]
         }
-        applyPresetOscillators(engine, preset)
+        activeOsc = osc
         transition = null
       } else {
-        transition = { from: { ...currentParams }, to, t0: performance.now(), ms, preset }
+        const dip = dipKeys(discreteNow, next)
+        const engineAt = engineTiming(discreteNow, next)
+        discreteNow = applyDiscreteStart(mods, discreteNow, next)
+        if (engineAt === 'start') applyEngineSettings(engine, next, { isWebGPU: webgpu })
+        transition = {
+          from: { ...currentParams },
+          to,
+          t0: performance.now(),
+          ms,
+          next,
+          dip,
+          osc,
+          oscByKey: new Map(osc.map((o) => [o.key, o])),
+          midDone: false,
+          engineAt,
+        }
       }
       setMaxParticlesAnimated(Math.floor(globals.particleCount * preset.budgetFactor), ms)
       window.dispatchEvent(new CustomEvent('party:demo', { detail: index }))
@@ -1591,7 +1689,13 @@ export function PartyBackground() {
       overrides[demoIndex] = { ...overrides[demoIndex], [key]: value }
       paramByKey.get(key)?.set(mods, value)
       currentParams[key] = value
-      if (transition) transition.to[key] = value
+      // The user takes over: pin the target and drop any oscillator on it.
+      if (transition) {
+        transition.to[key] = value
+        transition.oscByKey.delete(key)
+        transition.osc = transition.osc.filter((o) => o.key !== key)
+      }
+      activeOsc = activeOsc.filter((o) => o.key !== key)
     }
     bridge.getCurrentSettings = () => getSettings(demoIndex)
     bridge.getLiveSettings = () => ({ ...currentParams }) as Partial<ModeSettings>
@@ -1703,6 +1807,11 @@ export function PartyBackground() {
       pointers.clear()
       dynamicDirty = false
       lastCensus = null
+      // Fresh modules carry default discrete state; the instant applyDemo in
+      // boot re-seeds these from the active preset.
+      discreteNow = null
+      activeOsc = []
+      transition = null
       const eng = new Engine({
         canvas,
         forces: [
@@ -1741,6 +1850,7 @@ export function PartyBackground() {
       if (import.meta.env.DEV) {
         ;(window as unknown as Record<string, unknown>).__party = {
           engine: eng,
+          bridge,
           probe: () => ({
             zoom,
             seeds: voroSeeds.length,

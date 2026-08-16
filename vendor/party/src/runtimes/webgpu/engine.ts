@@ -198,6 +198,12 @@ export class WebGPUEngine extends AbstractEngine {
     this.updateMaxSize(p.size);
   }
 
+  setParticleRange(start: number, list: IParticle[]): void {
+    const n = this.particles.setParticleRange(start, list);
+    this.particles.syncRangeToGPU(this.resources, start, n);
+    for (let i = 0; i < n; i++) this.updateMaxSize(list[i].size);
+  }
+
   setParticleMass(index: number, mass: number): void {
     this.particles.setParticleMass(index, mass);
     this.particles.syncParticleMassToGPU(this.resources, index);
@@ -264,10 +270,8 @@ export class WebGPUEngine extends AbstractEngine {
     // Encode command buffer
     const encoder = this.resources.getDevice().createCommandEncoder();
 
-    // Only run simulation/oscillators when playing
+    // Only run simulation when playing
     if (this.playing) {
-      // Update engine-owned oscillators before simulation uniforms are written
-      this.updateOscillators(dt);
       // Update simulation uniforms (dt, count, simStride, maxSize, maxParticles)
       const actualCount = this.particles.getCount();
       this.resources.writeSimulationUniform(this.registry.getProgram(), {

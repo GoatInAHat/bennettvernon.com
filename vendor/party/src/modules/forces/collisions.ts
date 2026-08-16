@@ -24,6 +24,10 @@ export const DEFAULT_COLLISIONS_RESTITUTION = 0.8;
 // Simple, brute-force elastic collision response applied only to current particle
 type CollisionsInputs = {
   restitution: number;
+  // Master gate (0..1): scales position corrections and impulses so hosts can
+  // fade the module in and out continuously (0 is an exact no-op — the
+  // positional solver has no other strength knob).
+  strength: number;
 };
 
 export class Collisions extends Module<"collisions", CollisionsInputs> {
@@ -31,12 +35,14 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
   readonly role = ModuleRole.Force;
   readonly inputs = {
     restitution: DataType.NUMBER,
+    strength: DataType.NUMBER,
   } as const;
 
   constructor(opts?: { enabled?: boolean; restitution?: number }) {
     super();
     this.write({
       restitution: opts?.restitution ?? DEFAULT_COLLISIONS_RESTITUTION,
+      strength: 1,
     });
     if (opts?.enabled !== undefined) {
       this.setEnabled(!!opts.enabled);
@@ -51,9 +57,20 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
     return this.readValue("restitution");
   }
 
+  setStrength(value: number): void {
+    this.write({ strength: value });
+  }
+
+  getStrength(): number {
+    return this.readValue("strength");
+  }
+
   webgpu(): WebGPUDescriptor<CollisionsInputs> {
     return {
       constrain: ({ particleVar, maxSizeVar, getUniform }) => `
+  // Master gate: 0 is an exact no-op (module fading in/out).
+  let colStrength = ${getUniform("strength")};
+  if (colStrength > 0.0) {
   // Pass 1: find deepest overlap neighbor to reduce scan-order bias
   var it = neighbor_iter_init(${particleVar}.position, ${particleVar}.size + ${maxSizeVar} + 1);
   var bestJ: u32 = NEIGHBOR_NONE;
@@ -96,8 +113,8 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
     
     let separationX = cos(angle) * sepDist;
     let separationY = sin(angle) * sepDist;
-    
-    ${particleVar}.position = ${particleVar}.position + vec2<f32>(separationX, separationY);
+
+    ${particleVar}.position = ${particleVar}.position + vec2<f32>(separationX, separationY) * colStrength;
   }
 
   if (bestJ != NEIGHBOR_NONE) {
@@ -129,7 +146,7 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
     let jitterAmp = (rand2 - 0.5) * min(bestOverlap * 0.1, 0.5);
     let jitter = t * jitterAmp;
     c1 = c1 + jitter;
-    ${particleVar}.position = ${particleVar}.position + c1;
+    ${particleVar}.position = ${particleVar}.position + c1 * colStrength;
 
     // Impulse-based bounce to conserve kinetic energy along contact normal
     let v1 = ${particleVar}.velocity;
@@ -145,11 +162,14 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
       let invSum = max(invM1 + invM2, 1e-6);
       let j = -(1.0 + e) * relN / invSum;
       let dv = min(j * invM1, 1000.0);
-      ${particleVar}.velocity = v1 + n * dv;
+      ${particleVar}.velocity = v1 + n * (dv * colStrength);
     }
   }
+  }
 `,
-      correct: ({ particleVar, dtVar, prevPosVar, postPosVar }) => `
+      correct: ({ particleVar, dtVar, prevPosVar, postPosVar, getUniform }) => `
+  // Gated with constrain: at strength 0 the module must be an exact no-op.
+  if (${getUniform("strength")} > 0.0) {
   // Position-based velocity correction from integration state
   let disp = ${particleVar}.position - ${prevPosVar};
   let disp2 = dot(disp, disp);
@@ -169,6 +189,7 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
   if (disp2 < 1e-8 && v2_total < 0.5) {
     ${particleVar}.velocity = vec2<f32>(0.0, 0.0);
   }
+  }
 `,
     };
   }
@@ -179,6 +200,9 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
 
     return {
       constrain: ({ particle, getNeighbors, input, maxSize }) => {
+        // Master gate: 0 is an exact no-op (module fading in/out).
+        const colStrength = input.strength;
+        if (colStrength <= 0) return;
         // Find deepest overlap neighbor to reduce scan-order bias
         const searchRadius = particle.size + maxSize + 1;
         const neighbors = getNeighbors(particle.position, searchRadius);
@@ -223,8 +247,8 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
           const separationX = Math.cos(angle) * sepDist;
           const separationY = Math.sin(angle) * sepDist;
 
-          particle.position.x += separationX;
-          particle.position.y += separationY;
+          particle.position.x += separationX * colStrength;
+          particle.position.y += separationY * colStrength;
         }
 
         if (bestOther) {
@@ -265,8 +289,8 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
           const jitterX = tx * jitterAmp;
           const jitterY = ty * jitterAmp;
 
-          particle.position.x += c1x + jitterX;
-          particle.position.y += c1y + jitterY;
+          particle.position.x += (c1x + jitterX) * colStrength;
+          particle.position.y += (c1y + jitterY) * colStrength;
 
           // Impulse-based bounce to conserve kinetic energy along contact normal
           const v1x = particle.velocity.x;
@@ -284,13 +308,15 @@ export class Collisions extends Module<"collisions", CollisionsInputs> {
             const invM2 = m2 > 0 ? 1 / Math.max(m2, 1e-6) : 0;
             const invSum = Math.max(invM1 + invM2, 1e-6);
             const j = (-(1 + e) * relN) / invSum;
-            const dv = Math.min(j * invM1, 1000);
+            const dv = Math.min(j * invM1, 1000) * colStrength;
             particle.velocity.x = v1x + n.x * dv;
             particle.velocity.y = v1y + n.y * dv;
           }
         }
       },
-      correct: ({ particle, dt, prevPos, postPos }) => {
+      correct: ({ particle, dt, prevPos, postPos, input }) => {
+        // Gated with constrain: at strength 0 the module must be an exact no-op.
+        if (input.strength <= 0) return;
         const dispX = particle.position.x - prevPos.x;
         const dispY = particle.position.y - prevPos.y;
         const disp2 = dispX * dispX + dispY * dispY;
