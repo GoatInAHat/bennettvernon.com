@@ -236,7 +236,10 @@ export function applyDiscretePreset(
   engine.setConstrainIterations(
     opts.isWebGPU ? eng.constrainIterations : Math.min(eng.constrainIterations, 10),
   )
-  engine.setCellSize(eng.gridCellSize)
+  // Changing the cell size destroys and reallocates the GPU grid buffers
+  // synchronously — skip it when the preset keeps the current size so mode
+  // switches stay hitch-free.
+  if (engine.getCellSize() !== eng.gridCellSize) engine.setCellSize(eng.gridCellSize)
   engine.setMaxNeighbors(opts.isWebGPU ? eng.maxNeighbors : Math.min(eng.maxNeighbors, 100))
 }
 

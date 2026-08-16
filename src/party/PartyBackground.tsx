@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Engine, Interaction, type IParticle, type ParticleQuery } from '@cazala/party'
+import { Engine, Interaction, type IParticle, type CellCensusResult } from '@cazala/party'
 import {
   bridge,
   NAME_FONTS,
@@ -9,7 +9,7 @@ import {
   type ModeSettingKey,
   type ModeSettings,
 } from './bridge'
-import { Effectors, type Effector } from './effectors'
+import { Effectors, type Effector, type TrailSegment } from './effectors'
 import {
   createPartyModules,
   applyDiscretePreset,
@@ -23,10 +23,16 @@ const NAME_LINES = ['BENNETT', 'VERNON']
 const GUTTER_PX = 22
 /** The name sits this far from both the left and the top edge. */
 const NAME_MARGIN_PX = GUTTER_PX * 2
+// A zero innerWidth means the viewport is not measurable yet (hidden or
+// pre-layout) — treat it as desktop rather than mobile.
 const isMobile = () =>
-  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768
+  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+  (window.innerWidth >= 1 && window.innerWidth < 768)
 const DESIRED_ZOOM = () => (isMobile() ? 0.2 : 0.3)
 const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_000) : 2_500)
+/** Particles spawned up front; the particle-count setting caps the effective
+ * count via maxParticles so changing it never respawns the swarm. */
+const PARTICLE_POOL = (webgpu: boolean) => (webgpu ? 80_000 : 8_000)
 /** Backing-store cap; taller pages render uniformly downscaled so the
  * simulation always reaches the bottom of the page. */
 const MAX_CANVAS_HEIGHT = 8_000
@@ -43,12 +49,14 @@ const TRAIL_MIN_SPACING_PX = 10
 const TRAIL_MAX_POINTS = 32
 
 const GLOBAL_DEFAULTS: GlobalSettings = {
+  particleCount: 0, // resolved to the device budget once the runtime is known
   dragStrength: 100_000,
   dragRadius: 800,
   nameAttraction: 10_000,
   boxAttraction: 100_000,
   textPadding: 8,
   textSmoothing: 1.8,
+  exclusionFalloff: 36,
   separatorAttraction: 15_000,
   cursorStrength: 6_000,
   trailIntensity: 0.5,
@@ -57,19 +65,17 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   transitionLength: 2.5,
   nameFont: 0,
   nameWeight: 700,
-  nameDensity: 30,
+  nameDensity: 1000,
   nameDensityRes: 36,
 }
-// Density queries sync the GPU pipeline (three awaited readbacks each), so
-// they run at a low rate and the resulting teleports are spread smoothly
-// across the frames in between.
-const DENSITY_INTERVAL_MS = 250
-const DENSITY_TELEPORT_BUDGET = 200
-const DENSITY_DRAIN_PER_FRAME = 25
+// Name-density enforcement runs off the engine's cell census: a per-frame
+// GPU compute pass with an asynchronous readback, so it never stalls the
+// pipeline. Corrections apply whenever a fresh census lands (~every frame).
+const CENSUS_SAMPLES_PER_CELL = 64
+const CENSUS_OUTSIDE_SAMPLES = 512
 /** Distance-field raster resolution in page px per cell. */
 const FIELD_CELL_PX = 3
 const FIELD_MARGIN_PX = 60
-const FIELD_FALLOFF_PX = 36
 
 function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
@@ -95,7 +101,7 @@ interface NameLayout {
 function sampleName(pageW: number, viewportH: number, font: string, weight: number): NameLayout {
   const off = document.createElement('canvas')
   const ctx = off.getContext('2d', { willReadFrequently: true })
-  const width = nameWidth(pageW)
+  const width = Math.max(nameWidth(pageW), 200)
   const fallback = {
     points: [],
     bottom: viewportH * 0.4,
@@ -245,9 +251,24 @@ export function PartyBackground() {
       step: number
       cellOf: Int16Array
     } | null = null
-    let densityBusy = false
-    let lastDensity = 0
-    let teleportQueue: { index: number; x: number; y: number }[] = []
+    let particleCountTouched = false
+    let densityStatus = 'idle'
+    const densityStats = {
+      calls: 0,
+      noRes: 0,
+      stale: 0,
+      mismatch: 0,
+      rounds: 0,
+      fromCells: 0,
+      fromOutside: 0,
+      lastCounts: [] as number[],
+    }
+    let censusCells: Int32Array | null = null
+    let censusVersion = 0
+    let lastCensus: CellCensusResult | null = null
+    /** Net corrections issued since the in-flight census was dispatched. */
+    let pendingDelta1: number[] = []
+    let lastCpuRound = 0
     let teleportCount = 0
     let teleportWindowStart = 0
     let teleportRate = 0
@@ -257,20 +278,31 @@ export function PartyBackground() {
     let frameDtIndex = 0
     let lastTickAt = 0
     let trail: { x: number; y: number; t: number }[] = []
+    /** Page-space trail nodes with their current strength fraction, kept in
+     * sync with the physics for the debug overlay. */
+    let trailViz: { x: number; y: number; s: number }[] = []
     let cursor: { x: number; y: number } | null = null
     let dragging = false
+    // Debug overlay layers, cached separately because they invalidate on
+    // different events (field/settings, name geometry, effector layout).
     let blobCache: HTMLCanvasElement | null = null
     let blobCacheDirty = true
+    let voroCache: HTMLCanvasElement | null = null
+    let voroCacheDirty = true
+    let effCache: HTMLCanvasElement | null = null
+    let effCacheDirty = true
     const cleanups: (() => void)[] = []
 
-    const mods = createPartyModules()
-    const interaction = new Interaction({
+    // Rebuilt on every engine boot: a destroyed runtime leaves stale uniform
+    // writers attached to old module instances, so reuse is unsafe.
+    let mods = createPartyModules()
+    let interaction = new Interaction({
       mode: 'repel',
       strength: globals.dragStrength,
       radius: globals.dragRadius,
       active: false,
     })
-    const effectors = new Effectors()
+    let effectors = new Effectors()
 
     const nameFontStack = () => NAME_FONTS[globals.nameFont]?.stack ?? NAME_FONTS[0].stack
     const pageToWorld = (px: number, py: number) => ({ x: px / zoom, y: py / zoom })
@@ -378,12 +410,13 @@ export function PartyBackground() {
         rows: textField.rows,
         strength: globals.boxAttraction,
         padding: globals.textPadding / zoom,
-        falloff: FIELD_FALLOFF_PX / zoom,
+        falloff: globals.exclusionFalloff / zoom,
         distances: world,
       })
     }
 
-    /** Renders the closed text shape (field < padding) into a cached layer. */
+    /** Red layer: the closed text exclusion shape, with the repel force
+     * fading out as a gradient band between padding and padding+falloff. */
     const renderBlobCache = () => {
       blobCacheDirty = false
       if (!blobCache) blobCache = document.createElement('canvas')
@@ -391,15 +424,204 @@ export function PartyBackground() {
       blobCache.height = debugCanvas.height
       const ctx = blobCache.getContext('2d')
       if (!ctx || !textField) return
-      ctx.fillStyle = 'rgba(220, 40, 40, 0.22)'
       const { minX, minY, cell, cols, rows, d } = textField
       const pad = globals.textPadding
+      const falloff = Math.max(1, globals.exclusionFalloff)
+      // Painted at grid resolution, then scaled up with smoothing so the
+      // shape reads as a continuous field rather than voxels.
+      const img = new ImageData(cols, rows)
+      for (let i = 0; i < d.length; i++) {
+        const dist = d[i]
+        let a = 0
+        if (dist < pad) a = 0.3
+        else if (dist < pad + falloff) a = 0.3 * (1 - (dist - pad) / falloff)
+        if (a > 0) {
+          img.data[i * 4] = 220
+          img.data[i * 4 + 1] = 40
+          img.data[i * 4 + 2] = 40
+          img.data[i * 4 + 3] = Math.round(a * 255)
+        }
+      }
+      const small = document.createElement('canvas')
+      small.width = cols
+      small.height = rows
+      small.getContext('2d')?.putImageData(img, 0, 0)
+      ctx.imageSmoothingEnabled = true
+      ctx.drawImage(small, minX, minY, cols * cell, rows * cell)
+    }
+
+    /** Blue layer: Voronoi cell borders and round seed dots over the name. */
+    const renderVoroCache = () => {
+      voroCacheDirty = false
+      if (!voroCache) voroCache = document.createElement('canvas')
+      voroCache.width = debugCanvas.width
+      voroCache.height = debugCanvas.height
+      const ctx = voroCache.getContext('2d')
+      if (!ctx || !glyphGrid || voroSeeds.length === 0) return
+      // Owner scan across the whole name box (not just glyph cells) so the
+      // borders form complete, visible cell outlines.
+      const res = 2
+      const x0 = glyphGrid.minX
+      const y0 = glyphGrid.minY
+      const cols = Math.ceil((glyphGrid.cols * glyphGrid.step) / res)
+      const rows = Math.ceil((glyphGrid.rows * glyphGrid.step) / res)
+      const owner = new Int16Array(cols * rows)
+      for (let gy = 0; gy < rows; gy++) {
+        const py = y0 + (gy + 0.5) * res
+        for (let gx = 0; gx < cols; gx++) {
+          const px = x0 + (gx + 0.5) * res
+          let si = 0
+          let sd = Infinity
+          for (let i = 0; i < voroSeeds.length; i++) {
+            const dd = (px - voroSeeds[i].x) ** 2 + (py - voroSeeds[i].y) ** 2
+            if (dd < sd) {
+              sd = dd
+              si = i
+            }
+          }
+          owner[gy * cols + gx] = si
+        }
+      }
+      ctx.fillStyle = 'rgba(40, 90, 220, 0.65)'
       for (let gy = 0; gy < rows; gy++) {
         for (let gx = 0; gx < cols; gx++) {
-          if (d[gy * cols + gx] < pad) {
-            ctx.fillRect(minX + gx * cell, minY + gy * cell, cell, cell)
+          const c = owner[gy * cols + gx]
+          if (gx + 1 < cols && owner[gy * cols + gx + 1] !== c) {
+            ctx.fillRect(x0 + (gx + 1) * res - 0.5, y0 + gy * res, 1, res)
+          }
+          if (gy + 1 < rows && owner[(gy + 1) * cols + gx] !== c) {
+            ctx.fillRect(x0 + gx * res, y0 + (gy + 1) * res - 0.5, res, 1)
           }
         }
+      }
+      ctx.strokeStyle = 'rgba(40, 90, 220, 0.5)'
+      ctx.lineWidth = 1
+      ctx.strokeRect(x0, y0, cols * res, rows * res)
+      // Seeds as genuine round dots (fillRect at fractional coordinates used
+      // to smear them into stubby lines).
+      ctx.fillStyle = 'rgba(40, 90, 220, 0.9)'
+      for (const s of voroSeeds) {
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, 2.5, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+
+    /** Static effector layer: every force drawn as a gradient between its
+     * body and its range limit, plus the limit outlines. */
+    const renderEffCache = () => {
+      effCacheDirty = false
+      if (!effCache) effCache = document.createElement('canvas')
+      effCache.width = debugCanvas.width
+      effCache.height = debugCanvas.height
+      const ctx = effCache.getContext('2d')
+      if (!ctx || !name) return
+      // Red outline: the type the name attractor points were sampled from.
+      ctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
+      ctx.lineWidth = 1
+      ctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
+      ctx.textBaseline = 'top'
+      NAME_LINES.forEach((text, i) => {
+        ctx.strokeText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
+      })
+      // Teal: the name attract points, each a radial gradient to its range.
+      const range = Math.max(16, name.step * 2.2)
+      for (const p of name.points) {
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, range)
+        g.addColorStop(0, 'rgba(20, 150, 170, 0.28)')
+        g.addColorStop(1, 'rgba(20, 150, 170, 0)')
+        ctx.fillStyle = g
+        ctx.beginPath()
+        ctx.arc(p.x, p.y, range, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      // Purple: separator pull, a gradient band fading over its range with
+      // the segment and range limits outlined; orange: the settings panel.
+      for (const t of getTargets()) {
+        const r = toPageRect(t.el.getBoundingClientRect())
+        if (r.w === 0) continue
+        if (t.kind === 'separator') {
+          const cy = r.y + r.h / 2
+          const range = SEPARATOR_RANGE_PX
+          const g = ctx.createLinearGradient(0, cy - range, 0, cy + range)
+          g.addColorStop(0, 'rgba(140, 60, 200, 0)')
+          g.addColorStop(0.5, 'rgba(140, 60, 200, 0.25)')
+          g.addColorStop(1, 'rgba(140, 60, 200, 0)')
+          ctx.fillStyle = g
+          ctx.fillRect(r.x, cy - range, r.w, range * 2)
+          ctx.strokeStyle = 'rgba(140, 60, 200, 0.8)'
+          ctx.beginPath()
+          ctx.moveTo(r.x, cy)
+          ctx.lineTo(r.x + r.w, cy)
+          ctx.stroke()
+          ctx.strokeStyle = 'rgba(140, 60, 200, 0.3)'
+          ctx.strokeRect(r.x, cy - range, r.w, range * 2)
+        } else {
+          const pad = PANEL_RANGE_PX
+          const reach = pad + BOX_CORNER_PX
+          // The rect force fades from the panel edge to its range: a stack
+          // of expanding outlines with falling alpha reads as the gradient.
+          for (let k = 0; k < 8; k++) {
+            const o = (k / 7) * reach
+            ctx.strokeStyle = `rgba(230, 130, 30, ${0.55 * (1 - k / 7) + 0.1})`
+            ctx.beginPath()
+            ctx.roundRect(r.x - o, r.y - o, r.w + o * 2, r.h + o * 2, BOX_CORNER_PX + o)
+            ctx.stroke()
+          }
+        }
+      }
+    }
+
+    /** Green: the trail force as a soft gradient band along the path, a
+     * fading curve through the nodes, and shrinking per-node circles. */
+    const drawTrailDebug = (dctx: CanvasRenderingContext2D) => {
+      const pts = trailViz
+      if (pts.length === 0) return
+      const range = TRAIL_POINT_RANGE_PX
+      dctx.lineCap = 'round'
+      dctx.lineJoin = 'round'
+      // Capsule-chain gradient: nested soft strokes approximate the linear
+      // falloff from the path out to its range limit.
+      for (const [w, a] of [
+        [2, 0.045],
+        [1.35, 0.06],
+        [0.7, 0.08],
+      ] as const) {
+        dctx.lineWidth = range * w
+        for (let i = 1; i < pts.length; i++) {
+          const s = (pts[i - 1].s + pts[i].s) / 2
+          if (s <= 0.01) continue
+          dctx.strokeStyle = `rgba(30, 160, 60, ${a * s})`
+          dctx.beginPath()
+          dctx.moveTo(pts[i - 1].x, pts[i - 1].y)
+          dctx.lineTo(pts[i].x, pts[i].y)
+          dctx.stroke()
+        }
+      }
+      // Smooth curve through the nodes, fading with the local strength.
+      dctx.lineWidth = 1.5
+      for (let i = 1; i < pts.length; i++) {
+        const prev = pts[i - 1]
+        const p = pts[i]
+        const next = pts[i + 1]
+        dctx.strokeStyle = `rgba(30, 160, 60, ${0.15 + 0.65 * ((prev.s + p.s) / 2)})`
+        dctx.beginPath()
+        dctx.moveTo((prev.x + p.x) / 2, (prev.y + p.y) / 2)
+        if (next) {
+          dctx.quadraticCurveTo(p.x, p.y, (p.x + next.x) / 2, (p.y + next.y) / 2)
+        } else {
+          dctx.lineTo(p.x, p.y)
+        }
+        dctx.stroke()
+      }
+      // Node circles fade and shrink as their pull decays.
+      dctx.lineWidth = 1
+      for (const p of pts) {
+        if (p.s <= 0.02) continue
+        dctx.strokeStyle = `rgba(30, 160, 60, ${0.2 + 0.6 * p.s})`
+        dctx.beginPath()
+        dctx.arc(p.x, p.y, 3 + (range / 3 - 3) * p.s, 0, Math.PI * 2)
+        dctx.stroke()
       }
     }
 
@@ -408,83 +630,23 @@ export function PartyBackground() {
       if (!dctx) return
       dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
       if (!bridge.debugOn || !name) return
-      // Red: the closed text exclusion shape.
       if (blobCacheDirty) renderBlobCache()
+      if (voroCacheDirty) renderVoroCache()
+      if (effCacheDirty) renderEffCache()
       if (blobCache) dctx.drawImage(blobCache, 0, 0)
-      dctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
-      dctx.lineWidth = 1
-      // Red outline: the type the name attractor points were sampled from.
-      dctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
-      dctx.textBaseline = 'top'
-      NAME_LINES.forEach((text, i) => {
-        dctx.strokeText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
-      })
-      // Blue: Voronoi divisions and seeds of the name-density cells.
-      dctx.strokeStyle = 'rgba(40, 90, 220, 0.7)'
-      if (glyphGrid) {
-        const { minX, minY, cols, rows, step, cellOf } = glyphGrid
-        dctx.beginPath()
-        for (let gy = 0; gy < rows; gy++) {
-          for (let gx = 0; gx < cols; gx++) {
-            const c = cellOf[gy * cols + gx]
-            if (c < 0) continue
-            const right = gx + 1 < cols ? cellOf[gy * cols + gx + 1] : -1
-            const below = gy + 1 < rows ? cellOf[(gy + 1) * cols + gx] : -1
-            const x = minX + gx * step
-            const y = minY + gy * step
-            if (right >= 0 && right !== c) {
-              dctx.moveTo(x + step, y)
-              dctx.lineTo(x + step, y + step)
-            }
-            if (below >= 0 && below !== c) {
-              dctx.moveTo(x, y + step)
-              dctx.lineTo(x + step, y + step)
-            }
-          }
-        }
-        dctx.stroke()
-      }
-      dctx.fillStyle = 'rgba(40, 90, 220, 0.8)'
-      for (const s of voroSeeds) {
-        dctx.fillRect(s.x - 1.5, s.y - 1.5, 3, 3)
-      }
-      // Green: the cursor attraction trail.
-      dctx.strokeStyle = 'rgba(30, 160, 60, 0.7)'
-      for (const p of trail) {
-        dctx.beginPath()
-        dctx.arc(p.x, p.y, TRAIL_POINT_RANGE_PX / 3, 0, Math.PI * 2)
-        dctx.stroke()
-      }
-      if (cursor && !dragging) {
-        dctx.beginPath()
-        dctx.arc(cursor.x, cursor.y, TRAIL_POINT_RANGE_PX / 2, 0, Math.PI * 2)
-        dctx.stroke()
-      }
-      // Purple: separator attractor lines; orange: the settings panel box.
-      for (const t of getTargets()) {
-        const r = toPageRect(t.el.getBoundingClientRect())
-        if (r.w === 0) continue
-        if (t.kind === 'separator') {
-          dctx.strokeStyle = 'rgba(140, 60, 200, 0.8)'
-          dctx.beginPath()
-          dctx.moveTo(r.x, r.y + r.h / 2)
-          dctx.lineTo(r.x + r.w, r.y + r.h / 2)
-          dctx.stroke()
-        } else {
-          dctx.strokeStyle = 'rgba(230, 130, 30, 0.8)'
-          const pad = PANEL_RANGE_PX
-          dctx.beginPath()
-          dctx.roundRect(r.x - pad, r.y - pad, r.w + pad * 2, r.h + pad * 2, BOX_CORNER_PX + pad)
-          dctx.stroke()
-        }
-      }
+      if (voroCache) dctx.drawImage(voroCache, 0, 0)
+      if (effCache) dctx.drawImage(effCache, 0, 0)
+      drawTrailDebug(dctx)
     }
 
     const syncEffectors = () => {
       syncScheduled = false
       if (!engine || !name) return
+      // The CPU runtime pays for every attract point per particle; half the
+      // grid gives the same pull shape at half the cost.
+      const namePts = webgpu ? name.points : name.points.filter((_, i) => i % 2 === 0)
       const range = Math.max(16, name.step * 2.2) / zoom
-      const list: Effector[] = name.points.map((p) => ({
+      const list: Effector[] = namePts.map((p) => ({
         shape: 'circle' as const,
         mode: 'attract' as const,
         x: p.x / zoom,
@@ -524,6 +686,7 @@ export function PartyBackground() {
       }
       staticEffectors = list
       effectors.set(staticEffectors)
+      effCacheDirty = true
       drawDebug()
     }
 
@@ -533,9 +696,13 @@ export function PartyBackground() {
       requestAnimationFrame(syncEffectors)
     }
 
-    /** Attract field following the cursor with a fading trail behind it. */
-    const cursorEffectors = (now: number): Effector[] => {
-      if (dragging || !cursor || globals.cursorStrength <= 0) return []
+    /** The cursor pull as a continuous capsule chain along the trail path:
+     * strength interpolates between nodes, so the force field is smooth
+     * along the whole path rather than a row of discrete circles. Ages the
+     * trail every frame, so it keeps fading after the cursor leaves the
+     * window. Padded to a fixed length so the module's array offsets stay
+     * stable and the per-frame upload covers only this small array. */
+    const trailSegments = (now: number): TrailSegment[] => {
       let pathLen = 0
       for (let i = 1; i < trail.length; i++) {
         pathLen += Math.hypot(trail[i].x - trail[i - 1].x, trail[i].y - trail[i - 1].y)
@@ -543,33 +710,42 @@ export function PartyBackground() {
       // Longer trails expire faster, scaled by the falloff setting.
       const ttl = TRAIL_BASE_TTL_MS / (1 + globals.cursorFalloff * 4 * (pathLen / 600))
       trail = trail.filter((p) => now - p.t < ttl)
-      const gamma = 0.4 + (1 - globals.trailIntensity) * 2.6
-      const n = trail.length
-      const list: Effector[] = trail.map((p, i) => {
-        const fromHead = (n - i) / (n + 1)
-        const fade = Math.max(0, 1 - (now - p.t) / ttl)
-        return {
-          shape: 'circle' as const,
-          mode: 'attract' as const,
-          x: p.x / zoom,
-          y: p.y / zoom,
-          range: TRAIL_POINT_RANGE_PX / zoom,
-          halfW: 0,
-          halfH: 0,
-          strength: globals.cursorStrength * Math.pow(1 - fromHead, gamma) * fade,
-        }
-      })
-      list.push({
-        shape: 'circle',
-        mode: 'attract',
-        x: cursor.x / zoom,
-        y: cursor.y / zoom,
-        range: (TRAIL_POINT_RANGE_PX * 1.4) / zoom,
-        halfW: 0,
-        halfH: 0,
-        strength: globals.cursorStrength,
-      })
-      return list
+
+      const pts: { x: number; y: number; s: number }[] = []
+      if (!dragging && globals.cursorStrength > 0) {
+        const gamma = 0.4 + (1 - globals.trailIntensity) * 2.6
+        const n = trail.length
+        trail.forEach((p, i) => {
+          const fromHead = (n - i) / (n + 1)
+          const fade = Math.max(0, 1 - (now - p.t) / ttl)
+          pts.push({ x: p.x, y: p.y, s: Math.pow(1 - fromHead, gamma) * fade })
+        })
+        if (cursor) pts.push({ x: cursor.x, y: cursor.y, s: 1 })
+      }
+      trailViz = pts
+
+      const range = TRAIL_POINT_RANGE_PX / zoom
+      const segs: TrailSegment[] = []
+      for (let i = 1; i < pts.length; i++) {
+        segs.push({
+          x1: pts[i - 1].x / zoom,
+          y1: pts[i - 1].y / zoom,
+          x2: pts[i].x / zoom,
+          y2: pts[i].y / zoom,
+          range,
+          s1: globals.cursorStrength * pts[i - 1].s,
+          s2: globals.cursorStrength * pts[i].s,
+        })
+      }
+      if (pts.length === 1) {
+        const p = pts[0]
+        const s = globals.cursorStrength * p.s
+        segs.push({ x1: p.x / zoom, y1: p.y / zoom, x2: p.x / zoom, y2: p.y / zoom, range, s1: s, s2: s })
+      }
+      while (segs.length < TRAIL_MAX_POINTS + 1) {
+        segs.push({ x1: 0, y1: 0, x2: 0, y2: 0, range: 0, s1: 0, s2: 0 })
+      }
+      return segs
     }
 
     // Per-frame driver: transitions, cursor trail, teleport drain, telemetry.
@@ -598,27 +774,16 @@ export function PartyBackground() {
       // Only the small dynamic array is written per frame; the static list
       // stays untouched. Skip entirely when the trail is idle.
       if (trail.length > 0 || dynamicDirty) {
-        effectors.setDynamic(cursorEffectors(now))
+        effectors.setDynamic(trailSegments(now))
         dynamicDirty = trail.length > 0
         if (bridge.debugOn) drawDebug()
-      }
-      for (let i = 0; i < DENSITY_DRAIN_PER_FRAME && teleportQueue.length > 0; i++) {
-        const t = teleportQueue.pop()!
-        engine.setParticle(t.index, {
-          position: pageToWorld(t.x, t.y),
-          velocity: { x: 0, y: 0 },
-          size: 3,
-          mass: 1,
-          color: { r: 1, g: 1, b: 1, a: 1 },
-        })
-        teleportCount++
       }
       if (now - teleportWindowStart > 1000) {
         teleportRate = teleportCount
         teleportCount = 0
         teleportWindowStart = now
       }
-      enforceDensity(now)
+      enforceDensity()
     }
 
     const layout = () => {
@@ -694,89 +859,151 @@ export function PartyBackground() {
         voroCellPoints[si].push(pi)
       })
       glyphGrid = { minX, minY, cols, rows, step, cellOf }
+      censusCells = Int32Array.from(cellOf)
+      censusVersion++
+      lastCensus = null
+      voroCacheDirty = true
     }
 
-    /** Voronoi cell index for a page position, or -1 outside the glyphs. */
-    const cellAt = (px: number, py: number): number => {
-      if (!glyphGrid) return -1
-      const gx = Math.floor((px - glyphGrid.minX) / glyphGrid.step)
-      const gy = Math.floor((py - glyphGrid.minY) / glyphGrid.step)
-      if (gx < 0 || gy < 0 || gx >= glyphGrid.cols || gy >= glyphGrid.rows) return -1
-      return glyphGrid.cellOf[gy * glyphGrid.cols + gx]
-    }
-
-    // Keeps every Voronoi cell of the name at the minimum particle count by
-    // teleporting donors — first from the densest name cells, then from
-    // particles outside the name. The heavy filtering runs on the GPU via
-    // the engine's bounded radius query; writes are targeted setParticle
-    // calls. Physics is untouched — only positions move.
-    const enforceDensity = (now: number) => {
-      if (!engine || !name || !glyphGrid || voroSeeds.length === 0) return
-      const min = Math.round(globals.nameDensity)
-      if (min <= 0 || densityBusy || now - lastDensity < DENSITY_INTERVAL_MS) return
+    // Keeps every Voronoi cell of the name at its minimum particle count by
+    // teleporting donors — first from name cells that sit above the minimum
+    // (densest first, so the distribution self-levels), then from particles
+    // outside the name. The counting and candidate collection run on the
+    // GPU as the engine's cell-census compute pass with an async readback,
+    // so enforcement is per-frame with no pipeline stalls and no teleport
+    // caps. Physics is untouched — only positions move.
+    const enforceDensity = () => {
+      if (!engine || !name || !glyphGrid || !censusCells || voroSeeds.length === 0) {
+        densityStatus = `guards e=${!!engine} n=${!!name} g=${!!glyphGrid} c=${!!censusCells} s=${voroSeeds.length}`
+        return
+      }
+      // Never demand more than half the population, or a small swarm (CPU
+      // fallback) gets teleported into the name wholesale every round.
+      const totalMin = Math.round(Math.min(globals.nameDensity, engine.getCount() * 0.5))
+      if (totalMin <= 0) {
+        densityStatus = 'min<=0'
+        return
+      }
       // No work while the name is scrolled out of view.
-      if (window.scrollY > name.bottom + 200) return
-      densityBusy = true
-      lastDensity = now
+      if (window.scrollY > name.bottom + 200) {
+        densityStatus = 'offscreen'
+        return
+      }
+      // The CPU census is synchronous, so uncapped per-frame enforcement
+      // just fights the (slow) CPU sim; a 2Hz cadence keeps the name legible
+      // without the churn.
+      if (!webgpu && lastTickAt - lastCpuRound < 500) {
+        densityStatus = 'cpu-throttle'
+        return
+      }
+      densityStatus = 'active'
+      // The overall density stays put as the cell count changes: each cell
+      // owes an equal share of the total.
+      const perCell = Math.max(1, Math.round(totalMin / voroSeeds.length))
       const w = name.width
       const h = name.bottom - name.topY
       const center = pageToWorld(NAME_MARGIN_PX + w / 2, name.topY + h / 2)
-      const radius = (Math.hypot(w, h) / 2 + 300) / zoom
-      engine
-        .getParticlesInRadius(center, radius, { maxResults: 6000 })
-        .then((res) => {
-          if (disposed || !engine || !name) return
-          const members: number[][] = voroSeeds.map(() => [])
-          const outside: ParticleQuery[] = []
-          for (const q of res.particles) {
-            const ci = cellAt(q.position.x * zoom, q.position.y * zoom)
-            if (ci >= 0) members[ci].push(q.index)
-            else outside.push(q)
-          }
-          // Queue the moves; the tick loop drains a few per frame so the
-          // name refills continuously instead of in visible bursts.
-          const queue: { index: number; x: number; y: number }[] = []
-          let budget = DENSITY_TELEPORT_BUDGET
-          for (let ci = 0; ci < members.length && budget > 0; ci++) {
-            const cellPts = voroCellPoints[ci]
-            if (cellPts.length === 0) continue
-            let need = min - members[ci].length
-            while (need > 0 && budget > 0) {
-              let donor = -1
-              let densest = -1
-              let densestCount = min
-              for (let i = 0; i < members.length; i++) {
-                if (members[i].length > densestCount) {
-                  densestCount = members[i].length
-                  densest = i
-                }
-              }
-              if (densest >= 0) {
-                const list = members[densest]
-                donor = list.splice(Math.floor(Math.random() * list.length), 1)[0]
-              } else if (outside.length > 0) {
-                donor = outside.splice(Math.floor(Math.random() * outside.length), 1)[0].index
-              } else {
-                break
-              }
-              const pt = name.points[cellPts[Math.floor(Math.random() * cellPts.length)]]
-              const jitter = name.step
-              queue.push({
-                index: donor,
-                x: pt.x + (Math.random() - 0.5) * jitter,
-                y: pt.y + (Math.random() - 0.5) * jitter,
-              })
-              members[ci].push(donor)
-              need--
-              budget--
+      const res = engine.updateCellCensus({
+        centerX: center.x,
+        centerY: center.y,
+        radius: (Math.hypot(w, h) / 2 + 300) / zoom,
+        gridMinX: glyphGrid.minX / zoom,
+        gridMinY: glyphGrid.minY / zoom,
+        gridCell: glyphGrid.step / zoom,
+        gridCols: glyphGrid.cols,
+        gridRows: glyphGrid.rows,
+        cells: censusCells,
+        version: censusVersion,
+        cellCount: voroSeeds.length,
+        samplesPerCell: CENSUS_SAMPLES_PER_CELL,
+        outsideSamples: CENSUS_OUTSIDE_SAMPLES,
+      })
+      // Act only on fresh census data: the GPU result is a frame or two
+      // old, and re-applying the same deficits against stale counts would
+      // overshoot into oscillation.
+      densityStats.calls++
+      if (!res) {
+        densityStats.noRes++
+        return
+      }
+      if (res === lastCensus) {
+        densityStats.stale++
+        return
+      }
+      if (res.counts.length !== voroSeeds.length) {
+        densityStats.mismatch++
+        return
+      }
+      lastCensus = res
+      lastCpuRound = lastTickAt
+      densityStats.rounds++
+      // On WebGPU the next census is dispatched before this round's
+      // teleports are written, so it is exactly one round of corrections
+      // stale: credit them here or every refill double-fills and
+      // oscillates. The CPU census is synchronous and needs no credit.
+      if (pendingDelta1.length !== voroSeeds.length) {
+        pendingDelta1 = new Array<number>(voroSeeds.length).fill(0)
+      }
+      const counts = webgpu
+        ? Array.from(res.counts, (v, i) => v + pendingDelta1[i])
+        : Array.from(res.counts)
+      pendingDelta1 = new Array<number>(voroSeeds.length).fill(0)
+      densityStats.lastCounts = counts.slice()
+      const used = new Uint32Array(counts.length) // sample cursor per cell
+      let outsideUsed = 0
+      const outsideAvail = Math.min(res.outsideCount, res.outside.length)
+      const k = res.samplesPerCell
+      // Donors keep a margin above the minimum so continuous drift between
+      // neighboring cells doesn't ping-pong the same particles every round.
+      const donorFloor = perCell + Math.max(2, Math.round(perCell * 0.25))
+      for (let ci = 0; ci < counts.length; ci++) {
+        const cellPts = voroCellPoints[ci]
+        if (cellPts.length === 0) continue
+        let need = perCell - counts[ci]
+        while (need > 0) {
+          // Densest donor cell that stays comfortably above the minimum
+          // after giving one up (and still has uncollected candidates).
+          let densest = -1
+          let densestCount = donorFloor
+          for (let i = 0; i < counts.length; i++) {
+            if (counts[i] > densestCount && used[i] < Math.min(counts[i], k)) {
+              densestCount = counts[i]
+              densest = i
             }
           }
-          teleportQueue = queue
-        })
-        .catch(() => {})
-        .finally(() => {
-          densityBusy = false
-        })
+          let donor = -1
+          if (densest >= 0) {
+            donor = res.samples[densest * k + used[densest]]
+            used[densest]++
+            counts[densest]--
+            pendingDelta1[densest]--
+            densityStats.fromCells++
+          } else if (outsideUsed < outsideAvail) {
+            donor = res.outside[outsideUsed++]
+            densityStats.fromOutside++
+          } else {
+            break
+          }
+          const pt = name.points[cellPts[Math.floor(Math.random() * cellPts.length)]]
+          // Small enough that the landing spot stays in the marked grid
+          // cell, so the next census doesn't count it as outside.
+          const jitter = name.step * 0.5
+          engine.setParticle(donor, {
+            position: pageToWorld(
+              pt.x + (Math.random() - 0.5) * jitter,
+              pt.y + (Math.random() - 0.5) * jitter,
+            ),
+            velocity: { x: 0, y: 0 },
+            size: 3,
+            mass: 1,
+            color: { r: 1, g: 1, b: 1, a: 1 },
+          })
+          teleportCount++
+          counts[ci]++
+          pendingDelta1[ci]++
+          need--
+        }
+      }
     }
 
     const measureName = () => {
@@ -797,7 +1024,7 @@ export function PartyBackground() {
     const spawnAll = () => {
       if (!engine || !name || name.points.length === 0) return
       const anchors = charBalls.filter((_, i) => i % 3 === 0)
-      const count = SWARM_BUDGET(webgpu)
+      const count = PARTICLE_POOL(webgpu)
       const particles: IParticle[] = []
       for (let i = 0; i < count; i++) {
         const anchor =
@@ -896,7 +1123,7 @@ export function PartyBackground() {
       } else {
         transition = { from: { ...currentParams }, to, t0: performance.now(), ms, preset }
       }
-      setMaxParticlesAnimated(Math.floor(SWARM_BUDGET(webgpu) * preset.budgetFactor), ms)
+      setMaxParticlesAnimated(Math.floor(globals.particleCount * preset.budgetFactor), ms)
       window.dispatchEvent(new CustomEvent('party:demo', { detail: index }))
       scheduleNextDemo()
     }
@@ -912,6 +1139,7 @@ export function PartyBackground() {
       if (transition) transition.to[key] = value
     }
     bridge.getCurrentSettings = () => getSettings(demoIndex)
+    bridge.getLiveSettings = () => ({ ...currentParams }) as Partial<ModeSettings>
     bridge.applyGlobal = (key: GlobalSettingKey, value: number) => {
       globals[key] = value
       if (key === 'dragStrength') interaction.setStrength(value)
@@ -929,6 +1157,16 @@ export function PartyBackground() {
         buildTextField()
         blobCacheDirty = true
         scheduleSync()
+      } else if (key === 'exclusionFalloff') {
+        pushField()
+        blobCacheDirty = true
+        scheduleSync()
+      } else if (key === 'particleCount') {
+        particleCountTouched = true
+        setMaxParticlesAnimated(
+          Math.floor(value * DEMO_PRESETS[demoIndex].budgetFactor),
+          400,
+        )
       } else if (key === 'nameDensityRes') {
         rebuildVoronoi()
         scheduleSync()
@@ -945,11 +1183,16 @@ export function PartyBackground() {
         scheduleNextDemo()
       }
     }
+    // Everything in `globals` flows into the export automatically via the
+    // spread; new settings never need export wiring.
     bridge.getAllSettings = () => ({
       global: {
         ...globals,
         nameFont: NAME_FONTS[globals.nameFont]?.label ?? 'Georgia',
         enabledModes: [...bridge.enabledModes],
+        autoSwitch: bridge.autoRotateOn,
+        debugView: bridge.debugOn,
+        runtime: bridge.runtimePref,
       },
       modes: Object.fromEntries(DEMO_PRESETS.map((p, i) => [p.session.name, getSettings(i)])),
     })
@@ -987,6 +1230,7 @@ export function PartyBackground() {
       bridge.setAutoRotate = () => {}
       bridge.applySetting = () => {}
       bridge.getCurrentSettings = () => null
+      bridge.getLiveSettings = () => null
       bridge.applyGlobal = () => {}
       bridge.getGlobals = () => null
       bridge.setModeEnabled = () => {}
@@ -995,7 +1239,22 @@ export function PartyBackground() {
       bridge.getTelemetry = () => null
     })
 
-    const start = async () => {
+    let booting = false
+    let fallbackNotified = false
+
+    const boot = async (pref: 'auto' | 'webgpu' | 'cpu') => {
+      mods = createPartyModules()
+      interaction = new Interaction({
+        mode: 'repel',
+        strength: globals.dragStrength,
+        radius: globals.dragRadius,
+        active: false,
+      })
+      effectors = new Effectors()
+      trail = []
+      trailViz = []
+      dynamicDirty = false
+      lastCensus = null
       const eng = new Engine({
         canvas,
         forces: [
@@ -1009,23 +1268,50 @@ export function PartyBackground() {
           effectors,
         ],
         render: [mods.trails, mods.particles],
-        runtime: 'auto',
+        runtime: pref,
         maxParticles: 80_000,
         cellSize: 16,
         maxNeighbors: 100,
         constrainIterations: 1,
       })
       await eng.initialize()
+      // A hidden or pre-layout page reports zero dimensions (e.g. opened in
+      // a background tab); measuring now would build a degenerate world, so
+      // hold until real dimensions exist. Timers still run while hidden.
+      while (!disposed && (holder.clientWidth < 1 || holder.clientHeight < 1)) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250))
+      }
       if (disposed) {
         void eng.destroy()
         return
       }
       engine = eng
       webgpu = engine.getActualRuntime() === 'webgpu'
+      bridge.actualRuntime = engine.getActualRuntime()
+      if (pref === 'auto') bridge.autoResolved = bridge.actualRuntime
+      globals.particleCount = SWARM_BUDGET(webgpu)
       if (import.meta.env.DEV) {
         ;(window as unknown as Record<string, unknown>).__party = {
           engine: eng,
-          probe: () => ({ zoom, seeds: voroSeeds.length, name: !!name, points: name?.points.length }),
+          probe: () => ({
+            zoom,
+            seeds: voroSeeds.length,
+            name: !!name,
+            points: name?.points.length,
+            webgpu,
+            mobile: isMobile(),
+            globals: { ...globals },
+            teleportRate,
+            densityStatus,
+            densityStats: { ...densityStats, lastCounts: [...densityStats.lastCounts] },
+            lastTickAt,
+            census: lastCensus
+              ? {
+                  counts: Array.from(lastCensus.counts),
+                  outside: lastCensus.outsideCount,
+                }
+              : null,
+          }),
         }
       }
       layout()
@@ -1034,10 +1320,51 @@ export function PartyBackground() {
       lastPageW = holder.clientWidth
       spawnAll()
       syncEffectors()
-      applyDemo(0, true)
+      applyDemo(demoIndex, true)
       engine.play()
+      cancelAnimationFrame(tickRaf)
       tickRaf = requestAnimationFrame(tick)
+      window.dispatchEvent(new CustomEvent('party:runtime', { detail: bridge.actualRuntime }))
+      if (pref === 'auto' && bridge.actualRuntime === 'cpu' && !fallbackNotified) {
+        fallbackNotified = true
+        window.dispatchEvent(new CustomEvent('party:fallback'))
+      }
     }
+
+    /** Tears the current engine down and boots a fresh one on `pref`. */
+    const reboot = async (pref: 'auto' | 'webgpu' | 'cpu') => {
+      if (booting) return
+      booting = true
+      try {
+        cancelAnimationFrame(tickRaf)
+        cancelAnimationFrame(maxParticlesRaf)
+        window.clearTimeout(demoTimer)
+        if (engine) {
+          const old = engine
+          engine = null
+          await old.destroy()
+        }
+        if (!disposed) await boot(pref)
+      } finally {
+        booting = false
+      }
+    }
+
+    bridge.setRuntime = (pref) => {
+      if (bridge.runtimePref === pref) return
+      bridge.runtimePref = pref
+      void reboot(pref).catch((err: unknown) => {
+        console.error('Runtime switch failed', err)
+        // An explicit webgpu request can fail where auto would fall back.
+        if (pref !== 'auto') {
+          bridge.runtimePref = 'auto'
+          void reboot('auto').catch(() => {})
+        }
+      })
+    }
+    cleanups.push(() => {
+      bridge.setRuntime = () => {}
+    })
 
     // While pressed the pointer is the classic repel field; released, it is
     // an attractor with a fading trail.
@@ -1047,6 +1374,7 @@ export function PartyBackground() {
       if (e.button !== 0 || isInteractive(e.target)) return
       dragging = true
       trail = []
+      dynamicDirty = true
       const { x, y } = pageToWorld(e.pageX, e.pageY)
       interaction.setPosition(x, y)
       interaction.setActive(true)
@@ -1071,10 +1399,9 @@ export function PartyBackground() {
       interaction.setActive(false)
     }
     const onLeaveWindow = () => {
+      // The trail keeps aging and fading in tick(); only the head detaches.
       cursor = null
-      trail = []
-      effectors.setDynamic([])
-      dynamicDirty = false
+      dynamicDirty = true
     }
     window.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('pointermove', onPointerMove)
@@ -1109,8 +1436,11 @@ export function PartyBackground() {
         if (pageW !== lastPageW) {
           lastPageW = pageW
           spawnAll()
+          // The device budget tracks the viewport class until the user
+          // pins an explicit particle count.
+          if (!particleCountTouched) globals.particleCount = SWARM_BUDGET(webgpu)
           engine.setMaxParticles(
-            Math.floor(SWARM_BUDGET(webgpu) * DEMO_PRESETS[demoIndex].budgetFactor),
+            Math.floor(globals.particleCount * DEMO_PRESETS[demoIndex].budgetFactor),
           )
         }
         syncEffectors()
@@ -1133,7 +1463,7 @@ export function PartyBackground() {
     window.addEventListener('party:select', onSelect)
     cleanups.push(() => window.removeEventListener('party:select', onSelect))
 
-    void start().catch((err: unknown) => {
+    void reboot(bridge.runtimePref).catch((err: unknown) => {
       console.error('Party engine failed to start', err)
     })
 

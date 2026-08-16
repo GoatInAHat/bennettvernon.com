@@ -33,19 +33,21 @@ const MODE_SLIDERS: SliderDef<ModeSettingKey>[] = [
 const fmt = (v: number) => String(Number(v.toFixed(2)))
 
 const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
+  { key: 'particleCount', label: 'particles', min: 500, max: 80000, step: 500 },
   { key: 'dragStrength', label: 'drag power', min: 0, max: 200000, step: 1000 },
   { key: 'dragRadius', label: 'drag radius', min: 100, max: 2000, step: 10 },
   { key: 'nameAttraction', label: 'name pull', min: 0, max: 50000, step: 500 },
   { key: 'boxAttraction', label: 'text repel', min: 0, max: 200000, step: 1000 },
   { key: 'textPadding', label: 'text padding', min: 0, max: 40, step: 1 },
   { key: 'textSmoothing', label: 'blob smoothing', min: 1.05, max: 3, step: 0.05 },
+  { key: 'exclusionFalloff', label: 'repel falloff', min: 4, max: 150, step: 2 },
   { key: 'separatorAttraction', label: 'separator pull', min: 0, max: 100000, step: 500 },
   { key: 'cursorStrength', label: 'cursor pull', min: 0, max: 50000, step: 500 },
   { key: 'trailIntensity', label: 'trail intensity', min: 0, max: 1, step: 0.01 },
   { key: 'cursorFalloff', label: 'trail falloff', min: 0, max: 1, step: 0.01 },
   { key: 'modeDuration', label: 'mode time (s)', min: 3, max: 60, step: 1 },
   { key: 'transitionLength', label: 'fade time (s)', min: 0, max: 8, step: 0.1 },
-  { key: 'nameDensity', label: 'name density', min: 0, max: 80, step: 1 },
+  { key: 'nameDensity', label: 'name density', min: 0, max: 4000, step: 25 },
   { key: 'nameDensityRes', label: 'density cells', min: 8, max: 120, step: 2 },
 ]
 
@@ -59,6 +61,21 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [autoRotate, setAutoRotate] = useState(bridge.autoRotateOn)
   const [debug, setDebug] = useState(bridge.debugOn)
   const [copied, setCopied] = useState(false)
+  const [live, setLive] = useState<Partial<ModeSettings> | null>(null)
+  const [runtimePref, setRuntimePref] = useState(bridge.runtimePref)
+  const [autoResolved, setAutoResolved] = useState(bridge.autoResolved)
+
+  // Runtime switches reboot the engine and reset the device particle budget.
+  useEffect(() => {
+    const onRuntime = () => {
+      setRuntimePref(bridge.runtimePref)
+      setAutoResolved(bridge.autoResolved)
+      setGlobals(bridge.getGlobals())
+      setValues(bridge.getCurrentSettings())
+    }
+    window.addEventListener('party:runtime', onRuntime)
+    return () => window.removeEventListener('party:runtime', onRuntime)
+  }, [])
 
   // The dots still switch modes while the panel is open; the mode sliders
   // re-read that mode's settings when they do.
@@ -69,6 +86,13 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     }
     window.addEventListener('party:demo', onDemo)
     return () => window.removeEventListener('party:demo', onDemo)
+  }, [])
+
+  // The knob shows the target value; a second marker tracks the value the
+  // simulation is actually applying while a mode transition eases over.
+  useEffect(() => {
+    const iv = window.setInterval(() => setLive(bridge.getLiveSettings()), 100)
+    return () => window.clearInterval(iv)
   }, [])
 
   const copy = async () => {
@@ -118,24 +142,38 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       <div className="settings-title">physics</div>
 
       <div className="settings-subtitle">mode {modeIndex + 1}</div>
-      {MODE_SLIDERS.map((s) => (
-        <label key={s.key} className="settings-row">
-          <span>{s.label}</span>
-          <span className="settings-value">{fmt(values[s.key])}</span>
-          <input
-            type="range"
-            min={s.min}
-            max={s.max}
-            step={s.step}
-            value={values[s.key]}
-            onChange={(e) => {
-              const v = Number(e.target.value)
-              bridge.applySetting(s.key, v)
-              setValues((prev) => (prev ? { ...prev, [s.key]: v } : prev))
-            }}
-          />
-        </label>
-      ))}
+      {MODE_SLIDERS.map((s) => {
+        const liveV = live?.[s.key]
+        const showLive = liveV !== undefined && Math.abs(liveV - values[s.key]) > s.step / 2
+        return (
+          <label key={s.key} className="settings-row">
+            <span>{s.label}</span>
+            <span className="settings-value">{fmt(values[s.key])}</span>
+            <span className="slider-wrap">
+              <input
+                type="range"
+                min={s.min}
+                max={s.max}
+                step={s.step}
+                value={values[s.key]}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  bridge.applySetting(s.key, v)
+                  setValues((prev) => (prev ? { ...prev, [s.key]: v } : prev))
+                }}
+              />
+              {showLive ? (
+                <span
+                  className="slider-live"
+                  style={{
+                    left: `${Math.min(100, Math.max(0, ((liveV - s.min) / (s.max - s.min)) * 100))}%`,
+                  }}
+                />
+              ) : null}
+            </span>
+          </label>
+        )
+      })}
       <label className="settings-row settings-toggle">
         <span>enabled modes</span>
         <span className="mode-checks">
@@ -228,6 +266,28 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           }}
         />
       </label>
+      <div className="settings-row settings-toggle">
+        <span>physics runtime</span>
+        <span className="runtime-switch">
+          {(['cpu', 'gpu', 'auto'] as const).map((opt) => {
+            const pref = opt === 'gpu' ? 'webgpu' : opt
+            return (
+              <button
+                key={opt}
+                className={runtimePref === pref ? 'active' : ''}
+                onClick={() => {
+                  bridge.setRuntime(pref)
+                  setRuntimePref(pref)
+                }}
+              >
+                {opt === 'auto'
+                  ? `auto${autoResolved ? ` (${autoResolved === 'webgpu' ? 'gpu' : 'cpu'})` : ''}`
+                  : opt}
+              </button>
+            )
+          })}
+        </span>
+      </div>
     </div>
   )
 }

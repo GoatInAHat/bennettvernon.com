@@ -400,6 +400,29 @@ a:visited {
   grid-column: 2 / -1;
 }
 
+/* The mode checkboxes line up with the start of the slider column. */
+.settings-row > .mode-checks:last-child {
+  grid-column: 3 / -1;
+}
+
+.slider-wrap {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+/* The value currently applied to the simulation, easing toward the knob. */
+.slider-live {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
 .settings-value {
   font-size: 11px;
   color: var(--faint);
@@ -430,6 +453,80 @@ a:visited {
 .settings-toggle input {
   justify-self: start;
   accent-color: #000;
+}
+
+.runtime-switch {
+  display: flex;
+  gap: 4px;
+}
+
+.runtime-switch button {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.runtime-switch button.active {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+
+/* Warning shown when auto runtime selection lands on CPU physics. */
+.fallback-popup {
+  position: fixed;
+  z-index: 300;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 48px));
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.fallback-popup p {
+  margin: 0 0 8px;
+}
+
+.fallback-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.fallback-actions button {
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.fallback-actions button:first-child {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+
+/* Static name shown when the particle simulation is disabled. */
+.hero-name {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: clamp(56px, 7.6vw, 150px);
+  line-height: 1.08;
+  margin: 0;
+  padding: 44px 0 0 44px;
 }
 
 @media (max-width: 768px) {

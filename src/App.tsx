@@ -225,6 +225,36 @@ function DemoDots({
   )
 }
 
+/** Warning shown when the auto runtime lands on CPU physics. */
+function FallbackPopup() {
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const onFallback = () => setOpen(true)
+    window.addEventListener('party:fallback', onFallback)
+    return () => window.removeEventListener('party:fallback', onFallback)
+  }, [])
+  if (!open) return null
+  return (
+    <div className="fallback-popup" role="alertdialog" aria-label="Performance warning">
+      <p>
+        <strong>WebGPU isn’t available in this browser.</strong>
+      </p>
+      <p>The particle simulation fell back to CPU physics, which can run slowly.</p>
+      <div className="fallback-actions">
+        <button
+          onClick={() => {
+            bridge.setParticlesDisabled(true)
+            setOpen(false)
+          }}
+        >
+          Disable particles
+        </button>
+        <button onClick={() => setOpen(false)}>Continue with CPU physics (not recommended)</button>
+      </div>
+    </div>
+  )
+}
+
 function Block({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={`pblock ${className ?? ''}`}>{children}</div>
 }
@@ -276,15 +306,32 @@ const SECTIONS: { title: string; items: WorkItem[] }[] = [
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [particlesOff, setParticlesOff] = useState(bridge.particlesDisabled)
   useGlitchText()
+  useEffect(() => {
+    const onDisabled = (e: Event) => setParticlesOff((e as CustomEvent<boolean>).detail)
+    window.addEventListener('party:disabled', onDisabled)
+    return () => window.removeEventListener('party:disabled', onDisabled)
+  }, [])
   return (
     <>
-      <PartyBackground />
-      <DemoDots settingsOpen={settingsOpen} onToggleSettings={() => setSettingsOpen((v) => !v)} />
-      <DebugHud panelOpen={settingsOpen} />
-      {settingsOpen ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
+      {particlesOff ? null : <PartyBackground />}
+      {particlesOff ? null : (
+        <DemoDots settingsOpen={settingsOpen} onToggleSettings={() => setSettingsOpen((v) => !v)} />
+      )}
+      {particlesOff ? null : <DebugHud panelOpen={settingsOpen} />}
+      {settingsOpen && !particlesOff ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
+      <FallbackPopup />
       <header className="hero">
-        <h1 className="sr-only">Bennett Vernon</h1>
+        {particlesOff ? (
+          <h1 className="hero-name">
+            BENNETT
+            <br />
+            VERNON
+          </h1>
+        ) : (
+          <h1 className="sr-only">Bennett Vernon</h1>
+        )}
       </header>
       <main className="container">
         <Block>

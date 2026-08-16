@@ -46,6 +46,21 @@ export interface DistanceField {
   distances: Float32Array
 }
 
+/**
+ * One link of the cursor-trail chain: a capsule segment whose strength
+ * interpolates between its endpoints, so the pull is continuous along the
+ * whole path instead of a row of discrete circles. Attract-only.
+ */
+export interface TrailSegment {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  range: number
+  s1: number
+  s2: number
+}
+
 const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 }
 const STRIDE = 8
 const FIELD_HEADER = 8
@@ -93,9 +108,13 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     this.write({ data: packEffectors(effectors) })
   }
 
-  /** Small per-frame effectors (cursor trail): cheap to rewrite every frame. */
-  setDynamic(effectors: Effector[]): void {
-    this.write({ dynamic: packEffectors(effectors) })
+  /** Cursor-trail capsule chain: tiny, rewritten every frame. */
+  setDynamic(segments: TrailSegment[]): void {
+    const data: number[] = []
+    for (const s of segments) {
+      data.push(s.x1, s.y1, s.x2, s.y2, s.range, s.s1, s.s2, 0)
+    }
+    this.write({ dynamic: data })
   }
 
   setField(field: DistanceField | null): void {
@@ -120,9 +139,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     type WgslArgs = Parameters<
       Extract<WebGPUDescriptor<EffectorsInputs>, { apply?: unknown }>['apply'] & object
     >[0]
-    // The same shape-force loop runs over the static and the dynamic array.
+    // The static array carries circle/rect/pill shapes; the dynamic array
+    // carries the trail capsule chain and has its own layout.
     const shapeLoop = (
-      arr: 'data' | 'dynamic',
+      arr: 'data',
       { particleVar, getUniform, getLength }: WgslArgs,
     ) => `
   let n_${arr} = ${getLength(arr)} / ${STRIDE}u;
@@ -181,6 +201,37 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       }
     }
   }`
+    // Continuous pull along the trail path: distance to each capsule
+    // segment, strength interpolated between the segment's endpoints.
+    const trailLoop = ({ particleVar, getUniform, getLength }: WgslArgs) => `
+  let n_dyn = ${getLength('dynamic')} / ${STRIDE}u;
+  for (var i: u32 = 0u; i < n_dyn; i = i + 1u) {
+    let base = i * ${STRIDE}u;
+    let ax = ${getUniform('dynamic', 'base + 0u')};
+    let ay = ${getUniform('dynamic', 'base + 1u')};
+    let bx = ${getUniform('dynamic', 'base + 2u')};
+    let by = ${getUniform('dynamic', 'base + 3u')};
+    let range = ${getUniform('dynamic', 'base + 4u')};
+    let s1 = ${getUniform('dynamic', 'base + 5u')};
+    let s2 = ${getUniform('dynamic', 'base + 6u')};
+    let px = ${particleVar}.position.x;
+    let py = ${particleVar}.position.y;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = abx * abx + aby * aby;
+    var t = 0.0;
+    if (len2 > 0.0) {
+      t = clamp(((px - ax) * abx + (py - ay) * aby) / len2, 0.0, 1.0);
+    }
+    let dx = (ax + abx * t) - px;
+    let dy = (ay + aby * t) - py;
+    let dist2 = dx * dx + dy * dy;
+    if (dist2 > 0.0 && dist2 <= range * range) {
+      let dist = sqrt(dist2);
+      let f = mix(s1, s2, t) * (1.0 - dist / range);
+      ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * f;
+    }
+  }`
     const fieldPart = ({ particleVar, getUniform, getLength }: WgslArgs) => `
   let flen = ${getLength('field')};
   if (flen > ${FIELD_HEADER}u) {
@@ -194,15 +245,23 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     let falloff = ${getUniform('field', '7u')};
     let fx = (${particleVar}.position.x - ox) / cw;
     let fy = (${particleVar}.position.y - oy) / cw;
-    if (fx >= 1.0 && fy >= 1.0 && fx < f32(cols) - 2.0 && fy < f32(rows) - 2.0) {
-      let cx = u32(fx);
-      let cy = u32(fy);
-      let idx = ${FIELD_HEADER}u + cy * cols + cx;
-      let d = ${getUniform('field', 'idx')};
+    if (fx >= 1.5 && fy >= 1.5 && fx < f32(cols) - 2.5 && fy < f32(rows) - 2.5) {
+      // Bilinear sample on cell centers: the distance and its analytic
+      // gradient vary continuously, so the force has no grid-step ridges.
+      let ux = fx - 0.5;
+      let uy = fy - 0.5;
+      let tx = fract(ux);
+      let ty = fract(uy);
+      let i00 = ${FIELD_HEADER}u + u32(uy) * cols + u32(ux);
+      let d00 = ${getUniform('field', 'i00')};
+      let d10 = ${getUniform('field', 'i00 + 1u')};
+      let d01 = ${getUniform('field', 'i00 + cols')};
+      let d11 = ${getUniform('field', 'i00 + cols + 1u')};
+      let d = mix(mix(d00, d10, tx), mix(d01, d11, tx), ty);
       if (d < pad) {
         // Gradient points toward the nearest exit; force scales with depth.
-        let gx = ${getUniform('field', 'idx + 1u')} - ${getUniform('field', 'idx - 1u')};
-        let gy = ${getUniform('field', 'idx + cols')} - ${getUniform('field', 'idx - cols')};
+        let gx = mix(d10 - d00, d11 - d01, ty);
+        let gy = mix(d01 - d00, d11 - d10, tx);
         let gl = sqrt(gx * gx + gy * gy);
         if (gl > 0.0) {
           let m = clamp((pad - d) / falloff, 0.0, 1.5);
@@ -215,7 +274,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       apply: (args) => `{
   {${shapeLoop('data', args)}
   }
-  {${shapeLoop('dynamic', args)}
+  {${trailLoop(args)}
   }
 ${fieldPart(args)}
 }`,
@@ -292,12 +351,20 @@ ${fieldPart(args)}
           const falloff = field[7]
           const fx = (px - ox) / cw
           const fy = (py - oy) / cw
-          if (fx >= 1 && fy >= 1 && fx < cols - 2 && fy < rows - 2) {
-            const idx = FIELD_HEADER + Math.floor(fy) * cols + Math.floor(fx)
-            const d = field[idx]
+          if (fx >= 1.5 && fy >= 1.5 && fx < cols - 2.5 && fy < rows - 2.5) {
+            const ux = fx - 0.5
+            const uy = fy - 0.5
+            const tx = ux - Math.floor(ux)
+            const ty = uy - Math.floor(uy)
+            const i00 = FIELD_HEADER + Math.floor(uy) * cols + Math.floor(ux)
+            const d00 = field[i00]
+            const d10 = field[i00 + 1]
+            const d01 = field[i00 + cols]
+            const d11 = field[i00 + cols + 1]
+            const d = (d00 * (1 - tx) + d10 * tx) * (1 - ty) + (d01 * (1 - tx) + d11 * tx) * ty
             if (d < pad) {
-              const gx = field[idx + 1] - field[idx - 1]
-              const gy = field[idx + cols] - field[idx - cols]
+              const gx = (d10 - d00) * (1 - ty) + (d11 - d01) * ty
+              const gy = (d01 - d00) * (1 - tx) + (d11 - d10) * tx
               const gl = Math.hypot(gx, gy)
               if (gl > 0) {
                 const m = Math.min(Math.max((pad - d) / falloff, 0), 1.5)

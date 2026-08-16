@@ -12,12 +12,14 @@ export const MODE_SETTING_KEYS = [
 
 /** Site-wide settings, independent of the active mode. */
 export const GLOBAL_SETTING_KEYS = [
+  'particleCount',
   'dragStrength',
   'dragRadius',
   'nameAttraction',
   'boxAttraction',
   'textPadding',
   'textSmoothing',
+  'exclusionFalloff',
   'separatorAttraction',
   'cursorStrength',
   'trailIntensity',
@@ -72,6 +74,9 @@ export const bridge: {
   autoRotateOn: boolean
   applySetting: (key: ModeSettingKey, value: number) => void
   getCurrentSettings: () => ModeSettings | null
+  /** Values currently applied to the simulation (mid-transition they lag the
+   * targets shown on the slider knobs). */
+  getLiveSettings: () => Partial<ModeSettings> | null
   applyGlobal: (key: GlobalSettingKey, value: number) => void
   getGlobals: () => GlobalSettings | null
   /** Enable/disable a demo mode; disabled modes lose their dot and are
@@ -83,11 +88,21 @@ export const bridge: {
   setDebug: (on: boolean) => void
   debugOn: boolean
   getTelemetry: () => Telemetry | null
+  /** Physics runtime preference; switching tears down and reboots the engine. */
+  runtimePref: 'auto' | 'webgpu' | 'cpu'
+  setRuntime: (pref: 'auto' | 'webgpu' | 'cpu') => void
+  actualRuntime: 'webgpu' | 'cpu' | null
+  /** What 'auto' resolves to in this browser (known after the first auto boot). */
+  autoResolved: 'webgpu' | 'cpu' | null
+  /** Hides the simulation entirely; the name renders as regular text. */
+  particlesDisabled: boolean
+  setParticlesDisabled: (on: boolean) => void
 } = {
   setAutoRotate: () => {},
   autoRotateOn: true,
   applySetting: () => {},
   getCurrentSettings: () => null,
+  getLiveSettings: () => null,
   applyGlobal: () => {},
   getGlobals: () => null,
   setModeEnabled: () => {},
@@ -96,4 +111,13 @@ export const bridge: {
   setDebug: () => {},
   debugOn: false,
   getTelemetry: () => null,
+  runtimePref: 'auto',
+  setRuntime: () => {},
+  actualRuntime: null,
+  autoResolved: null,
+  particlesDisabled: false,
+  setParticlesDisabled: (on) => {
+    bridge.particlesDisabled = on
+    window.dispatchEvent(new CustomEvent('party:disabled', { detail: on }))
+  },
 }
