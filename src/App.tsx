@@ -347,7 +347,7 @@ export default function App() {
                 {index < site.links.length - 1 ? (
                   <span className="dot" aria-hidden="true">
                     {' '}
-                    ·
+                    <span className="g">·</span>
                   </span>
                 ) : null}
               </span>
