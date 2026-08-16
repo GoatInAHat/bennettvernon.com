@@ -21,8 +21,10 @@ export function vizHue(key: string): number {
 export const vizCss = (key: string, alpha: number): string =>
   `hsla(${vizHue(key)}, 72%, 36%, ${alpha})`
 
-function hueToRgb(hue: number): [number, number, number] {
+/** The vizCss color of a key as RGB bytes, for ImageData painting. */
+export function vizRgb(key: string): [number, number, number] {
   // s=0.72, l=0.36 to match vizCss.
+  const hue = vizHue(key)
   const s = 0.72
   const l = 0.36
   const c = (1 - Math.abs(2 * l - 1)) * s
@@ -116,7 +118,9 @@ function drawCapsule(
     ctx.stroke()
   }
   // Range limit: the capsule outline. (The body segment itself is not
-  // stroked — across the round caps it reads as a diameter line.)
+  // stroked — across the round caps it reads as a diameter line.) The cap
+  // arcs run from the +normal side around the tip to the −normal side, so
+  // the path never jumps across the circle.
   const nx = -(y2 - y1) / len
   const ny = (x2 - x1) / len
   const ang = Math.atan2(y2 - y1, x2 - x1)
@@ -125,9 +129,10 @@ function drawCapsule(
   ctx.beginPath()
   ctx.moveTo(x1 + nx * r, y1 + ny * r)
   ctx.lineTo(x2 + nx * r, y2 + ny * r)
-  ctx.arc(x2, y2, r, ang - Math.PI / 2, ang + Math.PI / 2)
+  ctx.arc(x2, y2, r, ang + Math.PI / 2, ang - Math.PI / 2, true)
   ctx.lineTo(x1 - nx * r, y1 - ny * r)
-  ctx.arc(x1, y1, r, ang + Math.PI / 2, ang + Math.PI * 1.5)
+  ctx.arc(x1, y1, r, ang - Math.PI / 2, ang + Math.PI / 2, true)
+  ctx.closePath()
   ctx.stroke()
 }
 
@@ -165,6 +170,85 @@ function drawRectRing(
   ctx.stroke()
 }
 
+/** Strokes one isoline of a sampled scalar field as smooth vector contours
+ * (marching squares with linear interpolation between cell centers), so the
+ * curve renders at native resolution instead of the field's raster grid. */
+function strokeIso(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  p: Extract<VizPrimitive, { kind: 'field' }>,
+  iso: number,
+  alpha: number,
+  width: number,
+  zoom: number,
+) {
+  const { cols, rows } = p
+  const v = (gx: number, gy: number) => Number(p.values[p.valuesStart + gy * cols + gx])
+  const cx = (g: number) => (p.originX + (g + 0.5) * p.cell) * zoom
+  const cy = (g: number) => (p.originY + (g + 0.5) * p.cell) * zoom
+  ctx.strokeStyle = vizCss(key, alpha)
+  ctx.lineWidth = width
+  ctx.beginPath()
+  for (let gy = 0; gy < rows - 1; gy++) {
+    for (let gx = 0; gx < cols - 1; gx++) {
+      const a = v(gx, gy)
+      const b = v(gx + 1, gy)
+      const c = v(gx + 1, gy + 1)
+      const d = v(gx, gy + 1)
+      let idx = 0
+      if (a >= iso) idx |= 1
+      if (b >= iso) idx |= 2
+      if (c >= iso) idx |= 4
+      if (d >= iso) idx |= 8
+      if (idx === 0 || idx === 15) continue
+      const t = (v1: number, v2: number) => (iso - v1) / (v2 - v1)
+      const top = () => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(a, b), cy(gy)]
+      const right = () => [cx(gx + 1), cy(gy) + (cy(gy + 1) - cy(gy)) * t(b, c)]
+      const bottom = () => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(d, c), cy(gy + 1)]
+      const left = () => [cx(gx), cy(gy) + (cy(gy + 1) - cy(gy)) * t(a, d)]
+      const seg = (e1: number[], e2: number[]) => {
+        ctx.moveTo(e1[0], e1[1])
+        ctx.lineTo(e2[0], e2[1])
+      }
+      switch (idx) {
+        case 1:
+        case 14:
+          seg(left(), top())
+          break
+        case 2:
+        case 13:
+          seg(top(), right())
+          break
+        case 3:
+        case 12:
+          seg(left(), right())
+          break
+        case 4:
+        case 11:
+          seg(right(), bottom())
+          break
+        case 6:
+        case 9:
+          seg(top(), bottom())
+          break
+        case 7:
+        case 8:
+          seg(left(), bottom())
+          break
+        case 5:
+          seg(left(), top())
+          seg(right(), bottom())
+          break
+        case 10:
+          seg(top(), right())
+          seg(left(), bottom())
+          break
+      }
+    }
+  }
+  ctx.stroke()
+}
+
 function drawField(
   ctx: CanvasRenderingContext2D,
   key: string,
@@ -173,16 +257,13 @@ function drawField(
 ) {
   const { cols, rows } = p
   if (cols < 2 || rows < 2) return
-  const [cr, cg, cb] = hueToRgb(vizHue(key))
+  const [cr, cg, cb] = vizRgb(key)
   const img = new ImageData(cols, rows)
   const band = Math.max(p.outer - p.inner, 1e-6)
-  const iso = p.cell * 0.8
   for (let i = 0; i < cols * rows; i++) {
     const d = Number(p.values[p.valuesStart + i])
     let a = 0
-    if (Math.abs(d - p.inner) < iso) a = 0.85 // body isoline
-    else if (Math.abs(d - p.outer) < iso) a = 0.45 // range-limit isoline
-    else if (d < p.inner) a = 0.3
+    if (d < p.inner) a = 0.3
     else if (d < p.outer) a = 0.3 * (1 - (d - p.inner) / band)
     if (a > 0) {
       img.data[i * 4] = cr
@@ -203,6 +284,9 @@ function drawField(
     cols * p.cell * zoom,
     rows * p.cell * zoom,
   )
+  // Body and range-limit isolines as smooth vector contours.
+  strokeIso(ctx, key, p, p.inner, 0.8, 1.2, zoom)
+  strokeIso(ctx, key, p, p.outer, 0.4, 1, zoom)
 }
 
 /** Renders viz groups onto a page-space canvas (world units × zoom). */

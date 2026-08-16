@@ -6,7 +6,7 @@ import {
   type CellCensusResult,
   type VizGroup,
 } from '@cazala/party'
-import { drawViz, vizCss } from './viz'
+import { drawViz, vizCss, vizRgb } from './viz'
 import {
   bridge,
   NAME_FONTS,
@@ -267,6 +267,10 @@ export function PartyBackground() {
     let nameField: { minX: number; minY: number; cell: number; cols: number; rows: number; d: Float32Array } | null = null
     let nameMask: HTMLCanvasElement | null = null
     let nameAlphaSmall: HTMLCanvasElement | null = null
+    /** The balanced power diagram (seed positions + weights, page space):
+     * the analytic geometry behind the grid partition, used to render cell
+     * borders at native resolution. */
+    let voroPower: { sx: number[]; sy: number[]; w: Float64Array } | null = null
     /** Per-cell density weight targets (0..1) driving the name opacity. */
     let cellWeights = new Float32Array(0)
     /** Displayed weights, eased toward the targets by opacity damping. */
@@ -472,29 +476,80 @@ export function PartyBackground() {
       NAME_LINES.forEach((text, i) => {
         ctx.strokeText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
       })
-      if (!glyphGrid || voroSeeds.length === 0) return
-      // Borders only where two different cells meet inside the letters:
-      // the partition splits the letter shapes themselves, no bounding box.
-      const { minX, minY, cols, rows, step, cellOf } = glyphGrid
-      ctx.fillStyle = vizCss('density:cells', 0.75)
-      for (let gy = 0; gy < rows; gy++) {
-        for (let gx = 0; gx < cols; gx++) {
-          const c = cellOf[gy * cols + gx]
-          if (c < 0) continue
-          const right = gx + 1 < cols ? cellOf[gy * cols + gx + 1] : -1
-          const below = gy + 1 < rows ? cellOf[(gy + 1) * cols + gx] : -1
-          if (right >= 0 && right !== c) {
-            ctx.fillRect(minX + (gx + 1) * step - 0.5, minY + gy * step, 1, step)
+      if (!glyphGrid || !voroPower || voroSeeds.length === 0) return
+      // Cell borders from the analytic power diagram at native resolution:
+      // the census grid quantizes the partition for the GPU, but the
+      // geometry behind it is exact, so the debug border can be too. The
+      // glyphs are re-rasterized at device resolution and each glyph pixel
+      // is assigned to its power-nearest seed; borders appear where two
+      // assignments meet inside the letters.
+      const { minX, minY, cols, rows, step } = glyphGrid
+      const s = debugDpr
+      const W = Math.ceil(cols * step * s)
+      const H = Math.ceil(rows * step * s)
+      const raster = document.createElement('canvas')
+      raster.width = W
+      raster.height = H
+      const rctx = raster.getContext('2d', { willReadFrequently: true })
+      if (!rctx) return
+      rctx.setTransform(s, 0, 0, s, -minX * s, -minY * s)
+      rctx.fillStyle = '#fff'
+      rctx.textBaseline = 'top'
+      rctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
+      NAME_LINES.forEach((text, i) => {
+        rctx.fillText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
+      })
+      const alpha = rctx.getImageData(0, 0, W, H).data
+      const { sx, sy, w: pw } = voroPower
+      const n = sx.length
+      const owner = new Int16Array(W * H).fill(-1)
+      for (let iy = 0; iy < H; iy++) {
+        const py = minY + (iy + 0.5) / s
+        for (let ix = 0; ix < W; ix++) {
+          const i = iy * W + ix
+          if (alpha[i * 4 + 3] <= 64) continue
+          const px = minX + (ix + 0.5) / s
+          let bi = 0
+          let bs = Infinity
+          for (let k = 0; k < n; k++) {
+            const d = (px - sx[k]) ** 2 + (py - sy[k]) ** 2 - pw[k]
+            if (d < bs) {
+              bs = d
+              bi = k
+            }
           }
-          if (below >= 0 && below !== c) {
-            ctx.fillRect(minX + gx * step, minY + (gy + 1) * step - 0.5, step, 1)
+          owner[i] = bi
+        }
+      }
+      const [br, bg, bb] = vizRgb('density:cells')
+      const img = new ImageData(W, H)
+      for (let iy = 0; iy < H - 1; iy++) {
+        for (let ix = 0; ix < W - 1; ix++) {
+          const i = iy * W + ix
+          const c = owner[i]
+          if (c < 0) continue
+          const r = owner[i + 1]
+          const b = owner[i + W]
+          if ((r >= 0 && r !== c) || (b >= 0 && b !== c)) {
+            img.data[i * 4] = br
+            img.data[i * 4 + 1] = bg
+            img.data[i * 4 + 2] = bb
+            img.data[i * 4 + 3] = 200
           }
         }
       }
+      // putImageData ignores the transform: place at native coordinates.
+      const off = document.createElement('canvas')
+      off.width = W
+      off.height = H
+      off.getContext('2d')?.putImageData(img, 0, 0)
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.drawImage(off, Math.round(minX * s), Math.round(minY * s))
+      ctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
       ctx.fillStyle = vizCss('density:cells', 0.95)
-      for (const s of voroSeeds) {
+      for (const sd of voroSeeds) {
         ctx.beginPath()
-        ctx.arc(s.x, s.y, 2.2, 0, Math.PI * 2)
+        ctx.arc(sd.x, sd.y, 2.2, 0, Math.PI * 2)
         ctx.fill()
       }
     }
@@ -743,6 +798,7 @@ export function PartyBackground() {
     const rebuildVoronoi = () => {
       voroSeeds = []
       voroCellPx = []
+      voroPower = null
       glyphGrid = null
       censusCells = null
       lastCensus = null
@@ -875,6 +931,7 @@ export function PartyBackground() {
         voroCellPx[own[p]].push(px[p])
       }
       voroSeeds = Array.from({ length: target }, (_, s) => ({ x: sx[s], y: sy[s] }))
+      voroPower = { sx: [...sx], sy: [...sy], w: Float64Array.from(w) }
       glyphGrid = { minX, minY, cols, rows, step, cellOf }
       censusCells = Int32Array.from(cellOf)
       censusVersion++
