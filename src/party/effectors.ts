@@ -4,6 +4,8 @@ import {
   DataType,
   type WebGPUDescriptor,
   type CPUDescriptor,
+  type VizGroup,
+  type VizPrimitive,
 } from '@cazala/party'
 
 export type EffectorShape = 'circle' | 'rect' | 'pill'
@@ -133,6 +135,70 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     arr[7] = field.falloff
     for (let i = 0; i < field.distances.length; i++) arr[FIELD_HEADER + i] = field.distances[i]
     this.write({ field: arr })
+  }
+
+  /** Debug description decoded from the same packed arrays the shaders
+   * consume, so the debug view always matches the live physics. */
+  viz(): VizGroup[] {
+    if (!this.isEnabled()) return []
+    const state = this.read() as { data?: number[]; dynamic?: number[]; field?: number[] }
+    const groups = new Map<string, VizGroup>()
+    const add = (key: string, dynamic: boolean, prim: VizPrimitive) => {
+      let g = groups.get(key)
+      if (!g) {
+        g = { key, dynamic, primitives: [] }
+        groups.set(key, g)
+      }
+      g.primitives.push(prim)
+    }
+
+    const data = state.data ?? []
+    for (let base = 0; base + STRIDE <= data.length; base += STRIDE) {
+      const [kind, mode, x, y, range, hw, hh, strength] = data.slice(base, base + STRIDE)
+      if (strength === 0) continue
+      const dir = mode === 1 ? 'repel' : 'attract'
+      if (kind < 0.5) {
+        add(`effectors:${dir}-circle`, false, { kind: 'ring', x, y, r0: 0, r1: range, intensity: strength })
+      } else if (kind > 1.5) {
+        add(`effectors:${dir}-pill`, false, {
+          kind: 'capsule',
+          x1: x - hw,
+          y1: y,
+          x2: x + hw,
+          y2: y,
+          range,
+          i1: strength,
+          i2: strength,
+        })
+      } else {
+        add(`effectors:${dir}-rect`, false, { kind: 'rectRing', x, y, hw, hh, range, intensity: strength })
+      }
+    }
+
+    const dyn = state.dynamic ?? []
+    for (let base = 0; base + STRIDE <= dyn.length; base += STRIDE) {
+      const [x1, y1, x2, y2, range, s1, s2] = dyn.slice(base, base + STRIDE)
+      if (range === 0 || (s1 === 0 && s2 === 0)) continue
+      add('effectors:trail', true, { kind: 'capsule', x1, y1, x2, y2, range, i1: s1, i2: s2 })
+    }
+
+    const field = state.field
+    if (field && field.length > FIELD_HEADER) {
+      add('effectors:exclusion', false, {
+        kind: 'field',
+        originX: field[0],
+        originY: field[1],
+        cell: field[2],
+        cols: field[3],
+        rows: field[4],
+        values: field,
+        valuesStart: FIELD_HEADER,
+        inner: field[6],
+        outer: field[6] + field[7],
+        intensity: field[5],
+      })
+    }
+    return [...groups.values()]
   }
 
   webgpu(): WebGPUDescriptor<EffectorsInputs> {

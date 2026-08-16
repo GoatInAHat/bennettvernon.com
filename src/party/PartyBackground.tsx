@@ -1,5 +1,12 @@
 import { useEffect, useRef } from 'react'
-import { Engine, Interaction, type IParticle, type CellCensusResult } from '@cazala/party'
+import {
+  Engine,
+  Interaction,
+  type IParticle,
+  type CellCensusResult,
+  type VizGroup,
+} from '@cazala/party'
+import { drawViz, vizCss } from './viz'
 import {
   bridge,
   NAME_FONTS,
@@ -28,14 +35,32 @@ const NAME_MARGIN_PX = GUTTER_PX * 2
 const isMobile = () =>
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
   (window.innerWidth >= 1 && window.innerWidth < 768)
+/** Safari (not Chromium pretending): WebKit's WebGPU is slower and Safari
+ * drops requestAnimationFrame to 30Hz as soon as frames miss the 60Hz
+ * budget, so it gets a smaller default swarm and smaller scene textures. */
+const isSafari = () =>
+  /AppleWebKit/i.test(navigator.userAgent) &&
+  !/Chrome|Chromium|CriOS|Edg\/|OPR\//i.test(navigator.userAgent)
 const DESIRED_ZOOM = () => (isMobile() ? 0.2 : 0.3)
-const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_000) : 2_500)
+const SWARM_BUDGET = (webgpu: boolean) => {
+  if (!webgpu) return 2_500
+  const base = isMobile() ? 24_000 : 80_000
+  return isSafari() ? Math.round(base * 0.4) : base
+}
 /** Particles spawned up front; the particle-count setting caps the effective
  * count via maxParticles so changing it never respawns the swarm. */
 const PARTICLE_POOL = (webgpu: boolean) => (webgpu ? 80_000 : 8_000)
 /** Backing-store cap; taller pages render uniformly downscaled so the
  * simulation always reaches the bottom of the page. */
 const MAX_CANVAS_HEIGHT = 8_000
+/** Starting uniform render downscale. Safari is scene-texture fill-bound:
+ * its trail compute passes over a full-page texture miss the 60Hz deadline
+ * and WebKit then halves requestAnimationFrame to a hard 30Hz — measured:
+ * full-res 30-31Hz, ~0.4× ≈ 58-65Hz on an M-series MacBook. The tick loop
+ * ratchets the scale down further while the frame rate stays demoted, so
+ * the resolution/smoothness tradeoff tunes itself per machine. */
+const RENDER_SCALE_START = () => (isSafari() ? 0.6 : 1)
+const RENDER_SCALE_FLOOR = 0.34
 
 /** Effector tuning (world units are CSS px / zoom). */
 const PANEL_RANGE_PX = 6
@@ -233,7 +258,6 @@ export function PartyBackground() {
     let demoIndex = 0
     let demoTimer = 0
     let maxParticlesRaf = 0
-    let tickRaf = 0
     let syncScheduled = false
     const globals: GlobalSettings = { ...GLOBAL_DEFAULTS, dragRadius: isMobile() ? 700 : 800 }
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
@@ -242,7 +266,8 @@ export function PartyBackground() {
     let name: NameLayout | null = null
     let charBalls: CharBall[] = []
     let voroSeeds: { x: number; y: number }[] = []
-    let voroCellPoints: number[][] = []
+    /** Fine-grid indices of the glyph pixels owned by each Voronoi cell. */
+    let voroCellPx: number[][] = []
     let glyphGrid: {
       minX: number
       minY: number
@@ -252,6 +277,8 @@ export function PartyBackground() {
       cellOf: Int16Array
     } | null = null
     let particleCountTouched = false
+    let renderScale = RENDER_SCALE_START()
+    let lastScaleCheck = 0
     let densityStatus = 'idle'
     const densityStats = {
       calls: 0,
@@ -278,19 +305,14 @@ export function PartyBackground() {
     let frameDtIndex = 0
     let lastTickAt = 0
     let trail: { x: number; y: number; t: number }[] = []
-    /** Page-space trail nodes with their current strength fraction, kept in
-     * sync with the physics for the debug overlay. */
-    let trailViz: { x: number; y: number; s: number }[] = []
     let cursor: { x: number; y: number } | null = null
     let dragging = false
     // Debug overlay layers, cached separately because they invalidate on
-    // different events (field/settings, name geometry, effector layout).
-    let blobCache: HTMLCanvasElement | null = null
-    let blobCacheDirty = true
+    // different events (name geometry vs static physics layout).
     let voroCache: HTMLCanvasElement | null = null
     let voroCacheDirty = true
-    let effCache: HTMLCanvasElement | null = null
-    let effCacheDirty = true
+    let staticVizCache: HTMLCanvasElement | null = null
+    let staticVizDirty = true
     const cleanups: (() => void)[] = []
 
     // Rebuilt on every engine boot: a destroyed runtime leaves stale uniform
@@ -415,214 +437,69 @@ export function PartyBackground() {
       })
     }
 
-    /** Red layer: the closed text exclusion shape, with the repel force
-     * fading out as a gradient band between padding and padding+falloff. */
-    const renderBlobCache = () => {
-      blobCacheDirty = false
-      if (!blobCache) blobCache = document.createElement('canvas')
-      blobCache.width = debugCanvas.width
-      blobCache.height = debugCanvas.height
-      const ctx = blobCache.getContext('2d')
-      if (!ctx || !textField) return
-      const { minX, minY, cell, cols, rows, d } = textField
-      const pad = globals.textPadding
-      const falloff = Math.max(1, globals.exclusionFalloff)
-      // Painted at grid resolution, then scaled up with smoothing so the
-      // shape reads as a continuous field rather than voxels.
-      const img = new ImageData(cols, rows)
-      for (let i = 0; i < d.length; i++) {
-        const dist = d[i]
-        let a = 0
-        if (dist < pad) a = 0.3
-        else if (dist < pad + falloff) a = 0.3 * (1 - (dist - pad) / falloff)
-        if (a > 0) {
-          img.data[i * 4] = 220
-          img.data[i * 4 + 1] = 40
-          img.data[i * 4 + 2] = 40
-          img.data[i * 4 + 3] = Math.round(a * 255)
-        }
-      }
-      const small = document.createElement('canvas')
-      small.width = cols
-      small.height = rows
-      small.getContext('2d')?.putImageData(img, 0, 0)
-      ctx.imageSmoothingEnabled = true
-      ctx.drawImage(small, minX, minY, cols * cell, rows * cell)
-    }
-
-    /** Blue layer: Voronoi cell borders and round seed dots over the name. */
+    /** Density-system overlay: the glyph outline the partition samples, the
+     * equal-area Voronoi borders clipped to the letters, and the cell
+     * centroids. Colors derive from the layer keys like all debug colors. */
     const renderVoroCache = () => {
       voroCacheDirty = false
       if (!voroCache) voroCache = document.createElement('canvas')
       voroCache.width = debugCanvas.width
       voroCache.height = debugCanvas.height
       const ctx = voroCache.getContext('2d')
-      if (!ctx || !glyphGrid || voroSeeds.length === 0) return
-      // Owner scan across the whole name box (not just glyph cells) so the
-      // borders form complete, visible cell outlines.
-      const res = 2
-      const x0 = glyphGrid.minX
-      const y0 = glyphGrid.minY
-      const cols = Math.ceil((glyphGrid.cols * glyphGrid.step) / res)
-      const rows = Math.ceil((glyphGrid.rows * glyphGrid.step) / res)
-      const owner = new Int16Array(cols * rows)
-      for (let gy = 0; gy < rows; gy++) {
-        const py = y0 + (gy + 0.5) * res
-        for (let gx = 0; gx < cols; gx++) {
-          const px = x0 + (gx + 0.5) * res
-          let si = 0
-          let sd = Infinity
-          for (let i = 0; i < voroSeeds.length; i++) {
-            const dd = (px - voroSeeds[i].x) ** 2 + (py - voroSeeds[i].y) ** 2
-            if (dd < sd) {
-              sd = dd
-              si = i
-            }
-          }
-          owner[gy * cols + gx] = si
-        }
-      }
-      ctx.fillStyle = 'rgba(40, 90, 220, 0.65)'
-      for (let gy = 0; gy < rows; gy++) {
-        for (let gx = 0; gx < cols; gx++) {
-          const c = owner[gy * cols + gx]
-          if (gx + 1 < cols && owner[gy * cols + gx + 1] !== c) {
-            ctx.fillRect(x0 + (gx + 1) * res - 0.5, y0 + gy * res, 1, res)
-          }
-          if (gy + 1 < rows && owner[(gy + 1) * cols + gx] !== c) {
-            ctx.fillRect(x0 + gx * res, y0 + (gy + 1) * res - 0.5, res, 1)
-          }
-        }
-      }
-      ctx.strokeStyle = 'rgba(40, 90, 220, 0.5)'
-      ctx.lineWidth = 1
-      ctx.strokeRect(x0, y0, cols * res, rows * res)
-      // Seeds as genuine round dots (fillRect at fractional coordinates used
-      // to smear them into stubby lines).
-      ctx.fillStyle = 'rgba(40, 90, 220, 0.9)'
-      for (const s of voroSeeds) {
-        ctx.beginPath()
-        ctx.arc(s.x, s.y, 2.5, 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-
-    /** Static effector layer: every force drawn as a gradient between its
-     * body and its range limit, plus the limit outlines. */
-    const renderEffCache = () => {
-      effCacheDirty = false
-      if (!effCache) effCache = document.createElement('canvas')
-      effCache.width = debugCanvas.width
-      effCache.height = debugCanvas.height
-      const ctx = effCache.getContext('2d')
-      if (!ctx || !name) return
-      // Red outline: the type the name attractor points were sampled from.
-      ctx.strokeStyle = 'rgba(220, 40, 40, 0.8)'
+      if (!ctx || !name || name.size <= 0) return
+      ctx.strokeStyle = vizCss('density:glyphs', 0.8)
       ctx.lineWidth = 1
       ctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
       ctx.textBaseline = 'top'
       NAME_LINES.forEach((text, i) => {
         ctx.strokeText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
       })
-      // Teal: the name attract points, each a radial gradient to its range.
-      const range = Math.max(16, name.step * 2.2)
-      for (const p of name.points) {
-        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, range)
-        g.addColorStop(0, 'rgba(20, 150, 170, 0.28)')
-        g.addColorStop(1, 'rgba(20, 150, 170, 0)')
-        ctx.fillStyle = g
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, range, 0, Math.PI * 2)
-        ctx.fill()
-      }
-      // Purple: separator pull, a gradient band fading over its range with
-      // the segment and range limits outlined; orange: the settings panel.
-      for (const t of getTargets()) {
-        const r = toPageRect(t.el.getBoundingClientRect())
-        if (r.w === 0) continue
-        if (t.kind === 'separator') {
-          const cy = r.y + r.h / 2
-          const range = SEPARATOR_RANGE_PX
-          const g = ctx.createLinearGradient(0, cy - range, 0, cy + range)
-          g.addColorStop(0, 'rgba(140, 60, 200, 0)')
-          g.addColorStop(0.5, 'rgba(140, 60, 200, 0.25)')
-          g.addColorStop(1, 'rgba(140, 60, 200, 0)')
-          ctx.fillStyle = g
-          ctx.fillRect(r.x, cy - range, r.w, range * 2)
-          ctx.strokeStyle = 'rgba(140, 60, 200, 0.8)'
-          ctx.beginPath()
-          ctx.moveTo(r.x, cy)
-          ctx.lineTo(r.x + r.w, cy)
-          ctx.stroke()
-          ctx.strokeStyle = 'rgba(140, 60, 200, 0.3)'
-          ctx.strokeRect(r.x, cy - range, r.w, range * 2)
-        } else {
-          const pad = PANEL_RANGE_PX
-          const reach = pad + BOX_CORNER_PX
-          // The rect force fades from the panel edge to its range: a stack
-          // of expanding outlines with falling alpha reads as the gradient.
-          for (let k = 0; k < 8; k++) {
-            const o = (k / 7) * reach
-            ctx.strokeStyle = `rgba(230, 130, 30, ${0.55 * (1 - k / 7) + 0.1})`
-            ctx.beginPath()
-            ctx.roundRect(r.x - o, r.y - o, r.w + o * 2, r.h + o * 2, BOX_CORNER_PX + o)
-            ctx.stroke()
+      if (!glyphGrid || voroSeeds.length === 0) return
+      // Borders only where two different cells meet inside the letters:
+      // the partition splits the letter shapes themselves, no bounding box.
+      const { minX, minY, cols, rows, step, cellOf } = glyphGrid
+      ctx.fillStyle = vizCss('density:cells', 0.75)
+      for (let gy = 0; gy < rows; gy++) {
+        for (let gx = 0; gx < cols; gx++) {
+          const c = cellOf[gy * cols + gx]
+          if (c < 0) continue
+          const right = gx + 1 < cols ? cellOf[gy * cols + gx + 1] : -1
+          const below = gy + 1 < rows ? cellOf[(gy + 1) * cols + gx] : -1
+          if (right >= 0 && right !== c) {
+            ctx.fillRect(minX + (gx + 1) * step - 0.5, minY + gy * step, 1, step)
+          }
+          if (below >= 0 && below !== c) {
+            ctx.fillRect(minX + gx * step, minY + (gy + 1) * step - 0.5, step, 1)
           }
         }
       }
+      ctx.fillStyle = vizCss('density:cells', 0.95)
+      for (const s of voroSeeds) {
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, 2.2, 0, Math.PI * 2)
+        ctx.fill()
+      }
     }
 
-    /** Green: the trail force as a soft gradient band along the path, a
-     * fading curve through the nodes, and shrinking per-node circles. */
-    const drawTrailDebug = (dctx: CanvasRenderingContext2D) => {
-      const pts = trailViz
-      if (pts.length === 0) return
-      const range = TRAIL_POINT_RANGE_PX
-      dctx.lineCap = 'round'
-      dctx.lineJoin = 'round'
-      // Capsule-chain gradient: nested soft strokes approximate the linear
-      // falloff from the path out to its range limit.
-      for (const [w, a] of [
-        [2, 0.045],
-        [1.35, 0.06],
-        [0.7, 0.08],
-      ] as const) {
-        dctx.lineWidth = range * w
-        for (let i = 1; i < pts.length; i++) {
-          const s = (pts[i - 1].s + pts[i].s) / 2
-          if (s <= 0.01) continue
-          dctx.strokeStyle = `rgba(30, 160, 60, ${a * s})`
-          dctx.beginPath()
-          dctx.moveTo(pts[i - 1].x, pts[i - 1].y)
-          dctx.lineTo(pts[i].x, pts[i].y)
-          dctx.stroke()
-        }
+    /** Live physics description from every module that describes itself;
+     * new physics with a viz() renders with zero viewer changes. */
+    const collectViz = (): VizGroup[] => {
+      const groups: VizGroup[] = []
+      for (const m of [interaction, effectors, ...Object.values(mods)]) {
+        if (m.viz) groups.push(...m.viz())
       }
-      // Smooth curve through the nodes, fading with the local strength.
-      dctx.lineWidth = 1.5
-      for (let i = 1; i < pts.length; i++) {
-        const prev = pts[i - 1]
-        const p = pts[i]
-        const next = pts[i + 1]
-        dctx.strokeStyle = `rgba(30, 160, 60, ${0.15 + 0.65 * ((prev.s + p.s) / 2)})`
-        dctx.beginPath()
-        dctx.moveTo((prev.x + p.x) / 2, (prev.y + p.y) / 2)
-        if (next) {
-          dctx.quadraticCurveTo(p.x, p.y, (p.x + next.x) / 2, (p.y + next.y) / 2)
-        } else {
-          dctx.lineTo(p.x, p.y)
-        }
-        dctx.stroke()
-      }
-      // Node circles fade and shrink as their pull decays.
-      dctx.lineWidth = 1
-      for (const p of pts) {
-        if (p.s <= 0.02) continue
-        dctx.strokeStyle = `rgba(30, 160, 60, ${0.2 + 0.6 * p.s})`
-        dctx.beginPath()
-        dctx.arc(p.x, p.y, 3 + (range / 3 - 3) * p.s, 0, Math.PI * 2)
-        dctx.stroke()
-      }
+      return groups
+    }
+
+    /** Static module physics drawn by the generic viz renderer. */
+    const renderStaticViz = () => {
+      staticVizDirty = false
+      if (!staticVizCache) staticVizCache = document.createElement('canvas')
+      staticVizCache.width = debugCanvas.width
+      staticVizCache.height = debugCanvas.height
+      const ctx = staticVizCache.getContext('2d')
+      if (!ctx) return
+      drawViz(ctx, collectViz().filter((g) => !g.dynamic), zoom)
     }
 
     const drawDebug = () => {
@@ -630,13 +507,11 @@ export function PartyBackground() {
       if (!dctx) return
       dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
       if (!bridge.debugOn || !name) return
-      if (blobCacheDirty) renderBlobCache()
       if (voroCacheDirty) renderVoroCache()
-      if (effCacheDirty) renderEffCache()
-      if (blobCache) dctx.drawImage(blobCache, 0, 0)
+      if (staticVizDirty) renderStaticViz()
       if (voroCache) dctx.drawImage(voroCache, 0, 0)
-      if (effCache) dctx.drawImage(effCache, 0, 0)
-      drawTrailDebug(dctx)
+      if (staticVizCache) dctx.drawImage(staticVizCache, 0, 0)
+      drawViz(dctx, collectViz().filter((g) => g.dynamic), zoom)
     }
 
     const syncEffectors = () => {
@@ -686,7 +561,7 @@ export function PartyBackground() {
       }
       staticEffectors = list
       effectors.set(staticEffectors)
-      effCacheDirty = true
+      staticVizDirty = true
       drawDebug()
     }
 
@@ -722,8 +597,6 @@ export function PartyBackground() {
         })
         if (cursor) pts.push({ x: cursor.x, y: cursor.y, s: 1 })
       }
-      trailViz = pts
-
       const range = TRAIL_POINT_RANGE_PX / zoom
       const segs: TrailSegment[] = []
       for (let i = 1; i < pts.length; i++) {
@@ -748,9 +621,10 @@ export function PartyBackground() {
       return segs
     }
 
-    // Per-frame driver: transitions, cursor trail, teleport drain, telemetry.
+    // Per-frame driver: transitions, cursor trail, density, telemetry.
+    // Runs as the engine's onFrame hook, before each simulation step, so
+    // parameter lerps and particle writes land in the same frame.
     const tick = () => {
-      tickRaf = requestAnimationFrame(tick)
       if (!engine) return
       const now = performance.now()
       if (lastTickAt > 0) {
@@ -783,6 +657,19 @@ export function PartyBackground() {
         teleportCount = 0
         teleportWindowStart = now
       }
+      // Downward-only resolution ratchet: while the browser holds the frame
+      // rate in a demoted tier (Safari's 30Hz), shrink the backing store
+      // until frames fit the 60Hz budget again.
+      if (renderScale > RENDER_SCALE_FLOOR && RENDER_SCALE_START() < 1) {
+        if (lastScaleCheck === 0) lastScaleCheck = now
+        else if (now - lastScaleCheck > 3000) {
+          lastScaleCheck = now
+          if (engine.getFPS() < 45) {
+            renderScale = Math.max(RENDER_SCALE_FLOOR, renderScale * 0.8)
+            layout()
+          }
+        }
+      }
       enforceDensity()
     }
 
@@ -795,74 +682,156 @@ export function PartyBackground() {
       const w = holder.clientWidth
       const h = holder.clientHeight
       if (w < 1 || h < 1) return
-      const scale = Math.min(1, MAX_CANVAS_HEIGHT / h)
+      const scale = Math.min(1, MAX_CANVAS_HEIGHT / h) * renderScale
       for (const c of [canvas, debugCanvas]) {
         c.style.width = `${w}px`
         c.style.height = `${h}px`
       }
       debugCanvas.width = w
       debugCanvas.height = Math.min(h, 16_000)
-      blobCacheDirty = true
+      staticVizDirty = true
       engine.setSize(Math.round(w * scale), Math.round(h * scale))
       engine.setZoom(DESIRED_ZOOM() * scale)
       zoom = engine.getZoom() / scale // effective page-px zoom
       engine.setCamera(w / (2 * zoom), h / (2 * zoom))
     }
 
-    // Voronoi cells over the name glyphs (seeded with best-candidate points
-    // so the pattern is even rather than pixel-grid aligned). Each grid cell
-    // of the glyph mask stores its nearest seed for O(1) classification.
+    // Equal-area Voronoi partition of the letter shapes themselves: the
+    // glyphs are rasterized to a fine grid and split with a capacity-
+    // balanced power diagram (Lloyd moves plus per-cell weights), so every
+    // cell covers the same share of the actual letter area — no bounding
+    // box. Computed once here; measureName re-runs it whenever the name
+    // font settings or layout change.
     const rebuildVoronoi = () => {
       voroSeeds = []
-      voroCellPoints = []
+      voroCellPx = []
       glyphGrid = null
-      if (!name || name.points.length === 0) return
-      const pts = name.points
-      const target = Math.max(4, Math.min(Math.round(globals.nameDensityRes), pts.length))
-      voroSeeds.push({ ...pts[Math.floor(Math.random() * pts.length)] })
-      while (voroSeeds.length < target) {
-        let best = pts[0]
-        let bestD = -1
-        for (let c = 0; c < 10; c++) {
-          const cand = pts[Math.floor(Math.random() * pts.length)]
-          let d = Infinity
-          for (const s of voroSeeds) {
-            d = Math.min(d, (cand.x - s.x) ** 2 + (cand.y - s.y) ** 2)
-          }
-          if (d > bestD) {
-            bestD = d
-            best = cand
-          }
-        }
-        voroSeeds.push({ ...best })
-      }
-      const step = name.step
-      const minX = Math.min(...pts.map((p) => p.x)) - step
-      const minY = Math.min(...pts.map((p) => p.y)) - step
-      const cols = Math.ceil((Math.max(...pts.map((p) => p.x)) - minX) / step) + 2
-      const rows = Math.ceil((Math.max(...pts.map((p) => p.y)) - minY) / step) + 2
-      const cellOf = new Int16Array(cols * rows).fill(-1)
-      voroCellPoints = voroSeeds.map(() => [])
-      pts.forEach((p, pi) => {
-        let si = 0
-        let sd = Infinity
-        for (let i = 0; i < voroSeeds.length; i++) {
-          const d = (p.x - voroSeeds[i].x) ** 2 + (p.y - voroSeeds[i].y) ** 2
-          if (d < sd) {
-            sd = d
-            si = i
-          }
-        }
-        const gx = Math.floor((p.x - minX) / step)
-        const gy = Math.floor((p.y - minY) / step)
-        cellOf[gy * cols + gx] = si
-        voroCellPoints[si].push(pi)
+      censusCells = null
+      lastCensus = null
+      pendingDelta1 = []
+      voroCacheDirty = true
+      if (!name || name.points.length === 0 || name.size <= 0) return
+
+      const step = FIELD_CELL_PX
+      const minX = NAME_MARGIN_PX - step
+      const minY = name.topY - step
+      const cols = Math.ceil((name.width + step * 4) / step)
+      const rows = Math.ceil((name.bottom - name.topY + step * 4) / step)
+      if (cols < 4 || rows < 4 || cols * rows > 1_000_000) return
+      const raster = document.createElement('canvas')
+      raster.width = cols
+      raster.height = rows
+      const ctx = raster.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return
+      ctx.setTransform(1 / step, 0, 0, 1 / step, -minX / step, -minY / step)
+      ctx.fillStyle = '#fff'
+      ctx.textBaseline = 'top'
+      ctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
+      NAME_LINES.forEach((text, i) => {
+        ctx.fillText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
       })
+      const alpha = ctx.getImageData(0, 0, cols, rows).data
+      const px: number[] = [] // fine-grid indices of glyph pixels
+      const pxX: number[] = [] // page-space centers
+      const pxY: number[] = []
+      for (let gy = 0; gy < rows; gy++) {
+        for (let gx = 0; gx < cols; gx++) {
+          if (alpha[(gy * cols + gx) * 4 + 3] > 64) {
+            px.push(gy * cols + gx)
+            pxX.push(minX + (gx + 0.5) * step)
+            pxY.push(minY + (gy + 0.5) * step)
+          }
+        }
+      }
+      const n = px.length
+      const target = Math.max(4, Math.min(Math.round(globals.nameDensityRes), Math.floor(n / 4)))
+      if (n < 16) return
+
+      // Best-candidate initial seeds spread over the glyph pixels.
+      const sx: number[] = []
+      const sy: number[] = []
+      const first = Math.floor(Math.random() * n)
+      sx.push(pxX[first])
+      sy.push(pxY[first])
+      while (sx.length < target) {
+        let bi = 0
+        let bd = -1
+        for (let c = 0; c < 12; c++) {
+          const cand = Math.floor(Math.random() * n)
+          let d = Infinity
+          for (let s = 0; s < sx.length; s++) {
+            d = Math.min(d, (pxX[cand] - sx[s]) ** 2 + (pxY[cand] - sy[s]) ** 2)
+          }
+          if (d > bd) {
+            bd = d
+            bi = cand
+          }
+        }
+        sx.push(pxX[bi])
+        sy.push(pxY[bi])
+      }
+
+      // Two phases: plain Lloyd first for compact, well-placed cells, then
+      // capacity balancing on frozen seed positions — a power diagram whose
+      // per-cell weights grow or shrink until every cell owns an equal
+      // share of the glyph pixels (moving centroids while balancing makes
+      // the weights chase a moving target and never converge).
+      const w = new Float64Array(target)
+      const own = new Int16Array(n)
+      const avg = n / target
+      const r2 = (avg * step * step) / Math.PI // typical cell radius²
+      const assign = () => {
+        const count = new Float64Array(target)
+        const cx = new Float64Array(target)
+        const cy = new Float64Array(target)
+        for (let p = 0; p < n; p++) {
+          let bi = 0
+          let bs = Infinity
+          for (let s = 0; s < target; s++) {
+            const d = (pxX[p] - sx[s]) ** 2 + (pxY[p] - sy[s]) ** 2 - w[s]
+            if (d < bs) {
+              bs = d
+              bi = s
+            }
+          }
+          own[p] = bi
+          count[bi]++
+          cx[bi] += pxX[p]
+          cy[bi] += pxY[p]
+        }
+        return { count, cx, cy }
+      }
+      for (let iter = 0; iter < 20; iter++) {
+        const { count, cx, cy } = assign()
+        for (let s = 0; s < target; s++) {
+          if (count[s] > 0) {
+            sx[s] = cx[s] / count[s]
+            sy[s] = cy[s] / count[s]
+          }
+        }
+      }
+      for (let iter = 0; iter < 100; iter++) {
+        const { count } = assign()
+        let worst = 0
+        for (let s = 0; s < target; s++) {
+          const off = (avg - count[s]) / avg
+          worst = Math.max(worst, Math.abs(off))
+          w[s] += off * r2
+        }
+        if (worst < 0.03) break
+      }
+      assign()
+
+      const cellOf = new Int16Array(cols * rows).fill(-1)
+      voroCellPx = Array.from({ length: target }, () => [])
+      for (let p = 0; p < n; p++) {
+        cellOf[px[p]] = own[p]
+        voroCellPx[own[p]].push(px[p])
+      }
+      voroSeeds = Array.from({ length: target }, (_, s) => ({ x: sx[s], y: sy[s] }))
       glyphGrid = { minX, minY, cols, rows, step, cellOf }
       censusCells = Int32Array.from(cellOf)
       censusVersion++
-      lastCensus = null
-      voroCacheDirty = true
     }
 
     // Keeps every Voronoi cell of the name at its minimum particle count by
@@ -933,7 +902,10 @@ export function PartyBackground() {
         densityStats.stale++
         return
       }
-      if (res.counts.length !== voroSeeds.length) {
+      // A result dispatched against a previous partition (font change or
+      // resize rebuilt the cells while it was in flight) must be discarded:
+      // its counts are keyed to the old cell geometry.
+      if (res.version !== censusVersion || res.counts.length !== voroSeeds.length) {
         densityStats.mismatch++
         return
       }
@@ -960,8 +932,8 @@ export function PartyBackground() {
       // neighboring cells doesn't ping-pong the same particles every round.
       const donorFloor = perCell + Math.max(2, Math.round(perCell * 0.25))
       for (let ci = 0; ci < counts.length; ci++) {
-        const cellPts = voroCellPoints[ci]
-        if (cellPts.length === 0) continue
+        const cellPx = voroCellPx[ci]
+        if (!cellPx || cellPx.length === 0) continue
         let need = perCell - counts[ci]
         while (need > 0) {
           // Densest donor cell that stays comfortably above the minimum
@@ -990,15 +962,14 @@ export function PartyBackground() {
           } else {
             break
           }
-          const pt = name.points[cellPts[Math.floor(Math.random() * cellPts.length)]]
-          // Small enough that the landing spot stays in the marked grid
-          // cell, so the next census doesn't count it as outside.
-          const jitter = name.step * 0.5
+          // Land on a random glyph pixel of the deficient cell; jitter
+          // stays within that pixel so the next census counts it here.
+          const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
+          const g = glyphGrid
+          const tx = g.minX + ((gi % g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
+          const ty = g.minY + (Math.floor(gi / g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
           engine.setParticle(donor, {
-            position: pageToWorld(
-              pt.x + (Math.random() - 0.5) * jitter,
-              pt.y + (Math.random() - 0.5) * jitter,
-            ),
+            position: pageToWorld(tx, ty),
             velocity: { x: 0, y: 0 },
             size: 3,
             mass: 1,
@@ -1021,7 +992,7 @@ export function PartyBackground() {
     const measureContent = () => {
       charBalls = collectCharBalls()
       buildTextField()
-      blobCacheDirty = true
+      staticVizDirty = true
     }
 
     // Like the reference page's spawn-around-the-circle: particles are born
@@ -1152,20 +1123,20 @@ export function PartyBackground() {
       else if (key === 'dragRadius') interaction.setRadius(value)
       else if (key === 'nameFont' || key === 'nameWeight') {
         measureName()
-        blobCacheDirty = true
+        staticVizDirty = true
         scheduleSync()
       } else if (key === 'modeDuration') scheduleNextDemo()
       else if (key === 'textPadding' || key === 'boxAttraction') {
         pushField()
-        blobCacheDirty = true
+        staticVizDirty = true
         scheduleSync()
       } else if (key === 'textSmoothing') {
         buildTextField()
-        blobCacheDirty = true
+        staticVizDirty = true
         scheduleSync()
       } else if (key === 'exclusionFalloff') {
         pushField()
-        blobCacheDirty = true
+        staticVizDirty = true
         scheduleSync()
       } else if (key === 'particleCount') {
         particleCountTouched = true
@@ -1258,7 +1229,6 @@ export function PartyBackground() {
       })
       effectors = new Effectors()
       trail = []
-      trailViz = []
       dynamicDirty = false
       lastCensus = null
       const eng = new Engine({
@@ -1279,6 +1249,7 @@ export function PartyBackground() {
         cellSize: 16,
         maxNeighbors: 100,
         constrainIterations: 1,
+        onFrame: tick,
       })
       await eng.initialize()
       // A hidden or pre-layout page reports zero dimensions (e.g. opened in
@@ -1309,6 +1280,7 @@ export function PartyBackground() {
             globals: { ...globals },
             teleportRate,
             densityStatus,
+            cellAreas: voroCellPx.map((a) => a.length),
             densityStats: { ...densityStats, lastCounts: [...densityStats.lastCounts] },
             lastTickAt,
             census: lastCensus
@@ -1328,8 +1300,6 @@ export function PartyBackground() {
       syncEffectors()
       applyDemo(demoIndex, true)
       engine.play()
-      cancelAnimationFrame(tickRaf)
-      tickRaf = requestAnimationFrame(tick)
       window.dispatchEvent(new CustomEvent('party:runtime', { detail: bridge.actualRuntime }))
       if (pref === 'auto' && bridge.actualRuntime === 'cpu' && !fallbackNotified) {
         fallbackNotified = true
@@ -1348,7 +1318,6 @@ export function PartyBackground() {
       }
       booting = true
       try {
-        cancelAnimationFrame(tickRaf)
         cancelAnimationFrame(maxParticlesRaf)
         window.clearTimeout(demoTimer)
         if (engine) {
@@ -1412,6 +1381,8 @@ export function PartyBackground() {
     const stopDrag = () => {
       dragging = false
       interaction.setActive(false)
+      // One more dynamic-viz redraw so the interaction ring clears.
+      dynamicDirty = true
     }
     const onLeaveWindow = () => {
       // The trail keeps aging and fading in tick(); only the head detaches.
@@ -1487,7 +1458,6 @@ export function PartyBackground() {
       for (const fn of cleanups) fn()
       window.clearTimeout(demoTimer)
       cancelAnimationFrame(maxParticlesRaf)
-      cancelAnimationFrame(tickRaf)
       if (engine) {
         void engine.destroy()
         engine = null
