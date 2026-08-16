@@ -16,7 +16,7 @@ import {
   type ModeSettingKey,
   type ModeSettings,
 } from './bridge'
-import { Effectors, type Effector, type TrailSegment } from './effectors'
+import { Effectors, type Effector, type TrailNode } from './effectors'
 import {
   createPartyModules,
   applyDiscretePreset,
@@ -65,6 +65,8 @@ const TRAIL_BASE_TTL_MS = 900
 const TRAIL_POINT_RANGE_PX = 80
 const TRAIL_MIN_SPACING_PX = 10
 const TRAIL_MAX_POINTS = 32
+/** Fixed dynamic-array size: (points+head-1) spans x 3 samples + tail. */
+const TRAIL_NODES_PAD = (TRAIL_MAX_POINTS + 1) * 3 + 2
 
 const GLOBAL_DEFAULTS: GlobalSettings = {
   particleCount: 0, // resolved to the device budget once the runtime is known
@@ -266,7 +268,12 @@ export function PartyBackground() {
     /** Signed distances (page px) of the name glyphs, for the pull field. */
     let nameField: { minX: number; minY: number; cell: number; cols: number; rows: number; d: Float32Array } | null = null
     let nameMask: HTMLCanvasElement | null = null
-    let nameAlphaSmall: HTMLCanvasElement | null = null
+    /** Native-resolution cell ownership of every name pixel (from the
+     * analytic power diagram) with per-cell pixel lists, so the opacity
+     * cells share the same smooth division lines as the debug view. */
+    let nameOwner: { cellPx: Uint32Array[] } | null = null
+    let nameAlphaImg: ImageData | null = null
+    let lastOpacityRender = 0
     /** The balanced power diagram (seed positions + weights, page space):
      * the analytic geometry behind the grid partition, used to render cell
      * borders at native resolution. */
@@ -636,13 +643,15 @@ export function PartyBackground() {
       requestAnimationFrame(syncEffectors)
     }
 
-    /** The cursor pull as a continuous capsule chain along the trail path:
-     * strength interpolates between nodes, so the force field is smooth
-     * along the whole path rather than a row of discrete circles. Ages the
-     * trail every frame, so it keeps fading after the cursor leaves the
-     * window. Padded to a fixed length so the module's array offsets stay
-     * stable and the per-frame upload covers only this small array. */
-    const trailSegments = (now: number): TrailSegment[] => {
+    /** The cursor pull as one smooth tapered blob: a Catmull-Rom curve
+     * through the trail points, sampled densely, each sample a cone whose
+     * radius and strength shrink down the tail. The field takes the MAX
+     * cone at every point, so overlapping samples never seam, and a
+     * stationary cursor is simply the single head cone — no transition in
+     * physics or debug when motion stops. Ages the trail every frame, so
+     * it keeps fading after the cursor leaves the window. Padded to a
+     * fixed length so the module's array offsets stay stable. */
+    const trailNodes = (now: number): TrailNode[] => {
       let pathLen = 0
       for (let i = 1; i < trail.length; i++) {
         pathLen += Math.hypot(trail[i].x - trail[i - 1].x, trail[i].y - trail[i - 1].y)
@@ -662,28 +671,43 @@ export function PartyBackground() {
         })
         if (cursor) pts.push({ x: cursor.x, y: cursor.y, s: 1 })
       }
-      const range = TRAIL_POINT_RANGE_PX / zoom
-      const segs: TrailSegment[] = []
-      for (let i = 1; i < pts.length; i++) {
-        segs.push({
-          x1: pts[i - 1].x / zoom,
-          y1: pts[i - 1].y / zoom,
-          x2: pts[i].x / zoom,
-          y2: pts[i].y / zoom,
-          range,
-          s1: globals.cursorStrength * pts[i - 1].s,
-          s2: globals.cursorStrength * pts[i].s,
+      const nodes: TrailNode[] = []
+      const push = (x: number, y: number, s: number) => {
+        // Radius and strength both taper toward the tail.
+        nodes.push({
+          x: x / zoom,
+          y: y / zoom,
+          r: (TRAIL_POINT_RANGE_PX * (0.3 + 0.7 * s)) / zoom,
+          s: globals.cursorStrength * s,
         })
       }
       if (pts.length === 1) {
-        const p = pts[0]
-        const s = globals.cursorStrength * p.s
-        segs.push({ x1: p.x / zoom, y1: p.y / zoom, x2: p.x / zoom, y2: p.y / zoom, range, s1: s, s2: s })
+        push(pts[0].x, pts[0].y, pts[0].s)
+      } else if (pts.length > 1) {
+        // Catmull-Rom through the points, three samples per span, so the
+        // cone chain follows a smooth curve rather than the raw polyline.
+        const at = (i: number) => pts[Math.min(pts.length - 1, Math.max(0, i))]
+        for (let i = 0; i < pts.length - 1; i++) {
+          const p0 = at(i - 1)
+          const p1 = at(i)
+          const p2 = at(i + 1)
+          const p3 = at(i + 2)
+          for (let j = 0; j < 3; j++) {
+            const u = j / 3
+            const u2 = u * u
+            const u3 = u2 * u
+            const cr = (a: number, b: number, c: number, d: number) =>
+              0.5 * (2 * b + (c - a) * u + (2 * a - 5 * b + 4 * c - d) * u2 + (3 * b - a - 3 * c + d) * u3)
+            push(cr(p0.x, p1.x, p2.x, p3.x), cr(p0.y, p1.y, p2.y, p3.y), p1.s + (p2.s - p1.s) * u)
+          }
+        }
+        const last = pts[pts.length - 1]
+        push(last.x, last.y, last.s)
       }
-      while (segs.length < TRAIL_MAX_POINTS + 1) {
-        segs.push({ x1: 0, y1: 0, x2: 0, y2: 0, range: 0, s1: 0, s2: 0 })
+      while (nodes.length < TRAIL_NODES_PAD) {
+        nodes.push({ x: 0, y: 0, r: 0, s: 0 })
       }
-      return segs
+      return nodes
     }
 
     // Per-frame driver: transitions, cursor trail, density, telemetry.
@@ -713,7 +737,7 @@ export function PartyBackground() {
       // Only the small dynamic array is written per frame; the static list
       // stays untouched. Skip entirely when the trail is idle.
       if (trail.length > 0 || dynamicDirty) {
-        effectors.setDynamic(trailSegments(now))
+        effectors.setDynamic(trailNodes(now))
         dynamicDirty = trail.length > 0
         if (bridge.debugOn) drawDebug()
       }
@@ -757,7 +781,12 @@ export function PartyBackground() {
           maxDelta = Math.max(maxDelta, Math.abs(next - cellWeightsShown[i]))
           cellWeightsShown[i] = next
         }
-        if (maxDelta > 0.0015) renderNameOpacity()
+        // Repaints are capped at ~30Hz; the damping makes the eased motion
+        // between repaints imperceptible.
+        if (maxDelta > 0.0015 && now - lastOpacityRender > 30) {
+          lastOpacityRender = now
+          renderNameOpacity()
+        }
       }
     }
 
@@ -955,6 +984,7 @@ export function PartyBackground() {
       cellWeights = new Float32Array(target)
       cellWeightsShown = new Float32Array(target)
       renderNameMask()
+      buildNameOwner()
       renderNameOpacity()
     }
 
@@ -1005,26 +1035,90 @@ export function PartyBackground() {
       })
     }
 
-    // The name rendered as real text whose opacity varies per Voronoi cell:
-    // a tiny per-cell alpha field is scaled up smoothly and clipped by the
-    // crisp vector text mask. Cost per update: one small ImageData pass and
-    // two drawImage calls.
+    /** Assigns every native pixel of the text mask to its power-nearest
+     * Voronoi cell (dilated a little past the antialiased glyph edges) and
+     * builds per-cell pixel lists. One-time per rebuild; per-frame opacity
+     * updates then only write alpha bytes. */
+    const buildNameOwner = () => {
+      nameOwner = null
+      nameAlphaImg = null
+      if (!nameMask || !voroPower || !glyphGrid) return
+      const W = nameMask.width
+      const H = nameMask.height
+      const s = W / (glyphGrid.cols * glyphGrid.step) // native px per page px
+      const mctx = nameMask.getContext('2d', { willReadFrequently: true })
+      if (!mctx || s <= 0) return
+      const alpha = mctx.getImageData(0, 0, W, H).data
+      const { sx, sy, w: pw } = voroPower
+      const n = sx.length
+      let owner = new Int16Array(W * H).fill(-1)
+      const minX = glyphGrid.minX
+      const minY = glyphGrid.minY
+      for (let iy = 0; iy < H; iy++) {
+        const py = minY + (iy + 0.5) / s
+        for (let ix = 0; ix < W; ix++) {
+          const i = iy * W + ix
+          if (alpha[i * 4 + 3] <= 8) continue
+          const px = minX + (ix + 0.5) / s
+          let bi = 0
+          let bs = Infinity
+          for (let k = 0; k < n; k++) {
+            const d = (px - sx[k]) ** 2 + (py - sy[k]) ** 2 - pw[k]
+            if (d < bs) {
+              bs = d
+              bi = k
+            }
+          }
+          owner[i] = bi
+        }
+      }
+      // Two dilation passes so the mask's antialiased fringe still finds
+      // an owning cell.
+      for (let pass = 0; pass < 2; pass++) {
+        const next = owner.slice()
+        for (let iy = 0; iy < H; iy++) {
+          for (let ix = 0; ix < W; ix++) {
+            const i = iy * W + ix
+            if (owner[i] >= 0) continue
+            const l = ix > 0 ? owner[i - 1] : -1
+            const r = ix + 1 < W ? owner[i + 1] : -1
+            const u = iy > 0 ? owner[i - W] : -1
+            const dn = iy + 1 < H ? owner[i + W] : -1
+            const v = Math.max(l, r, u, dn)
+            if (v >= 0) next[i] = v
+          }
+        }
+        owner = next
+      }
+      const counts = new Uint32Array(n)
+      for (let i = 0; i < owner.length; i++) if (owner[i] >= 0) counts[owner[i]]++
+      const cellPx = Array.from({ length: n }, (_, c) => new Uint32Array(counts[c]))
+      const cursors = new Uint32Array(n)
+      for (let i = 0; i < owner.length; i++) {
+        const c = owner[i]
+        if (c >= 0) cellPx[c][cursors[c]++] = i
+      }
+      nameOwner = { cellPx }
+      nameAlphaImg = new ImageData(W, H)
+    }
+
+    // The name rendered as real text whose opacity varies per Voronoi cell,
+    // divided by the analytic power-diagram lines at native resolution.
+    // Per update: alpha-byte writes over the per-cell pixel lists, one
+    // putImageData, and one masking drawImage.
     const renderNameOpacity = () => {
       const out = nameTextCanvas
       if (!out) return
       const octx = out.getContext('2d')
       if (!octx) return
-      if (!glyphGrid || !nameMask) {
+      if (!glyphGrid || !nameMask || !nameOwner || !nameAlphaImg) {
         octx.clearRect(0, 0, out.width, out.height)
         return
       }
-      const { minX, minY, cols, rows, step, cellOf } = glyphGrid
-      const dpr = window.devicePixelRatio || 1
-      const outW = Math.round(cols * step * dpr)
-      const outH = Math.round(rows * step * dpr)
-      if (out.width !== outW || out.height !== outH) {
-        out.width = outW
-        out.height = outH
+      const { minX, minY, cols, rows, step } = glyphGrid
+      if (out.width !== nameMask.width || out.height !== nameMask.height) {
+        out.width = nameMask.width
+        out.height = nameMask.height
         out.style.width = `${cols * step}px`
         out.style.height = `${rows * step}px`
         out.style.left = `${minX}px`
@@ -1032,45 +1126,17 @@ export function PartyBackground() {
       }
       const base = globals.nameBaseOpacity
       const top = globals.nameDensityOpacity
-      const alphaOf = (c: number) => base + (top - base) * (cellWeightsShown[c] ?? 0)
-      // Per-cell alpha grid, dilated so the smoothing at letter edges
-      // samples the owning cell instead of transparent margin.
-      let a = new Float32Array(cols * rows).fill(-1)
-      for (let i = 0; i < cellOf.length; i++) {
-        if (cellOf[i] >= 0) a[i] = alphaOf(cellOf[i])
+      const data = nameAlphaImg.data
+      for (let c = 0; c < nameOwner.cellPx.length; c++) {
+        const a = Math.round(
+          Math.min(1, Math.max(0, base + (top - base) * (cellWeightsShown[c] ?? 0))) * 255,
+        )
+        const px = nameOwner.cellPx[c]
+        for (let j = 0; j < px.length; j++) data[px[j] * 4 + 3] = a
       }
-      for (let pass = 0; pass < 2; pass++) {
-        const next = a.slice()
-        for (let gy = 0; gy < rows; gy++) {
-          for (let gx = 0; gx < cols; gx++) {
-            const i = gy * cols + gx
-            if (a[i] >= 0) continue
-            const l = gx > 0 ? a[i - 1] : -1
-            const r = gx + 1 < cols ? a[i + 1] : -1
-            const u = gy > 0 ? a[i - cols] : -1
-            const dn = gy + 1 < rows ? a[i + cols] : -1
-            const v = Math.max(l, r, u, dn)
-            if (v >= 0) next[i] = v
-          }
-        }
-        a = next
-      }
-      if (!nameAlphaSmall) nameAlphaSmall = document.createElement('canvas')
-      nameAlphaSmall.width = cols
-      nameAlphaSmall.height = rows
-      const sctx = nameAlphaSmall.getContext('2d')
-      if (!sctx) return
-      const img = new ImageData(cols, rows)
-      for (let i = 0; i < a.length; i++) {
-        if (a[i] > 0) img.data[i * 4 + 3] = Math.round(Math.min(1, a[i]) * 255)
-      }
-      sctx.putImageData(img, 0, 0)
-      octx.setTransform(1, 0, 0, 1, 0, 0)
-      octx.clearRect(0, 0, out.width, out.height)
-      octx.imageSmoothingEnabled = true
-      octx.drawImage(nameAlphaSmall, 0, 0, out.width, out.height)
+      octx.putImageData(nameAlphaImg, 0, 0)
       octx.globalCompositeOperation = 'destination-in'
-      octx.drawImage(nameMask, 0, 0, out.width, out.height)
+      octx.drawImage(nameMask, 0, 0)
       octx.globalCompositeOperation = 'source-over'
     }
 

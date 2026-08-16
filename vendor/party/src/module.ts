@@ -83,6 +83,10 @@ export interface VizGroup {
   key: string;
   /** True when the group changes every frame (viewers skip static caches). */
   dynamic?: boolean;
+  /** How this group's primitives combine in the physics: default forces
+   * sum; 'max' means the strongest primitive wins at each point (viewers
+   * must composite accordingly, e.g. lighten instead of source-over). */
+  blend?: "max";
   primitives: VizPrimitive[];
 }
 

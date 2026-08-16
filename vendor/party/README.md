@@ -37,7 +37,9 @@ Every divergence from upstream is listed here.
   `VizGroup`, optional `Module.viz()`): modules describe their own live
   spatial influence so a generic viewer can render body geometry, range
   limits, and falloff gradients for any physics without viewer changes.
-  `Interaction` implements it in-fork.
+  Groups can declare `blend: 'max'` when their primitives combine by
+  strongest-wins rather than summing (viewers composite with lighten).
+  `Interaction` implements the contract in-fork.
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
 - Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`

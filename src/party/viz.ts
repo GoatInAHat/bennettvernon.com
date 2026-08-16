@@ -51,6 +51,7 @@ function drawRing(
   p: Extract<VizPrimitive, { kind: 'ring' }>,
   norm: number,
   zoom: number,
+  gradientOnly = false,
 ) {
   const x = p.x * zoom
   const y = p.y * zoom
@@ -64,6 +65,9 @@ function drawRing(
   ctx.beginPath()
   ctx.arc(x, y, r1, 0, Math.PI * 2)
   ctx.fill()
+  // In max-composited groups the primitives are dense curve samples; their
+  // union gradient IS the geometry, so per-sample outlines are just noise.
+  if (gradientOnly) return
   // Body geometry (a dot for point sources) and the range limit.
   ctx.fillStyle = vizCss(key, Math.min(1, 0.5 + 0.5 * norm))
   ctx.strokeStyle = ctx.fillStyle
@@ -103,20 +107,35 @@ function drawCapsule(
     return
   }
   const mid = (i1 + i2) / 2
-  ctx.lineCap = 'round'
-  // Falloff gradient: nested soft strokes from the range down to the body.
-  for (const [w, a] of [
-    [2, 0.05],
-    [1.3, 0.07],
-    [0.65, 0.1],
-  ] as const) {
-    ctx.strokeStyle = vizCss(key, a * mid)
-    ctx.lineWidth = Math.max(1, r * w)
+  const ang0 = Math.atan2(y2 - y1, x2 - x1)
+  // Exact capsule falloff: the distance field of a segment is a
+  // perpendicular linear ramp along the middle slab plus radial ramps
+  // around the end caps — rendered with real gradients, matching the
+  // shader's strength * (1 - dist / range).
+  ctx.save()
+  ctx.translate(x1, y1)
+  ctx.rotate(ang0)
+  const slab = ctx.createLinearGradient(0, -r, 0, r)
+  slab.addColorStop(0, vizCss(key, 0))
+  slab.addColorStop(0.5, vizCss(key, 0.3 * mid))
+  slab.addColorStop(1, vizCss(key, 0))
+  ctx.fillStyle = slab
+  ctx.fillRect(0, -r, len, r * 2)
+  const cap = (cxo: number, intensity: number, side: -1 | 1) => {
+    ctx.save()
     ctx.beginPath()
-    ctx.moveTo(x1, y1)
-    ctx.lineTo(x2, y2)
-    ctx.stroke()
+    ctx.rect(side < 0 ? cxo - r : cxo, -r, r, r * 2)
+    ctx.clip()
+    const g = ctx.createRadialGradient(cxo, 0, 0, cxo, 0, r)
+    g.addColorStop(0, vizCss(key, 0.3 * intensity))
+    g.addColorStop(1, vizCss(key, 0))
+    ctx.fillStyle = g
+    ctx.fillRect(cxo - r, -r, r * 2, r * 2)
+    ctx.restore()
   }
+  cap(0, i1, -1)
+  cap(len, i2, 1)
+  ctx.restore()
   // Range limit: the capsule outline. (The body segment itself is not
   // stroked — across the round caps it reads as a diameter line.) The cap
   // arcs run from the +normal side around the tip to the −normal side, so
@@ -289,15 +308,47 @@ function drawField(
   strokeIso(ctx, key, p, p.outer, 0.4, 1, zoom)
 }
 
+let maxScratch: HTMLCanvasElement | null = null
+
+function drawGroup(ctx: CanvasRenderingContext2D, g: VizGroup, zoom: number, gradientOnly: boolean) {
+  const scale = groupScale(g)
+  for (const p of g.primitives) {
+    if (p.kind === 'ring') drawRing(ctx, g.key, p, Math.abs(p.intensity) / scale, zoom, gradientOnly)
+    else if (p.kind === 'capsule') drawCapsule(ctx, g.key, p, 1 / scale, zoom)
+    else if (p.kind === 'rectRing') drawRectRing(ctx, g.key, p, Math.abs(p.intensity) / scale, zoom)
+    else drawField(ctx, g.key, p, zoom)
+  }
+}
+
 /** Renders viz groups onto a page-space canvas (world units × zoom). */
 export function drawViz(ctx: CanvasRenderingContext2D, groups: VizGroup[], zoom: number): void {
   for (const g of groups) {
-    const scale = groupScale(g)
-    for (const p of g.primitives) {
-      if (p.kind === 'ring') drawRing(ctx, g.key, p, Math.abs(p.intensity) / scale, zoom)
-      else if (p.kind === 'capsule') drawCapsule(ctx, g.key, p, 1 / scale, zoom)
-      else if (p.kind === 'rectRing') drawRectRing(ctx, g.key, p, Math.abs(p.intensity) / scale, zoom)
-      else drawField(ctx, g.key, p, zoom)
+    if (g.blend === 'max') {
+      // Physics says the strongest primitive wins at each point, so the
+      // view composites with lighten (per-channel max) on a scratch layer
+      // — dense overlapping samples read as one smooth blob, exactly like
+      // the force field.
+      const w = ctx.canvas.width
+      const h = ctx.canvas.height
+      if (!maxScratch) maxScratch = document.createElement('canvas')
+      if (maxScratch.width !== w || maxScratch.height !== h) {
+        maxScratch.width = w
+        maxScratch.height = h
+      }
+      const sctx = maxScratch.getContext('2d')
+      if (!sctx) continue
+      sctx.setTransform(1, 0, 0, 1, 0, 0)
+      sctx.clearRect(0, 0, w, h)
+      sctx.setTransform(ctx.getTransform())
+      sctx.globalCompositeOperation = 'lighten'
+      drawGroup(sctx, g, zoom, true)
+      sctx.globalCompositeOperation = 'source-over'
+      const t = ctx.getTransform()
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.drawImage(maxScratch, 0, 0)
+      ctx.setTransform(t)
+    } else {
+      drawGroup(ctx, g, zoom, false)
     }
   }
 }

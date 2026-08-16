@@ -49,22 +49,22 @@ export interface DistanceField {
 }
 
 /**
- * One link of the cursor-trail chain: a capsule segment whose strength
- * interpolates between its endpoints, so the pull is continuous along the
- * whole path instead of a row of discrete circles. Attract-only.
+ * One sample of the cursor-trail curve: a cone of pull with its own radius
+ * and peak strength. The trail field is the MAX of the sample cones (not
+ * the sum), so the densely sampled curve forms one smooth tapered blob
+ * with no seams where samples overlap, and a stationary cursor is simply
+ * the single-cone degenerate case. Attract-only.
  */
-export interface TrailSegment {
-  x1: number
-  y1: number
-  x2: number
-  y2: number
-  range: number
-  s1: number
-  s2: number
+export interface TrailNode {
+  x: number
+  y: number
+  r: number
+  s: number
 }
 
 const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 }
 const STRIDE = 8
+const NODE_STRIDE = 4
 const FIELD_HEADER = 8
 
 type EffectorsInputs = {
@@ -116,11 +116,11 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     this.write({ data: packEffectors(effectors) })
   }
 
-  /** Cursor-trail capsule chain: tiny, rewritten every frame. */
-  setDynamic(segments: TrailSegment[]): void {
+  /** Cursor-trail curve samples: tiny, rewritten every frame. */
+  setDynamic(nodes: TrailNode[]): void {
     const data: number[] = []
-    for (const s of segments) {
-      data.push(s.x1, s.y1, s.x2, s.y2, s.range, s.s1, s.s2, 0)
+    for (const n of nodes) {
+      data.push(n.x, n.y, n.r, n.s)
     }
     this.write({ dynamic: data })
   }
@@ -194,11 +194,13 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     }
 
     const dyn = state.dynamic ?? []
-    for (let base = 0; base + STRIDE <= dyn.length; base += STRIDE) {
-      const [x1, y1, x2, y2, range, s1, s2] = dyn.slice(base, base + STRIDE)
-      if (range === 0 || (s1 === 0 && s2 === 0)) continue
-      add('effectors:trail', true, { kind: 'capsule', x1, y1, x2, y2, range, i1: s1, i2: s2 })
+    for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
+      const [x, y, r, s] = dyn.slice(base, base + NODE_STRIDE)
+      if (r <= 0 || s <= 0) continue
+      add('effectors:trail', true, { kind: 'ring', x, y, r0: 0, r1: r, intensity: s })
     }
+    const trailGroup = groups.get('effectors:trail')
+    if (trailGroup) trailGroup.blend = 'max'
 
     const field = state.field
     if (field && field.length > FIELD_HEADER) {
@@ -302,36 +304,36 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       }
     }
   }`
-    // Continuous pull along the trail path: distance to each capsule
-    // segment, strength interpolated between the segment's endpoints.
+    // The trail field is the MAX of the sample cones along the cursor
+    // curve — the strongest sample wins at each point, so overlapping
+    // samples form one smooth tapered blob instead of summing into seams.
     const trailLoop = ({ particleVar, getUniform, getLength }: WgslArgs) => `
-  let n_dyn = ${getLength('dynamic')} / ${STRIDE}u;
+  let n_dyn = ${getLength('dynamic')} / ${NODE_STRIDE}u;
+  var t_best = 0.0;
+  var t_dx = 0.0;
+  var t_dy = 0.0;
   for (var i: u32 = 0u; i < n_dyn; i = i + 1u) {
-    let base = i * ${STRIDE}u;
-    let ax = ${getUniform('dynamic', 'base + 0u')};
-    let ay = ${getUniform('dynamic', 'base + 1u')};
-    let bx = ${getUniform('dynamic', 'base + 2u')};
-    let by = ${getUniform('dynamic', 'base + 3u')};
-    let range = ${getUniform('dynamic', 'base + 4u')};
-    let s1 = ${getUniform('dynamic', 'base + 5u')};
-    let s2 = ${getUniform('dynamic', 'base + 6u')};
-    let px = ${particleVar}.position.x;
-    let py = ${particleVar}.position.y;
-    let abx = bx - ax;
-    let aby = by - ay;
-    let len2 = abx * abx + aby * aby;
-    var t = 0.0;
-    if (len2 > 0.0) {
-      t = clamp(((px - ax) * abx + (py - ay) * aby) / len2, 0.0, 1.0);
-    }
-    let dx = (ax + abx * t) - px;
-    let dy = (ay + aby * t) - py;
+    let base = i * ${NODE_STRIDE}u;
+    let nx = ${getUniform('dynamic', 'base + 0u')};
+    let ny = ${getUniform('dynamic', 'base + 1u')};
+    let nr = ${getUniform('dynamic', 'base + 2u')};
+    let ns = ${getUniform('dynamic', 'base + 3u')};
+    if (nr <= 0.0 || ns <= 0.0) { continue; }
+    let dx = nx - ${particleVar}.position.x;
+    let dy = ny - ${particleVar}.position.y;
     let dist2 = dx * dx + dy * dy;
-    if (dist2 > 0.0 && dist2 <= range * range) {
+    if (dist2 > 0.0 && dist2 < nr * nr) {
       let dist = sqrt(dist2);
-      let f = mix(s1, s2, t) * (1.0 - dist / range);
-      ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * f;
+      let c = ns * (1.0 - dist / nr);
+      if (c > t_best) {
+        t_best = c;
+        t_dx = dx / dist;
+        t_dy = dy / dist;
+      }
     }
+  }
+  if (t_best > 0.0) {
+    ${particleVar}.acceleration += vec2<f32>(t_dx, t_dy) * t_best;
   }`
     const fieldPart = ({ particleVar, getUniform, getLength }: WgslArgs) => `
   let flen = ${getLength('field')};
@@ -478,30 +480,32 @@ ${namePart(args)}
         }
         applyList(input.data)
         {
-          // Trail capsule chain (dynamic layout: x1,y1,x2,y2,range,s1,s2,pad).
+          // Trail curve samples (dynamic layout: x,y,radius,strength); the
+          // strongest cone wins, mirroring the WGSL max-field.
           const dyn = input.dynamic
-          if (dyn && dyn.length >= STRIDE) {
-            for (let base = 0; base + STRIDE <= dyn.length; base += STRIDE) {
-              const ax = dyn[base]
-              const ay = dyn[base + 1]
-              const bx = dyn[base + 2]
-              const by = dyn[base + 3]
-              const range = dyn[base + 4]
-              const s1 = dyn[base + 5]
-              const s2 = dyn[base + 6]
-              if (range <= 0 || (s1 === 0 && s2 === 0)) continue
-              const abx = bx - ax
-              const aby = by - ay
-              const len2 = abx * abx + aby * aby
-              const t = len2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * abx + (py - ay) * aby) / len2)) : 0
-              const dx = ax + abx * t - px
-              const dy = ay + aby * t - py
+          if (dyn && dyn.length >= NODE_STRIDE) {
+            let best = 0
+            let bx = 0
+            let by = 0
+            for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
+              const nr = dyn[base + 2]
+              const ns = dyn[base + 3]
+              if (nr <= 0 || ns <= 0) continue
+              const dx = dyn[base] - px
+              const dy = dyn[base + 1] - py
               const dist2 = dx * dx + dy * dy
-              if (dist2 <= 0 || dist2 > range * range) continue
+              if (dist2 <= 0 || dist2 >= nr * nr) continue
               const dist = Math.sqrt(dist2)
-              const f = ((s1 + (s2 - s1) * t) * (1 - dist / range)) / dist
-              particle.acceleration.x += dx * f
-              particle.acceleration.y += dy * f
+              const c = ns * (1 - dist / nr)
+              if (c > best) {
+                best = c
+                bx = dx / dist
+                by = dy / dist
+              }
+            }
+            if (best > 0) {
+              particle.acceleration.x += bx * best
+              particle.acceleration.y += by * best
             }
           }
         }
