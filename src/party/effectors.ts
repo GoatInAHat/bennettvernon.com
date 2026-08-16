@@ -67,7 +67,12 @@ const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 
 const STRIDE = 8
 const FIELD_HEADER = 8
 
-type EffectorsInputs = { data: number[]; dynamic: number[]; field: number[] }
+type EffectorsInputs = {
+  data: number[]
+  dynamic: number[]
+  field: number[]
+  nameField: number[]
+}
 
 function packEffectors(effectors: Effector[]): number[] {
   const data: number[] = []
@@ -98,11 +103,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     data: DataType.ARRAY,
     dynamic: DataType.ARRAY,
     field: DataType.ARRAY,
+    nameField: DataType.ARRAY,
   } as const
 
   constructor() {
     super()
-    this.write({ data: [], dynamic: [], field: [] })
+    this.write({ data: [], dynamic: [], field: [], nameField: [] })
   }
 
   /** Static effectors: rewritten only on layout/hover changes. */
@@ -119,11 +125,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     this.write({ dynamic: data })
   }
 
-  setField(field: DistanceField | null): void {
-    if (!field) {
-      this.write({ field: [] })
-      return
-    }
+  private packField(field: DistanceField): number[] {
     const arr = new Array<number>(FIELD_HEADER + field.distances.length)
     arr[0] = field.originX
     arr[1] = field.originY
@@ -134,14 +136,30 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     arr[6] = field.padding
     arr[7] = field.falloff
     for (let i = 0; i < field.distances.length; i++) arr[FIELD_HEADER + i] = field.distances[i]
-    this.write({ field: arr })
+    return arr
+  }
+
+  setField(field: DistanceField | null): void {
+    this.write({ field: field ? this.packField(field) : [] })
+  }
+
+  /** The name's signed distance field: particles outside the letters are
+   * pulled toward the glyph surface (force fades over `falloff`); inside
+   * the letters no force applies. The physics IS the font's vector shape. */
+  setNameField(field: DistanceField | null): void {
+    this.write({ nameField: field ? this.packField(field) : [] })
   }
 
   /** Debug description decoded from the same packed arrays the shaders
    * consume, so the debug view always matches the live physics. */
   viz(): VizGroup[] {
     if (!this.isEnabled()) return []
-    const state = this.read() as { data?: number[]; dynamic?: number[]; field?: number[] }
+    const state = this.read() as {
+      data?: number[]
+      dynamic?: number[]
+      field?: number[]
+      nameField?: number[]
+    }
     const groups = new Map<string, VizGroup>()
     const add = (key: string, dynamic: boolean, prim: VizPrimitive) => {
       let g = groups.get(key)
@@ -196,6 +214,23 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         inner: field[6],
         outer: field[6] + field[7],
         intensity: field[5],
+      })
+    }
+
+    const nameField = state.nameField
+    if (nameField && nameField.length > FIELD_HEADER) {
+      add('effectors:name', false, {
+        kind: 'field',
+        originX: nameField[0],
+        originY: nameField[1],
+        cell: nameField[2],
+        cols: nameField[3],
+        rows: nameField[4],
+        values: nameField,
+        valuesStart: FIELD_HEADER,
+        inner: 0, // the letter surface itself
+        outer: nameField[7],
+        intensity: nameField[5],
       })
     }
     return [...groups.values()]
@@ -336,6 +371,43 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       }
     }
   }`
+    // Pull toward the name's letter surface: outside the glyphs the force
+    // points down the distance gradient, fading linearly over the falloff;
+    // inside the letters no force applies.
+    const namePart = ({ particleVar, getUniform, getLength }: WgslArgs) => `
+  let nflen = ${getLength('nameField')};
+  if (nflen > ${FIELD_HEADER}u) {
+    let nox = ${getUniform('nameField', '0u')};
+    let noy = ${getUniform('nameField', '1u')};
+    let ncw = ${getUniform('nameField', '2u')};
+    let ncols = u32(${getUniform('nameField', '3u')});
+    let nrows = u32(${getUniform('nameField', '4u')});
+    let nstrength = ${getUniform('nameField', '5u')};
+    let nrange = ${getUniform('nameField', '7u')};
+    let nfx = (${particleVar}.position.x - nox) / ncw;
+    let nfy = (${particleVar}.position.y - noy) / ncw;
+    if (nfx >= 1.5 && nfy >= 1.5 && nfx < f32(ncols) - 2.5 && nfy < f32(nrows) - 2.5) {
+      let nux = nfx - 0.5;
+      let nuy = nfy - 0.5;
+      let ntx = fract(nux);
+      let nty = fract(nuy);
+      let ni00 = ${FIELD_HEADER}u + u32(nuy) * ncols + u32(nux);
+      let nd00 = ${getUniform('nameField', 'ni00')};
+      let nd10 = ${getUniform('nameField', 'ni00 + 1u')};
+      let nd01 = ${getUniform('nameField', 'ni00 + ncols')};
+      let nd11 = ${getUniform('nameField', 'ni00 + ncols + 1u')};
+      let nd = mix(mix(nd00, nd10, ntx), mix(nd01, nd11, ntx), nty);
+      if (nd > 0.0 && nd < nrange) {
+        let ngx = mix(nd10 - nd00, nd11 - nd01, nty);
+        let ngy = mix(nd01 - nd00, nd11 - nd10, ntx);
+        let ngl = sqrt(ngx * ngx + ngy * ngy);
+        if (ngl > 0.0) {
+          let nm = nstrength * (1.0 - nd / nrange);
+          ${particleVar}.acceleration -= vec2<f32>(ngx, ngy) / ngl * nm;
+        }
+      }
+    }
+  }`
     return {
       apply: (args) => `{
   {${shapeLoop('data', args)}
@@ -343,6 +415,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   {${trailLoop(args)}
   }
 ${fieldPart(args)}
+${namePart(args)}
 }`,
     }
   }
@@ -404,7 +477,34 @@ ${fieldPart(args)}
           }
         }
         applyList(input.data)
-        applyList(input.dynamic)
+        {
+          // Trail capsule chain (dynamic layout: x1,y1,x2,y2,range,s1,s2,pad).
+          const dyn = input.dynamic
+          if (dyn && dyn.length >= STRIDE) {
+            for (let base = 0; base + STRIDE <= dyn.length; base += STRIDE) {
+              const ax = dyn[base]
+              const ay = dyn[base + 1]
+              const bx = dyn[base + 2]
+              const by = dyn[base + 3]
+              const range = dyn[base + 4]
+              const s1 = dyn[base + 5]
+              const s2 = dyn[base + 6]
+              if (range <= 0 || (s1 === 0 && s2 === 0)) continue
+              const abx = bx - ax
+              const aby = by - ay
+              const len2 = abx * abx + aby * aby
+              const t = len2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * abx + (py - ay) * aby) / len2)) : 0
+              const dx = ax + abx * t - px
+              const dy = ay + aby * t - py
+              const dist2 = dx * dx + dy * dy
+              if (dist2 <= 0 || dist2 > range * range) continue
+              const dist = Math.sqrt(dist2)
+              const f = ((s1 + (s2 - s1) * t) * (1 - dist / range)) / dist
+              particle.acceleration.x += dx * f
+              particle.acceleration.y += dy * f
+            }
+          }
+        }
         const field = input.field
         if (field && field.length > FIELD_HEADER) {
           const ox = field[0]
@@ -436,6 +536,38 @@ ${fieldPart(args)}
                 const m = Math.min(Math.max((pad - d) / falloff, 0), 1.5)
                 particle.acceleration.x += (gx / gl) * fstrength * m
                 particle.acceleration.y += (gy / gl) * fstrength * m
+              }
+            }
+          }
+        }
+        const nf = input.nameField
+        if (nf && nf.length > FIELD_HEADER) {
+          const ox = nf[0]
+          const oy = nf[1]
+          const cw = nf[2]
+          const cols = nf[3]
+          const rows = nf[4]
+          const strength = nf[5]
+          const range = nf[7]
+          const fx = (px - ox) / cw
+          const fy = (py - oy) / cw
+          if (fx >= 1.5 && fy >= 1.5 && fx < cols - 2.5 && fy < rows - 2.5) {
+            const ux = fx - 0.5
+            const uy = fy - 0.5
+            const tx = ux - Math.floor(ux)
+            const ty = uy - Math.floor(uy)
+            const i00 = FIELD_HEADER + Math.floor(uy) * cols + Math.floor(ux)
+            const d =
+              (nf[i00] * (1 - tx) + nf[i00 + 1] * tx) * (1 - ty) +
+              (nf[i00 + cols] * (1 - tx) + nf[i00 + cols + 1] * tx) * ty
+            if (d > 0 && d < range) {
+              const gx = (nf[i00 + 1] - nf[i00]) * (1 - ty) + (nf[i00 + cols + 1] - nf[i00 + cols]) * ty
+              const gy = (nf[i00 + cols] - nf[i00]) * (1 - tx) + (nf[i00 + cols + 1] - nf[i00 + 1]) * tx
+              const gl = Math.hypot(gx, gy)
+              if (gl > 0) {
+                const m = (strength * (1 - d / range)) / gl
+                particle.acceleration.x -= gx * m
+                particle.acceleration.y -= gy * m
               }
             }
           }

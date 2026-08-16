@@ -115,17 +115,8 @@ function drawCapsule(
     ctx.lineTo(x2, y2)
     ctx.stroke()
   }
-  // Body geometry: the segment itself, faded toward its weaker end.
-  const grad = ctx.createLinearGradient(x1, y1, x2, y2)
-  grad.addColorStop(0, vizCss(key, Math.min(1, 0.25 + 0.75 * i1)))
-  grad.addColorStop(1, vizCss(key, Math.min(1, 0.25 + 0.75 * i2)))
-  ctx.strokeStyle = grad
-  ctx.lineWidth = 1.5
-  ctx.beginPath()
-  ctx.moveTo(x1, y1)
-  ctx.lineTo(x2, y2)
-  ctx.stroke()
-  // Range limit: the capsule outline.
+  // Range limit: the capsule outline. (The body segment itself is not
+  // stroked — across the round caps it reads as a diameter line.)
   const nx = -(y2 - y1) / len
   const ny = (x2 - x1) / len
   const ang = Math.atan2(y2 - y1, x2 - x1)

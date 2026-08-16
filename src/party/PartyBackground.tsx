@@ -35,32 +35,25 @@ const NAME_MARGIN_PX = GUTTER_PX * 2
 const isMobile = () =>
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
   (window.innerWidth >= 1 && window.innerWidth < 768)
-/** Safari (not Chromium pretending): WebKit's WebGPU is slower and Safari
- * drops requestAnimationFrame to 30Hz as soon as frames miss the 60Hz
- * budget, so it gets a smaller default swarm and smaller scene textures. */
-const isSafari = () =>
-  /AppleWebKit/i.test(navigator.userAgent) &&
-  !/Chrome|Chromium|CriOS|Edg\/|OPR\//i.test(navigator.userAgent)
 const DESIRED_ZOOM = () => (isMobile() ? 0.2 : 0.3)
-const SWARM_BUDGET = (webgpu: boolean) => {
-  if (!webgpu) return 2_500
-  const base = isMobile() ? 24_000 : 80_000
-  return isSafari() ? Math.round(base * 0.4) : base
-}
+const SWARM_BUDGET = (webgpu: boolean) => (webgpu ? (isMobile() ? 24_000 : 80_000) : 2_500)
 /** Particles spawned up front; the particle-count setting caps the effective
  * count via maxParticles so changing it never respawns the swarm. */
 const PARTICLE_POOL = (webgpu: boolean) => (webgpu ? 80_000 : 8_000)
 /** Backing-store cap; taller pages render uniformly downscaled so the
  * simulation always reaches the bottom of the page. */
 const MAX_CANVAS_HEIGHT = 8_000
-/** Starting uniform render downscale. Safari is scene-texture fill-bound:
- * its trail compute passes over a full-page texture miss the 60Hz deadline
- * and WebKit then halves requestAnimationFrame to a hard 30Hz — measured:
- * full-res 30-31Hz, ~0.4× ≈ 58-65Hz on an M-series MacBook. The tick loop
- * ratchets the scale down further while the frame rate stays demoted, so
- * the resolution/smoothness tradeoff tunes itself per machine. */
-const RENDER_SCALE_START = () => (isSafari() ? 0.6 : 1)
+/** Whatever slows the GPU — Safari's hard 30Hz demotion tier when frames
+ * miss the 60Hz deadline, macOS Low Power Mode, a weak machine — the tick
+ * loop ratchets the render resolution down (CSS stretches it back) until
+ * frames fit the budget again, so the quality/smoothness tradeoff tunes
+ * itself per machine. Measured on an M-series MacBook: Safari in Low Power
+ * Mode ran a hard 30fps at full resolution and ~60fps at half; with it
+ * off, full resolution holds 60fps and the ratchet never engages. */
 const RENDER_SCALE_FLOOR = 0.34
+
+/** Reach of the name's attraction field beyond the letter surface. */
+const NAME_FIELD_RANGE_PX = 90
 
 /** Effector tuning (world units are CSS px / zoom). */
 const PANEL_RANGE_PX = 6
@@ -88,10 +81,13 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   cursorFalloff: 0.5,
   modeDuration: 15,
   transitionLength: 2.5,
-  nameFont: 0,
+  nameFont: 1, // Helvetica
   nameWeight: 700,
   nameDensity: 1000,
   nameDensityRes: 36,
+  nameBaseOpacity: 0.05,
+  nameDensityOpacity: 0.35,
+  opacityDamping: 0.85,
 }
 // Name-density enforcement runs off the engine's cell census: a per-frame
 // GPU compute pass with an asynchronous readback, so it never stalls the
@@ -243,11 +239,13 @@ const easeInOutCubic = (p: number) =>
 export function PartyBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const debugRef = useRef<HTMLCanvasElement>(null)
+  const nameTextRef = useRef<HTMLCanvasElement>(null)
   const holderRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
     const debugCanvas = debugRef.current
+    const nameTextCanvas = nameTextRef.current
     const holder = holderRef.current
     if (!canvas || !debugCanvas || !holder) return
 
@@ -265,6 +263,14 @@ export function PartyBackground() {
     let transition: { from: Record<string, number>; to: Record<string, number>; t0: number; ms: number; preset: (typeof DEMO_PRESETS)[number] } | null = null
     let name: NameLayout | null = null
     let charBalls: CharBall[] = []
+    /** Signed distances (page px) of the name glyphs, for the pull field. */
+    let nameField: { minX: number; minY: number; cell: number; cols: number; rows: number; d: Float32Array } | null = null
+    let nameMask: HTMLCanvasElement | null = null
+    let nameAlphaSmall: HTMLCanvasElement | null = null
+    /** Per-cell density weight targets (0..1) driving the name opacity. */
+    let cellWeights = new Float32Array(0)
+    /** Displayed weights, eased toward the targets by opacity damping. */
+    let cellWeightsShown = new Float32Array(0)
     let voroSeeds: { x: number; y: number }[] = []
     /** Fine-grid indices of the glyph pixels owned by each Voronoi cell. */
     let voroCellPx: number[][] = []
@@ -277,8 +283,15 @@ export function PartyBackground() {
       cellOf: Int16Array
     } | null = null
     let particleCountTouched = false
-    let renderScale = RENDER_SCALE_START()
+    let renderScale = 1
     let lastScaleCheck = 0
+    /** Overlay canvases render at native device resolution, capped by an
+     * area budget so very tall pages don't allocate absurd backing stores. */
+    let debugDpr = 1
+    const overlayDpr = (w: number, h: number) => {
+      const dpr = window.devicePixelRatio || 1
+      return Math.min(dpr, Math.sqrt(64_000_000 / Math.max(1, w * h)))
+    }
     let densityStatus = 'idle'
     const densityStats = {
       calls: 0,
@@ -296,6 +309,9 @@ export function PartyBackground() {
     /** Net corrections issued since the in-flight census was dispatched. */
     let pendingDelta1: number[] = []
     let lastCpuRound = 0
+    let densityRound = 0
+    /** Particle index → round it was relocated (stale in census samples). */
+    const recentlyMoved = new Map<number, number>()
     let teleportCount = 0
     let teleportWindowStart = 0
     let teleportRate = 0
@@ -447,6 +463,8 @@ export function PartyBackground() {
       voroCache.height = debugCanvas.height
       const ctx = voroCache.getContext('2d')
       if (!ctx || !name || name.size <= 0) return
+      // Page coordinates on a native-resolution backing store.
+      ctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
       ctx.strokeStyle = vizCss('density:glyphs', 0.8)
       ctx.lineWidth = 1
       ctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
@@ -499,38 +517,30 @@ export function PartyBackground() {
       staticVizCache.height = debugCanvas.height
       const ctx = staticVizCache.getContext('2d')
       if (!ctx) return
+      ctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
       drawViz(ctx, collectViz().filter((g) => !g.dynamic), zoom)
     }
 
     const drawDebug = () => {
       const dctx = debugCanvas.getContext('2d')
       if (!dctx) return
+      dctx.setTransform(1, 0, 0, 1, 0, 0)
       dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
       if (!bridge.debugOn || !name) return
       if (voroCacheDirty) renderVoroCache()
       if (staticVizDirty) renderStaticViz()
       if (voroCache) dctx.drawImage(voroCache, 0, 0)
       if (staticVizCache) dctx.drawImage(staticVizCache, 0, 0)
+      dctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
       drawViz(dctx, collectViz().filter((g) => g.dynamic), zoom)
     }
 
     const syncEffectors = () => {
       syncScheduled = false
       if (!engine || !name) return
-      // The CPU runtime pays for every attract point per particle; half the
-      // grid gives the same pull shape at half the cost.
-      const namePts = webgpu ? name.points : name.points.filter((_, i) => i % 2 === 0)
-      const range = Math.max(16, name.step * 2.2) / zoom
-      const list: Effector[] = namePts.map((p) => ({
-        shape: 'circle' as const,
-        mode: 'attract' as const,
-        x: p.x / zoom,
-        y: p.y / zoom,
-        range,
-        halfW: 0,
-        halfH: 0,
-        strength: globals.nameAttraction,
-      }))
+      // The name attraction is the glyph distance field (pushNameField);
+      // only separators and the settings panel remain as shape effectors.
+      const list: Effector[] = []
       for (const t of getTargets()) {
         const r = toPageRect(t.el.getBoundingClientRect())
         if (r.w === 0 && r.h === 0) continue
@@ -657,10 +667,10 @@ export function PartyBackground() {
         teleportCount = 0
         teleportWindowStart = now
       }
-      // Downward-only resolution ratchet: while the browser holds the frame
-      // rate in a demoted tier (Safari's 30Hz), shrink the backing store
-      // until frames fit the 60Hz budget again.
-      if (renderScale > RENDER_SCALE_FLOOR && RENDER_SCALE_START() < 1) {
+      // Downward-only resolution ratchet, on every browser: whatever slows
+      // the GPU (Safari's 30Hz demotion tier, Low Power Mode, a weak
+      // machine), shrink the backing store until frames fit the budget.
+      if (renderScale > RENDER_SCALE_FLOOR) {
         if (lastScaleCheck === 0) lastScaleCheck = now
         else if (now - lastScaleCheck > 3000) {
           lastScaleCheck = now
@@ -671,6 +681,29 @@ export function PartyBackground() {
         }
       }
       enforceDensity()
+      // Ease the displayed per-cell opacity toward the density targets;
+      // the damping setting controls how much it may move per frame.
+      // Frame-rate independent: the per-60Hz-frame retention is the
+      // setting, scaled to the actual frame interval.
+      if (
+        cellWeightsShown.length > 0 &&
+        cellWeightsShown.length === cellWeights.length &&
+        name &&
+        window.scrollY <= name.bottom + 200
+      ) {
+        const dtFrames = frameDts[(frameDtIndex + frameDts.length - 1) % frameDts.length] / 16.7
+        const keep = Math.pow(
+          Math.min(0.98, Math.max(0, globals.opacityDamping)),
+          Math.min(4, Math.max(0.25, dtFrames)),
+        )
+        let maxDelta = 0
+        for (let i = 0; i < cellWeights.length; i++) {
+          const next = cellWeightsShown[i] * keep + cellWeights[i] * (1 - keep)
+          maxDelta = Math.max(maxDelta, Math.abs(next - cellWeightsShown[i]))
+          cellWeightsShown[i] = next
+        }
+        if (maxDelta > 0.0015) renderNameOpacity()
+      }
     }
 
     const layout = () => {
@@ -687,9 +720,12 @@ export function PartyBackground() {
         c.style.width = `${w}px`
         c.style.height = `${h}px`
       }
-      debugCanvas.width = w
-      debugCanvas.height = Math.min(h, 16_000)
+      const debugH = Math.min(h, 16_000)
+      debugDpr = overlayDpr(w, debugH)
+      debugCanvas.width = Math.round(w * debugDpr)
+      debugCanvas.height = Math.round(debugH * debugDpr)
       staticVizDirty = true
+      voroCacheDirty = true
       engine.setSize(Math.round(w * scale), Math.round(h * scale))
       engine.setZoom(DESIRED_ZOOM() * scale)
       zoom = engine.getZoom() / scale // effective page-px zoom
@@ -700,8 +736,10 @@ export function PartyBackground() {
     // glyphs are rasterized to a fine grid and split with a capacity-
     // balanced power diagram (Lloyd moves plus per-cell weights), so every
     // cell covers the same share of the actual letter area — no bounding
-    // box. Computed once here; measureName re-runs it whenever the name
-    // font settings or layout change.
+    // box. The same raster also yields the name's signed distance field
+    // (the attraction physics) and the opacity text mask. Computed once
+    // here; measureName re-runs it whenever the name font settings or
+    // layout change.
     const rebuildVoronoi = () => {
       voroSeeds = []
       voroCellPx = []
@@ -709,14 +747,22 @@ export function PartyBackground() {
       censusCells = null
       lastCensus = null
       pendingDelta1 = []
+      cellWeights = new Float32Array(0)
+      cellWeightsShown = new Float32Array(0)
       voroCacheDirty = true
-      if (!name || name.points.length === 0 || name.size <= 0) return
+      if (!name || name.points.length === 0 || name.size <= 0) {
+        effectors.setNameField(null)
+        renderNameOpacity()
+        return
+      }
 
       const step = FIELD_CELL_PX
-      const minX = NAME_MARGIN_PX - step
-      const minY = name.topY - step
-      const cols = Math.ceil((name.width + step * 4) / step)
-      const rows = Math.ceil((name.bottom - name.topY + step * 4) / step)
+      // Margin wide enough for the attraction field's reach.
+      const margin = NAME_FIELD_RANGE_PX + step * 4
+      const minX = NAME_MARGIN_PX - margin
+      const minY = name.topY - margin
+      const cols = Math.ceil((name.width + margin * 2) / step)
+      const rows = Math.ceil((name.bottom - name.topY + margin * 2) / step)
       if (cols < 4 || rows < 4 || cols * rows > 1_000_000) return
       const raster = document.createElement('canvas')
       raster.width = cols
@@ -832,6 +878,143 @@ export function PartyBackground() {
       glyphGrid = { minX, minY, cols, rows, step, cellOf }
       censusCells = Int32Array.from(cellOf)
       censusVersion++
+
+      // The name's signed distance field, derived from the same raster:
+      // this IS the attraction physics — particles are pulled toward the
+      // font's actual letter surface, not a cloud of sample points.
+      const mask = new Uint8Array(cols * rows)
+      for (const i of px) mask[i] = 1
+      const inverse = new Uint8Array(cols * rows)
+      for (let i = 0; i < mask.length; i++) inverse[i] = mask[i] ? 0 : 1
+      const outer = edt2d(mask, cols, rows)
+      const inner = edt2d(inverse, cols, rows)
+      const d = new Float32Array(cols * rows)
+      for (let i = 0; i < d.length; i++) {
+        d[i] = (mask[i] ? -inner[i] : outer[i]) * step
+      }
+      nameField = { minX, minY, cell: step, cols, rows, d }
+      pushNameField()
+
+      cellWeights = new Float32Array(target)
+      cellWeightsShown = new Float32Array(target)
+      renderNameMask()
+      renderNameOpacity()
+    }
+
+    /** Uploads the name field with the current strength/range header. */
+    const pushNameField = () => {
+      if (!nameField) {
+        effectors.setNameField(null)
+        return
+      }
+      const world = new Float32Array(nameField.d.length)
+      for (let i = 0; i < world.length; i++) world[i] = nameField.d[i] / zoom
+      effectors.setNameField({
+        originX: nameField.minX / zoom,
+        originY: nameField.minY / zoom,
+        cell: nameField.cell / zoom,
+        cols: nameField.cols,
+        rows: nameField.rows,
+        strength: globals.nameAttraction,
+        padding: 0,
+        falloff: NAME_FIELD_RANGE_PX / zoom,
+        distances: world,
+      })
+    }
+
+    /** Crisp vector text mask used to clip the per-cell opacity field,
+     * backed at native device resolution. */
+    const renderNameMask = () => {
+      if (!glyphGrid || !name) {
+        nameMask = null
+        return
+      }
+      if (!nameMask) nameMask = document.createElement('canvas')
+      const { minX, minY, cols, rows, step } = glyphGrid
+      const dpr = window.devicePixelRatio || 1
+      nameMask.width = Math.round(cols * step * dpr)
+      nameMask.height = Math.round(rows * step * dpr)
+      const ctx = nameMask.getContext('2d')
+      if (!ctx) {
+        nameMask = null
+        return
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.fillStyle = '#000'
+      ctx.textBaseline = 'top'
+      ctx.font = `${globals.nameWeight} ${name.size}px ${nameFontStack()}`
+      NAME_LINES.forEach((text, i) => {
+        ctx.fillText(text, NAME_MARGIN_PX - minX, name!.topY + i * name!.lineGap - minY)
+      })
+    }
+
+    // The name rendered as real text whose opacity varies per Voronoi cell:
+    // a tiny per-cell alpha field is scaled up smoothly and clipped by the
+    // crisp vector text mask. Cost per update: one small ImageData pass and
+    // two drawImage calls.
+    const renderNameOpacity = () => {
+      const out = nameTextCanvas
+      if (!out) return
+      const octx = out.getContext('2d')
+      if (!octx) return
+      if (!glyphGrid || !nameMask) {
+        octx.clearRect(0, 0, out.width, out.height)
+        return
+      }
+      const { minX, minY, cols, rows, step, cellOf } = glyphGrid
+      const dpr = window.devicePixelRatio || 1
+      const outW = Math.round(cols * step * dpr)
+      const outH = Math.round(rows * step * dpr)
+      if (out.width !== outW || out.height !== outH) {
+        out.width = outW
+        out.height = outH
+        out.style.width = `${cols * step}px`
+        out.style.height = `${rows * step}px`
+        out.style.left = `${minX}px`
+        out.style.top = `${minY}px`
+      }
+      const base = globals.nameBaseOpacity
+      const top = globals.nameDensityOpacity
+      const alphaOf = (c: number) => base + (top - base) * (cellWeightsShown[c] ?? 0)
+      // Per-cell alpha grid, dilated so the smoothing at letter edges
+      // samples the owning cell instead of transparent margin.
+      let a = new Float32Array(cols * rows).fill(-1)
+      for (let i = 0; i < cellOf.length; i++) {
+        if (cellOf[i] >= 0) a[i] = alphaOf(cellOf[i])
+      }
+      for (let pass = 0; pass < 2; pass++) {
+        const next = a.slice()
+        for (let gy = 0; gy < rows; gy++) {
+          for (let gx = 0; gx < cols; gx++) {
+            const i = gy * cols + gx
+            if (a[i] >= 0) continue
+            const l = gx > 0 ? a[i - 1] : -1
+            const r = gx + 1 < cols ? a[i + 1] : -1
+            const u = gy > 0 ? a[i - cols] : -1
+            const dn = gy + 1 < rows ? a[i + cols] : -1
+            const v = Math.max(l, r, u, dn)
+            if (v >= 0) next[i] = v
+          }
+        }
+        a = next
+      }
+      if (!nameAlphaSmall) nameAlphaSmall = document.createElement('canvas')
+      nameAlphaSmall.width = cols
+      nameAlphaSmall.height = rows
+      const sctx = nameAlphaSmall.getContext('2d')
+      if (!sctx) return
+      const img = new ImageData(cols, rows)
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] > 0) img.data[i * 4 + 3] = Math.round(Math.min(1, a[i]) * 255)
+      }
+      sctx.putImageData(img, 0, 0)
+      octx.setTransform(1, 0, 0, 1, 0, 0)
+      octx.clearRect(0, 0, out.width, out.height)
+      octx.imageSmoothingEnabled = true
+      octx.drawImage(nameAlphaSmall, 0, 0, out.width, out.height)
+      octx.globalCompositeOperation = 'destination-in'
+      octx.drawImage(nameMask, 0, 0, out.width, out.height)
+      octx.globalCompositeOperation = 'source-over'
     }
 
     // Keeps every Voronoi cell of the name at its minimum particle count by
@@ -851,6 +1034,9 @@ export function PartyBackground() {
       const totalMin = Math.round(Math.min(globals.nameDensity, engine.getCount() * 0.5))
       if (totalMin <= 0) {
         densityStatus = 'min<=0'
+        // With enforcement off, the density opacity eases back to baseline
+        // instead of freezing at the last enforced snapshot.
+        cellWeights.fill(0)
         return
       }
       // No work while the name is scrolled out of view.
@@ -871,7 +1057,10 @@ export function PartyBackground() {
       // cell would let total demand exceed the population cap above when
       // there are more cells than the configured total.
       const perCell = Math.round(totalMin / voroSeeds.length)
-      if (perCell <= 0) return
+      if (perCell <= 0) {
+        cellWeights.fill(0)
+        return
+      }
       const w = name.width
       const h = name.bottom - name.topY
       const center = pageToWorld(NAME_MARGIN_PX + w / 2, name.topY + h / 2)
@@ -912,6 +1101,15 @@ export function PartyBackground() {
       lastCensus = res
       lastCpuRound = lastTickAt
       densityStats.rounds++
+      densityRound++
+      // Particles this system relocated in the last two rounds still appear
+      // at their OLD location in the (one-round-stale) census samples;
+      // re-donating one would silently drain the cell it was just placed
+      // into. Skip them as donor candidates until a census has seen them.
+      for (const [idx, r] of recentlyMoved) {
+        if (densityRound - r > 2) recentlyMoved.delete(idx)
+      }
+      const isFreshDonor = (idx: number) => !recentlyMoved.has(idx)
       // On WebGPU the next census is dispatched before this round's
       // teleports are written, so it is exactly one round of corrections
       // stale: credit them here or every refill double-fills and
@@ -949,19 +1147,46 @@ export function PartyBackground() {
               densest = i
             }
           }
+          if (densest < 0 && outsideUsed >= outsideAvail) {
+            // Last tier: margin donors and the outside pool are exhausted.
+            // Take from any cell still above the bare minimum so no cell is
+            // left under it while surplus exists anywhere.
+            let dc = perCell
+            for (let i = 0; i < counts.length; i++) {
+              if (counts[i] > dc && used[i] < Math.min(res.counts[i], k)) {
+                dc = counts[i]
+                densest = i
+              }
+            }
+          }
           let donor = -1
           if (densest >= 0) {
-            donor = res.samples[densest * k + used[densest]]
-            used[densest]++
+            const avail = Math.min(res.counts[densest], k)
+            while (used[densest] < avail) {
+              const cand = res.samples[densest * k + used[densest]++]
+              if (isFreshDonor(cand)) {
+                donor = cand
+                break
+              }
+            }
+            if (donor < 0) continue // cursor exhausted; rescan donors
             counts[densest]--
             pendingDelta1[densest]--
             densityStats.fromCells++
           } else if (outsideUsed < outsideAvail) {
-            donor = res.outside[outsideUsed++]
+            while (outsideUsed < outsideAvail) {
+              const cand = res.outside[outsideUsed++]
+              if (isFreshDonor(cand)) {
+                donor = cand
+                break
+              }
+            }
+            if (donor < 0) continue // pool exhausted; the last tier scans next
             densityStats.fromOutside++
           } else {
             break
           }
+          recentlyMoved.set(donor, densityRound)
           // Land on a random glyph pixel of the deficient cell; jitter
           // stays within that pixel so the next census counts it here.
           const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
@@ -979,6 +1204,21 @@ export function PartyBackground() {
           counts[ci]++
           pendingDelta1[ci]++
           need--
+        }
+      }
+
+      // Density-weighted name opacity targets: the densest cell pins the
+      // max, the rest interpolate by their surplus above the minimum.
+      // Derived from the post-refill counts so the weights match the
+      // enforced state; the tick loop eases the displayed opacity toward
+      // these targets (opacity damping) to eliminate flicker.
+      if (cellWeights.length === counts.length) {
+        let maxCount = 0
+        for (let i = 0; i < counts.length; i++) maxCount = Math.max(maxCount, counts[i])
+        const span = maxCount - perCell
+        for (let i = 0; i < counts.length; i++) {
+          cellWeights[i] =
+            span > 0 ? Math.min(1, Math.max(0, (counts[i] - perCell) / span)) : 0
         }
       }
     }
@@ -1138,6 +1378,12 @@ export function PartyBackground() {
         pushField()
         staticVizDirty = true
         scheduleSync()
+      } else if (key === 'nameAttraction') {
+        pushNameField()
+        staticVizDirty = true
+        if (bridge.debugOn) drawDebug()
+      } else if (key === 'nameBaseOpacity' || key === 'nameDensityOpacity') {
+        renderNameOpacity()
       } else if (key === 'particleCount') {
         particleCountTouched = true
         setMaxParticlesAnimated(
@@ -1468,6 +1714,7 @@ export function PartyBackground() {
   return (
     <div ref={holderRef} className="party-holder" aria-hidden="true">
       <canvas ref={canvasRef} className="party-canvas" />
+      <canvas ref={nameTextRef} className="party-nametext" />
       <canvas ref={debugRef} className="party-debug" />
     </div>
   )

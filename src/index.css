@@ -98,6 +98,14 @@ a:visited {
   filter: invert(1) contrast(2);
 }
 
+/* The name as real text, opacity driven per Voronoi cell by particle
+   density; positioned by the engine wiring. Outside the inversion filter. */
+.party-nametext {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
 /* Effector debug overlay; drawn outside the inversion filter. */
 .party-debug {
   position: absolute;

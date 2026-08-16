@@ -30,6 +30,9 @@ export const GLOBAL_SETTING_KEYS = [
   'nameWeight',
   'nameDensity',
   'nameDensityRes',
+  'nameBaseOpacity',
+  'nameDensityOpacity',
+  'opacityDamping',
 ] as const
 
 export type ModeSettingKey = (typeof MODE_SETTING_KEYS)[number]
