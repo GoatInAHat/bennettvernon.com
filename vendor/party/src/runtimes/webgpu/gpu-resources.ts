@@ -186,7 +186,10 @@ export class GPUResources {
       });
     } catch (error) {
       console.error("[WebGPU] Initialization failed:", error);
-      // Clean up any partial state
+      // Clean up any partial state; a device created before a later step
+      // failed must be destroyed, not just dereferenced, or repeated init
+      // attempts accumulate live devices in the GPU process.
+      this.device?.destroy();
       this.adapter = null;
       this.device = null;
       this.context = null;

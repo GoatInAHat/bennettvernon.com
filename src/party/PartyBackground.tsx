@@ -898,8 +898,11 @@ export function PartyBackground() {
       }
       densityStatus = 'active'
       // The overall density stays put as the cell count changes: each cell
-      // owes an equal share of the total.
-      const perCell = Math.max(1, Math.round(totalMin / voroSeeds.length))
+      // owes an equal share of the total. No floor — flooring to one per
+      // cell would let total demand exceed the population cap above when
+      // there are more cells than the configured total.
+      const perCell = Math.round(totalMin / voroSeeds.length)
+      if (perCell <= 0) return
       const w = name.width
       const h = name.bottom - name.topY
       const center = pageToWorld(NAME_MARGIN_PX + w / 2, name.topY + h / 2)
@@ -963,10 +966,13 @@ export function PartyBackground() {
         while (need > 0) {
           // Densest donor cell that stays comfortably above the minimum
           // after giving one up (and still has uncollected candidates).
+          // The candidate cursor is bounded by the RAW census count — only
+          // min(res.counts[i], k) sample slots were written this dispatch;
+          // the credited count must never index into stale slots.
           let densest = -1
           let densestCount = donorFloor
           for (let i = 0; i < counts.length; i++) {
-            if (counts[i] > densestCount && used[i] < Math.min(counts[i], k)) {
+            if (counts[i] > densestCount && used[i] < Math.min(res.counts[i], k)) {
               densestCount = counts[i]
               densest = i
             }
@@ -1331,9 +1337,15 @@ export function PartyBackground() {
       }
     }
 
-    /** Tears the current engine down and boots a fresh one on `pref`. */
+    /** Tears the current engine down and boots a fresh one on `pref`. A
+     * request arriving mid-reboot queues (latest wins) instead of being
+     * dropped, so rapid runtime clicks can't desync the UI from the engine. */
+    let pendingRuntime: 'auto' | 'webgpu' | 'cpu' | null = null
     const reboot = async (pref: 'auto' | 'webgpu' | 'cpu') => {
-      if (booting) return
+      if (booting) {
+        pendingRuntime = pref
+        return
+      }
       booting = true
       try {
         cancelAnimationFrame(tickRaf)
@@ -1348,6 +1360,9 @@ export function PartyBackground() {
       } finally {
         booting = false
       }
+      const next = pendingRuntime
+      pendingRuntime = null
+      if (next && next !== pref && !disposed) await reboot(next)
     }
 
     bridge.setRuntime = (pref) => {
