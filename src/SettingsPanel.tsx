@@ -60,10 +60,11 @@ const MODE_SLIDERS: SliderDef<ModeSettingKey>[] = [
 /** Slider value readout, truncated to two decimals. */
 const fmt = (v: number) => String(Number(v.toFixed(2)))
 
-/** Native range-knob width (px): the knob's center travels from THUMB_W/2 to
- * trackWidth - THUMB_W/2, so live markers must map onto that span — a plain
- * percentage of the track misses at both ends. */
-const THUMB_W = 11
+/** Native range-knob width (px; Chrome renders a 16px circle): the knob's
+ * center travels from THUMB_W/2 to trackWidth - THUMB_W/2, so live markers
+ * must map onto that span — a plain percentage of the track misses at both
+ * ends. */
+const THUMB_W = 16
 const SLIDER_BY_KEY = new Map(MODE_SLIDERS.map((s) => [s.key, s]))
 
 const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [

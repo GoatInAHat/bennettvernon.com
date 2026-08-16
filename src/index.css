@@ -427,17 +427,20 @@ a:visited {
 }
 
 /* The value currently applied to the simulation: an outline ghost of the
- * native range knob (measured ~11x15px pill in Chrome). */
+ * native range knob (Chrome renders a 16px circle). The difference blend
+ * keeps the ring visible over both the black filled track and the light
+ * unfilled track. */
 .slider-live {
   position: absolute;
   top: 50%;
-  width: 11px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   box-sizing: border-box;
   transform: translate(-50%, -50%);
-  border: 1.5px solid rgba(0, 0, 0, 0.55);
-  border-radius: 999px;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
   background: transparent;
+  mix-blend-mode: difference;
   pointer-events: none;
 }
 
