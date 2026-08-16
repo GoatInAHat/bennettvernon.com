@@ -106,9 +106,9 @@ a:visited {
 }
 
 /* The name lives at the top left of the first viewport; the gap before the
-   content is three times the name's 44px top margin. */
+   content is 1.5x the name's 44px top margin. */
 .hero {
-  height: calc(var(--name-bottom, 38vh) + 132px);
+  height: calc(var(--name-bottom, 38vh) + 66px);
 }
 
 .container {
@@ -119,49 +119,28 @@ a:visited {
   padding: 0 var(--gutter) 96px;
 }
 
-.site-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 56px;
-  justify-content: flex-start;
-  padding: 8px 0 64px;
+/* Bold section title over a full-width separator line. */
+.section-sep {
+  margin: 0 0 32px;
 }
 
-.nav-button {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--fg);
+.section-sep h2 {
   font-family: var(--font-mono);
   font-size: 15px;
   line-height: 22px;
-  padding: 4px 2px;
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  text-decoration-thickness: 1px;
-}
-
-/* Reserve the bold width so hover doesn't shift the row. */
-.nav-button::after {
-  content: attr(data-label);
-  display: block;
-  height: 0;
-  overflow: hidden;
-  visibility: hidden;
   font-weight: 700;
+  margin: 0 0 8px;
 }
 
-.nav-button:hover,
-.nav-button.active {
-  font-weight: 700;
-  text-decoration-thickness: 2px;
+.sep-rule {
+  height: 1px;
+  background: var(--border);
 }
 
-/* Content blocks: particles ring these like the reference center circle. */
+/* Content blocks: the particles avoid the text lines inside these. */
 .pblock {
   padding: 18px 22px;
-  margin: 0 0 64px;
+  margin: 0 0 32px;
   border-radius: 12px;
 }
 
@@ -349,7 +328,7 @@ a:visited {
 
 .settings-row {
   display: grid;
-  grid-template-columns: 88px 1fr;
+  grid-template-columns: 100px 1fr;
   align-items: center;
   gap: 8px;
   font-size: 12px;
@@ -360,6 +339,17 @@ a:visited {
 .settings-row input[type='range'] {
   width: 100%;
   accent-color: #000;
+}
+
+.settings-row select {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 4px;
 }
 
 .settings-toggle {

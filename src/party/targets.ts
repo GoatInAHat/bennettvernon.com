@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-export type TargetKind = 'block' | 'panel'
+export type TargetKind = 'panel' | 'separator'
 
 export interface EffectorTarget {
   id: string

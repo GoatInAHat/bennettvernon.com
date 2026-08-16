@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { bridge, type ModeSettings, type SettingKey } from './party/bridge'
+import { bridge, NAME_FONTS, type ModeSettings, type SettingKey } from './party/bridge'
 import { useEffectorTarget } from './party/targets'
 
 const SLIDERS: { key: SettingKey; label: string; min: number; max: number; step: number }[] = [
@@ -15,12 +15,15 @@ const SLIDERS: { key: SettingKey; label: string; min: number; max: number; step:
   { key: 'dragRadius', label: 'drag radius', min: 100, max: 2000, step: 10 },
   { key: 'nameAttraction', label: 'name pull', min: 0, max: 50000, step: 500 },
   { key: 'boxAttraction', label: 'box pull', min: 0, max: 200000, step: 1000 },
+  { key: 'textPadding', label: 'text padding', min: 0, max: 40, step: 1 },
+  { key: 'separatorAttraction', label: 'separator pull', min: 0, max: 100000, step: 500 },
 ]
 
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffectorTarget('settings-panel', 'panel', ref)
   const [values, setValues] = useState<ModeSettings | null>(bridge.getCurrentSettings)
+  const [globals, setGlobals] = useState(bridge.getGlobals)
   const [autoRotate, setAutoRotate] = useState(bridge.autoRotateOn)
   const [debug, setDebug] = useState(bridge.debugOn)
   const [copied, setCopied] = useState(false)
@@ -88,6 +91,38 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               />
             </label>
           ))}
+          <label className="settings-row">
+            <span>name font</span>
+            <select
+              value={globals.nameFont}
+              onChange={(e) => {
+                const v = Number(e.target.value)
+                bridge.applyGlobal('nameFont', v)
+                setGlobals((g) => ({ ...g, nameFont: v }))
+              }}
+            >
+              {NAME_FONTS.map((f, i) => (
+                <option key={f.label} value={i}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="settings-row">
+            <span>name weight</span>
+            <input
+              type="range"
+              min={100}
+              max={900}
+              step={100}
+              value={globals.nameWeight}
+              onChange={(e) => {
+                const v = Number(e.target.value)
+                bridge.applyGlobal('nameWeight', v)
+                setGlobals((g) => ({ ...g, nameWeight: v }))
+              }}
+            />
+          </label>
           <label className="settings-row settings-toggle">
             <span>auto switch</span>
             <input

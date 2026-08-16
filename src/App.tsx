@@ -3,10 +3,7 @@ import { PartyBackground } from './party/PartyBackground'
 import { DEMO_PRESETS } from './party/presets'
 import { useEffectorTarget } from './party/targets'
 import { SettingsPanel } from './SettingsPanel'
-import { site, work } from './content'
-
-const SECTIONS = ['About', 'Projects', 'Work', 'Research'] as const
-type Section = (typeof SECTIONS)[number]
+import { site, projects, research, work, type WorkItem } from './content'
 
 /** The site descriptions only use **bold** and _italic_. */
 function Rich({ text }: { text: string }) {
@@ -78,26 +75,47 @@ function DemoDots({
 }
 
 function Block({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={`pblock ${className ?? ''}`}>{children}</div>
+}
+
+/** Bold section title over a full-width line the particles are drawn to. */
+function SectionSeparator({ title }: { title: string }) {
   const ref = useRef<HTMLDivElement>(null)
-  const id = useRef(`block-${Math.random().toString(36).slice(2)}`)
-  useEffectorTarget(id.current, 'block', ref)
+  useEffectorTarget(`separator-${title}`, 'separator', ref)
   return (
-    <div ref={ref} className={`pblock ${className ?? ''}`}>
-      {children}
+    <div className="section-sep">
+      <h2>{title}</h2>
+      <div ref={ref} className="sep-rule" />
     </div>
   )
 }
 
-function ComingSoon() {
+function WorkItemBlock({ item }: { item: WorkItem }) {
   return (
-    <Block className="coming-soon">
-      <p>coming soon</p>
+    <Block>
+      <article>
+        <div className="work-head">
+          <div>
+            <div className="meta subtitle">{item.subtitle}</div>
+            <h3>{item.title}</h3>
+          </div>
+          <div className="meta">{item.date}</div>
+        </div>
+        <p className="md-muted">
+          <Rich text={item.description} />
+        </p>
+      </article>
     </Block>
   )
 }
 
+const SECTIONS: { title: string; items: WorkItem[] }[] = [
+  { title: 'Projects', items: projects },
+  { title: 'Research', items: research },
+  { title: 'Work', items: work },
+]
+
 export default function App() {
-  const [section, setSection] = useState<Section>('About')
   const [settingsOpen, setSettingsOpen] = useState(false)
   return (
     <>
@@ -108,63 +126,33 @@ export default function App() {
         <h1 className="sr-only">Bennett Vernon</h1>
       </header>
       <main className="container">
-        <nav className="site-nav" aria-label="Sections">
-          {SECTIONS.map((label) => (
-            <button
-              key={label}
-              className={`nav-button ${section === label ? 'active' : ''}`}
-              data-label={label}
-              onClick={() => setSection(label)}
-              aria-pressed={section === label}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+        <Block>
+          <p className="lede">{site.description}</p>
+          <div className="hero-links">
+            {site.links.map((link, index) => (
+              <span key={link.href}>
+                <a href={link.href} target="_blank" rel="noreferrer">
+                  {link.label}
+                </a>
+                {index < site.links.length - 1 ? (
+                  <span className="dot" aria-hidden="true">
+                    {' '}
+                    ·
+                  </span>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        </Block>
 
-        {section === 'About' ? (
-          <Block>
-            <p className="lede">{site.description}</p>
-            <div className="hero-links">
-              {site.links.map((link, index) => (
-                <span key={link.href}>
-                  <a href={link.href} target="_blank" rel="noreferrer">
-                    {link.label}
-                  </a>
-                  {index < site.links.length - 1 ? (
-                    <span className="dot" aria-hidden="true">
-                      {' '}
-                      ·
-                    </span>
-                  ) : null}
-                </span>
-              ))}
-            </div>
-          </Block>
-        ) : null}
-
-        {section === 'Projects' ? <ComingSoon /> : null}
-
-        {section === 'Work'
-          ? work.map((item) => (
-              <Block key={item.title}>
-                <article>
-                  <div className="work-head">
-                    <div>
-                      <div className="meta subtitle">{item.subtitle}</div>
-                      <h3>{item.title}</h3>
-                    </div>
-                    <div className="meta">{item.date}</div>
-                  </div>
-                  <p className="md-muted">
-                    <Rich text={item.description} />
-                  </p>
-                </article>
-              </Block>
-            ))
-          : null}
-
-        {section === 'Research' ? <ComingSoon /> : null}
+        {SECTIONS.filter((s) => s.items.length > 0).map((s) => (
+          <section key={s.title}>
+            <SectionSeparator title={s.title} />
+            {s.items.map((item) => (
+              <WorkItemBlock key={item.title} item={item} />
+            ))}
+          </section>
+        ))}
       </main>
     </>
   )

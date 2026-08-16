@@ -15,7 +15,7 @@ export const site = {
   ],
 }
 
-export const work: WorkItem[] = [
+export const projects: WorkItem[] = [
   {
     title: 'ACRE Robotics',
     subtitle: 'Co-Founder, CTO',
@@ -30,6 +30,11 @@ export const work: WorkItem[] = [
     description:
       'Developed electronics and software for the cooling system on a project to grow vegetables on the International Space Station. Invented a testing suite for proprietary LED drivers to maximize efficient product development for the USDA.',
   },
+]
+
+export const research: WorkItem[] = []
+
+export const work: WorkItem[] = [
   {
     title: 'Rolling Robots',
     subtitle: 'Instructor',
