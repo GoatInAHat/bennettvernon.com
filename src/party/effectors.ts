@@ -50,7 +50,24 @@ const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 
 const STRIDE = 8
 const FIELD_HEADER = 8
 
-type EffectorsInputs = { data: number[]; field: number[] }
+type EffectorsInputs = { data: number[]; dynamic: number[]; field: number[] }
+
+function packEffectors(effectors: Effector[]): number[] {
+  const data: number[] = []
+  for (const e of effectors) {
+    data.push(
+      SHAPE_CODE[e.shape],
+      e.mode === 'repel' ? 1 : 0,
+      e.x,
+      e.y,
+      e.range,
+      e.halfW,
+      e.halfH,
+      e.strength,
+    )
+  }
+  return data
+}
 
 /**
  * Multi-instance force field. Circles, rects, and pills use the same linear
@@ -62,29 +79,23 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   readonly role = ModuleRole.Force
   readonly inputs = {
     data: DataType.ARRAY,
+    dynamic: DataType.ARRAY,
     field: DataType.ARRAY,
   } as const
 
   constructor() {
     super()
-    this.write({ data: [], field: [] })
+    this.write({ data: [], dynamic: [], field: [] })
   }
 
+  /** Static effectors: rewritten only on layout/hover changes. */
   set(effectors: Effector[]): void {
-    const data: number[] = []
-    for (const e of effectors) {
-      data.push(
-        SHAPE_CODE[e.shape],
-        e.mode === 'repel' ? 1 : 0,
-        e.x,
-        e.y,
-        e.range,
-        e.halfW,
-        e.halfH,
-        e.strength,
-      )
-    }
-    this.write({ data })
+    this.write({ data: packEffectors(effectors) })
+  }
+
+  /** Small per-frame effectors (cursor trail): cheap to rewrite every frame. */
+  setDynamic(effectors: Effector[]): void {
+    this.write({ dynamic: packEffectors(effectors) })
   }
 
   setField(field: DistanceField | null): void {
@@ -106,19 +117,25 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   }
 
   webgpu(): WebGPUDescriptor<EffectorsInputs> {
-    return {
-      apply: ({ particleVar, getUniform, getLength }) => `{
-  let n = ${getLength('data')} / ${STRIDE}u;
-  for (var i: u32 = 0u; i < n; i = i + 1u) {
+    type WgslArgs = Parameters<
+      Extract<WebGPUDescriptor<EffectorsInputs>, { apply?: unknown }>['apply'] & object
+    >[0]
+    // The same shape-force loop runs over the static and the dynamic array.
+    const shapeLoop = (
+      arr: 'data' | 'dynamic',
+      { particleVar, getUniform, getLength }: WgslArgs,
+    ) => `
+  let n_${arr} = ${getLength(arr)} / ${STRIDE}u;
+  for (var i: u32 = 0u; i < n_${arr}; i = i + 1u) {
     let base = i * ${STRIDE}u;
-    let kind = ${getUniform('data', 'base + 0u')};
-    let mode = ${getUniform('data', 'base + 1u')};
-    let ex = ${getUniform('data', 'base + 2u')};
-    let ey = ${getUniform('data', 'base + 3u')};
-    let range = ${getUniform('data', 'base + 4u')};
-    let hw = ${getUniform('data', 'base + 5u')};
-    let hh = ${getUniform('data', 'base + 6u')};
-    let strength = ${getUniform('data', 'base + 7u')};
+    let kind = ${getUniform(arr, 'base + 0u')};
+    let mode = ${getUniform(arr, 'base + 1u')};
+    let ex = ${getUniform(arr, 'base + 2u')};
+    let ey = ${getUniform(arr, 'base + 3u')};
+    let range = ${getUniform(arr, 'base + 4u')};
+    let hw = ${getUniform(arr, 'base + 5u')};
+    let hh = ${getUniform(arr, 'base + 6u')};
+    let strength = ${getUniform(arr, 'base + 7u')};
     let px = ${particleVar}.position.x;
     let py = ${particleVar}.position.y;
     if (kind < 0.5 || kind > 1.5) {
@@ -163,7 +180,8 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         }
       }
     }
-  }
+  }`
+    const fieldPart = ({ particleVar, getUniform, getLength }: WgslArgs) => `
   let flen = ${getLength('field')};
   if (flen > ${FIELD_HEADER}u) {
     let ox = ${getUniform('field', '0u')};
@@ -192,7 +210,14 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         }
       }
     }
+  }`
+    return {
+      apply: (args) => `{
+  {${shapeLoop('data', args)}
   }
+  {${shapeLoop('dynamic', args)}
+  }
+${fieldPart(args)}
 }`,
     }
   }
@@ -200,10 +225,10 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   cpu(): CPUDescriptor<EffectorsInputs> {
     return {
       apply: ({ particle, input }) => {
-        const data = input.data
         const px = particle.position.x
         const py = particle.position.y
-        if (data && data.length >= STRIDE) {
+        const applyList = (data: number[] | undefined) => {
+          if (!data || data.length < STRIDE) return
           for (let base = 0; base + STRIDE <= data.length; base += STRIDE) {
             const kind = data[base]
             const mode = data[base + 1]
@@ -253,6 +278,8 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
             }
           }
         }
+        applyList(input.data)
+        applyList(input.dynamic)
         const field = input.field
         if (field && field.length > FIELD_HEADER) {
           const ox = field[0]

@@ -60,10 +60,12 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameDensity: 30,
   nameDensityRes: 36,
 }
-// Continuous trickle: as fast as GPU readbacks complete, small batches per
-// pass, so density stays satisfied without visible pulses.
-const DENSITY_INTERVAL_MS = 50
-const DENSITY_TELEPORT_BUDGET = 40
+// Density queries sync the GPU pipeline (three awaited readbacks each), so
+// they run at a low rate and the resulting teleports are spread smoothly
+// across the frames in between.
+const DENSITY_INTERVAL_MS = 250
+const DENSITY_TELEPORT_BUDGET = 200
+const DENSITY_DRAIN_PER_FRAME = 25
 /** Distance-field raster resolution in page px per cell. */
 const FIELD_CELL_PX = 3
 const FIELD_MARGIN_PX = 60
@@ -109,7 +111,7 @@ function sampleName(pageW: number, viewportH: number, font: string, weight: numb
   const size = (100 * width) / widest
   const lineGap = size * 1.08
   const topY = NAME_MARGIN_PX
-  const step = Math.max(8, Math.round(size / 16))
+  const step = Math.max(9, Math.round(size / 14))
 
   const points: { x: number; y: number }[] = []
   NAME_LINES.forEach((text, i) => {
@@ -245,7 +247,15 @@ export function PartyBackground() {
     } | null = null
     let densityBusy = false
     let lastDensity = 0
+    let teleportQueue: { index: number; x: number; y: number }[] = []
+    let teleportCount = 0
+    let teleportWindowStart = 0
+    let teleportRate = 0
     let staticEffectors: Effector[] = []
+    let dynamicDirty = false
+    const frameDts = new Float32Array(120)
+    let frameDtIndex = 0
+    let lastTickAt = 0
     let trail: { x: number; y: number; t: number }[] = []
     let cursor: { x: number; y: number } | null = null
     let dragging = false
@@ -513,7 +523,7 @@ export function PartyBackground() {
         }
       }
       staticEffectors = list
-      effectors.set([...staticEffectors, ...cursorEffectors(performance.now())])
+      effectors.set(staticEffectors)
       drawDebug()
     }
 
@@ -562,11 +572,16 @@ export function PartyBackground() {
       return list
     }
 
-    // Per-frame driver: cursor trail decay and smooth mode transitions.
+    // Per-frame driver: transitions, cursor trail, teleport drain, telemetry.
     const tick = () => {
       tickRaf = requestAnimationFrame(tick)
       if (!engine) return
       const now = performance.now()
+      if (lastTickAt > 0) {
+        frameDts[frameDtIndex] = now - lastTickAt
+        frameDtIndex = (frameDtIndex + 1) % frameDts.length
+      }
+      lastTickAt = now
       if (transition) {
         const p = Math.min((now - transition.t0) / transition.ms, 1)
         const e = easeInOutCubic(p)
@@ -580,9 +595,28 @@ export function PartyBackground() {
           transition = null
         }
       }
-      if (cursor || trail.length > 0) {
-        effectors.set([...staticEffectors, ...cursorEffectors(now)])
+      // Only the small dynamic array is written per frame; the static list
+      // stays untouched. Skip entirely when the trail is idle.
+      if (trail.length > 0 || dynamicDirty) {
+        effectors.setDynamic(cursorEffectors(now))
+        dynamicDirty = trail.length > 0
         if (bridge.debugOn) drawDebug()
+      }
+      for (let i = 0; i < DENSITY_DRAIN_PER_FRAME && teleportQueue.length > 0; i++) {
+        const t = teleportQueue.pop()!
+        engine.setParticle(t.index, {
+          position: pageToWorld(t.x, t.y),
+          velocity: { x: 0, y: 0 },
+          size: 3,
+          mass: 1,
+          color: { r: 1, g: 1, b: 1, a: 1 },
+        })
+        teleportCount++
+      }
+      if (now - teleportWindowStart > 1000) {
+        teleportRate = teleportCount
+        teleportCount = 0
+        teleportWindowStart = now
       }
       enforceDensity(now)
     }
@@ -680,6 +714,8 @@ export function PartyBackground() {
       if (!engine || !name || !glyphGrid || voroSeeds.length === 0) return
       const min = Math.round(globals.nameDensity)
       if (min <= 0 || densityBusy || now - lastDensity < DENSITY_INTERVAL_MS) return
+      // No work while the name is scrolled out of view.
+      if (window.scrollY > name.bottom + 200) return
       densityBusy = true
       lastDensity = now
       const w = name.width
@@ -697,6 +733,9 @@ export function PartyBackground() {
             if (ci >= 0) members[ci].push(q.index)
             else outside.push(q)
           }
+          // Queue the moves; the tick loop drains a few per frame so the
+          // name refills continuously instead of in visible bursts.
+          const queue: { index: number; x: number; y: number }[] = []
           let budget = DENSITY_TELEPORT_BUDGET
           for (let ci = 0; ci < members.length && budget > 0; ci++) {
             const cellPts = voroCellPoints[ci]
@@ -722,21 +761,17 @@ export function PartyBackground() {
               }
               const pt = name.points[cellPts[Math.floor(Math.random() * cellPts.length)]]
               const jitter = name.step
-              engine.setParticle(donor, {
-                position: pageToWorld(
-                  pt.x + (Math.random() - 0.5) * jitter,
-                  pt.y + (Math.random() - 0.5) * jitter,
-                ),
-                velocity: { x: 0, y: 0 },
-                size: 3,
-                mass: 1,
-                color: { r: 1, g: 1, b: 1, a: 1 },
+              queue.push({
+                index: donor,
+                x: pt.x + (Math.random() - 0.5) * jitter,
+                y: pt.y + (Math.random() - 0.5) * jitter,
               })
               members[ci].push(donor)
               need--
               budget--
             }
           }
+          teleportQueue = queue
         })
         .catch(() => {})
         .finally(() => {
@@ -920,7 +955,33 @@ export function PartyBackground() {
     })
     bridge.setDebug = (on) => {
       bridge.debugOn = on
+      window.dispatchEvent(new CustomEvent('party:debug', { detail: on }))
       scheduleSync()
+    }
+    bridge.getTelemetry = () => {
+      let sum = 0
+      let max = 0
+      let count = 0
+      for (let i = 0; i < frameDts.length; i++) {
+        const dt = frameDts[i]
+        if (dt <= 0) continue
+        sum += dt
+        if (dt > max) max = dt
+        count++
+      }
+      const dts: number[] = []
+      for (let i = 0; i < frameDts.length; i++) {
+        dts.push(frameDts[(frameDtIndex + i) % frameDts.length])
+      }
+      return {
+        fps: engine?.getFPS() ?? 0,
+        avgMs: count > 0 ? sum / count : 0,
+        maxMs: max,
+        particles: engine?.getCount() ?? 0,
+        effectors: staticEffectors.length + trail.length,
+        teleportsPerSec: teleportRate,
+        dts,
+      }
     }
     cleanups.push(() => {
       bridge.setAutoRotate = () => {}
@@ -931,6 +992,7 @@ export function PartyBackground() {
       bridge.setModeEnabled = () => {}
       bridge.getAllSettings = () => ({})
       bridge.setDebug = () => {}
+      bridge.getTelemetry = () => null
     })
 
     const start = async () => {
@@ -991,6 +1053,7 @@ export function PartyBackground() {
     }
     const onPointerMove = (e: PointerEvent) => {
       cursor = { x: e.pageX, y: e.pageY }
+      dynamicDirty = true
       if (dragging) {
         const { x, y } = pageToWorld(e.pageX, e.pageY)
         interaction.setPosition(x, y)
@@ -1010,7 +1073,8 @@ export function PartyBackground() {
     const onLeaveWindow = () => {
       cursor = null
       trail = []
-      effectors.set(staticEffectors)
+      effectors.setDynamic([])
+      dynamicDirty = false
     }
     window.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('pointermove', onPointerMove)

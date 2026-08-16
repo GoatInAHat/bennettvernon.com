@@ -213,6 +213,33 @@ a:visited {
   font-style: italic;
 }
 
+/* Frame telemetry, top right, only while debug view is on. */
+.debug-hud {
+  position: fixed;
+  top: 24px;
+  right: 64px;
+  z-index: 205;
+  width: 170px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.debug-hud.shifted {
+  right: 476px;
+}
+
+.debug-hud canvas {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
 /* Vertical demo mode dots, top right. */
 .demo-dots {
   position: fixed;

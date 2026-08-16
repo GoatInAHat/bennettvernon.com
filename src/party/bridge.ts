@@ -35,6 +35,17 @@ export type GlobalSettingKey = (typeof GLOBAL_SETTING_KEYS)[number]
 export type ModeSettings = Record<ModeSettingKey, number>
 export type GlobalSettings = Record<GlobalSettingKey, number>
 
+export interface Telemetry {
+  fps: number
+  avgMs: number
+  maxMs: number
+  particles: number
+  effectors: number
+  teleportsPerSec: number
+  /** Recent frame intervals in ms, oldest first. */
+  dts: number[]
+}
+
 /** Popular design font stacks selectable for the name. */
 export const NAME_FONTS = [
   { label: 'Georgia', stack: 'Georgia, "Times New Roman", serif' },
@@ -71,6 +82,7 @@ export const bridge: {
   getAllSettings: () => Record<string, unknown>
   setDebug: (on: boolean) => void
   debugOn: boolean
+  getTelemetry: () => Telemetry | null
 } = {
   setAutoRotate: () => {},
   autoRotateOn: true,
@@ -83,4 +95,5 @@ export const bridge: {
   getAllSettings: () => ({}),
   setDebug: () => {},
   debugOn: false,
+  getTelemetry: () => null,
 }

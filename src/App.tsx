@@ -104,6 +104,64 @@ function useGlitchText() {
   }, [])
 }
 
+/** Frame telemetry readout shown top right while debug view is enabled. */
+function DebugHud({ panelOpen }: { panelOpen: boolean }) {
+  const [visible, setVisible] = useState(bridge.debugOn)
+  const [t, setT] = useState(bridge.getTelemetry)
+  const sparkRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const onDebug = (e: Event) => setVisible((e as CustomEvent<boolean>).detail)
+    window.addEventListener('party:debug', onDebug)
+    return () => window.removeEventListener('party:debug', onDebug)
+  }, [])
+
+  useEffect(() => {
+    if (!visible) return
+    const iv = window.setInterval(() => {
+      const next = bridge.getTelemetry()
+      setT(next)
+      const canvas = sparkRef.current
+      const ctx = canvas?.getContext('2d')
+      if (!canvas || !ctx || !next) return
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.strokeStyle = 'rgba(30, 160, 60, 0.9)'
+      ctx.beginPath()
+      const n = next.dts.length
+      for (let i = 0; i < n; i++) {
+        const x = (i / (n - 1)) * canvas.width
+        const y = canvas.height - Math.min(next.dts[i] / 33.3, 1) * canvas.height
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.stroke()
+      // 60fps budget line.
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)'
+      ctx.beginPath()
+      ctx.moveTo(0, canvas.height / 2)
+      ctx.lineTo(canvas.width, canvas.height / 2)
+      ctx.stroke()
+    }, 250)
+    return () => window.clearInterval(iv)
+  }, [visible])
+
+  if (!visible || !t) return null
+  const load = Math.round((t.avgMs / 16.7) * 100)
+  return (
+    <div className={`debug-hud ${panelOpen ? 'shifted' : ''}`} aria-hidden="true">
+      <canvas ref={sparkRef} width={150} height={28} />
+      <div>
+        {t.fps.toFixed(0)} fps · {t.avgMs.toFixed(1)} ms · load {load}%
+      </div>
+      <div>worst {t.maxMs.toFixed(0)} ms</div>
+      <div>
+        {t.particles.toLocaleString()} particles · {t.effectors} fx
+      </div>
+      <div>{t.teleportsPerSec} teleports/s</div>
+    </div>
+  )
+}
+
 function GearButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   return (
     <button
@@ -223,6 +281,7 @@ export default function App() {
     <>
       <PartyBackground />
       <DemoDots settingsOpen={settingsOpen} onToggleSettings={() => setSettingsOpen((v) => !v)} />
+      <DebugHud panelOpen={settingsOpen} />
       {settingsOpen ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
       <header className="hero">
         <h1 className="sr-only">Bennett Vernon</h1>
