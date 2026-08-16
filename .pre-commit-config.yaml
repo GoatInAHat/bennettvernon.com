@@ -14,8 +14,8 @@ repos:
         always_run: true
         pass_filenames: false
       - id: trailing-whitespace
-        name: Reject trailing whitespace outside vendored skills
-        entry: bash -c '! git grep -nI -E "[[:blank:]]+$" -- . ":(exclude).agents/skills/**"'
+        name: Reject trailing whitespace outside vendored code
+        entry: bash -c '! git grep -nI -E "[[:blank:]]+$" -- . ":(exclude).agents/skills/**" ":(exclude)vendor/**"'
         language: system
         always_run: true
         pass_filenames: false

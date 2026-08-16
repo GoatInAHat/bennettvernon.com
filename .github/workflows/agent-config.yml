@@ -71,10 +71,10 @@ jobs:
               )
           PY
 
-      - name: Reject trailing whitespace outside vendored skills
+      - name: Reject trailing whitespace outside vendored code
         shell: bash
         run: |
-          if git grep -nI -E '[[:blank:]]+$' -- . ':(exclude).agents/skills/**'; then
+          if git grep -nI -E '[[:blank:]]+$' -- . ':(exclude).agents/skills/**' ':(exclude)vendor/**'; then
             echo "Tracked files contain trailing whitespace."
             exit 1
           fi
