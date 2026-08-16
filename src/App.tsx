@@ -43,14 +43,48 @@ interface GlitchState {
 }
 
 /** Hovered characters rapidly cycle through ASCII, slowing to a stop over
- * half a second once the cursor moves off them. */
+ * half a second once the cursor moves off them. Selection stays usable:
+ * glitches mutate the existing text node's data (never replacing nodes, so
+ * selection anchors survive), highlighted characters are restored at once and
+ * never re-glitch while selected (copy always yields the true text), and no
+ * glitch starts while the primary button is down (drag-selection sweeps
+ * across characters without scrambling them). */
 function useGlitchText() {
   useEffect(() => {
     const states = new WeakMap<HTMLElement, GlitchState>()
+    /** Spans with a glitch in flight (WeakMap alone can't be iterated). */
+    const active = new Set<HTMLElement>()
+    let dragging = false
     const randChar = () => String.fromCharCode(33 + Math.floor(Math.random() * 94))
+
+    // Same-length data writes on the existing Text node keep selection
+    // ranges anchored in this or any other span valid.
+    const setChar = (el: HTMLElement, c: string) => {
+      const tn = el.firstChild
+      if (tn?.nodeType === Node.TEXT_NODE) (tn as Text).data = c
+      else el.textContent = c
+    }
+
+    const stop = (el: HTMLElement, st: GlitchState) => {
+      window.clearTimeout(st.timer)
+      st.timer = 0
+      st.hovering = false
+      setChar(el, st.orig)
+      active.delete(el)
+    }
+
+    const isSelected = (el: HTMLElement) => {
+      const sel = document.getSelection()
+      return !!sel && !sel.isCollapsed && sel.containsNode(el, true)
+    }
 
     const run = (el: HTMLElement, st: GlitchState) => {
       const tick = () => {
+        // Highlighted characters must not change, visually or actually.
+        if (isSelected(el)) {
+          stop(el, st)
+          return
+        }
         // A missed pointerout (window blur, layout shifts) must never leave
         // a character cycling forever: trust the live :hover state.
         if (st.hovering && !el.matches(':hover')) {
@@ -58,24 +92,31 @@ function useGlitchText() {
           st.leftAt = Date.now()
         }
         if (st.hovering) {
-          el.textContent = randChar()
+          setChar(el, randChar())
           st.timer = window.setTimeout(tick, 100)
           return
         }
         const u = (Date.now() - st.leftAt) / 500
         if (u >= 1) {
-          el.textContent = st.orig
+          setChar(el, st.orig)
           st.timer = 0
+          active.delete(el)
           return
         }
-        el.textContent = randChar()
+        setChar(el, randChar())
         // Switching rate falls off smoothly over the half second.
         st.timer = window.setTimeout(tick, Math.min(400, 100 / (1 - u * u)))
       }
+      active.add(el)
       tick()
     }
 
     const onOver = (e: Event) => {
+      if (dragging) {
+        // Self-heal a button released outside the window (no pointerup fires).
+        if ((e as PointerEvent).buttons !== 0) return
+        dragging = false
+      }
       const el = (e.target as Element).closest?.('.g') as HTMLElement | null
       if (!el) return
       let st = states.get(el)
@@ -95,11 +136,34 @@ function useGlitchText() {
         st.leftAt = Date.now()
       }
     }
+    // The instant a selection covers a mid-glitch character, restore it —
+    // don't wait out its pending timer.
+    const onSelectionChange = () => {
+      const sel = document.getSelection()
+      if (!sel || sel.isCollapsed) return
+      for (const el of [...active]) {
+        if (sel.containsNode(el, true)) stop(el, states.get(el)!)
+      }
+    }
+    const onDown = (e: PointerEvent) => {
+      if (e.button === 0) dragging = true
+    }
+    const onUp = () => {
+      dragging = false
+    }
     document.addEventListener('pointerover', onOver)
     document.addEventListener('pointerout', onOut)
+    document.addEventListener('selectionchange', onSelectionChange)
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('pointerup', onUp)
+    document.addEventListener('pointercancel', onUp)
     return () => {
       document.removeEventListener('pointerover', onOver)
       document.removeEventListener('pointerout', onOut)
+      document.removeEventListener('selectionchange', onSelectionChange)
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('pointerup', onUp)
+      document.removeEventListener('pointercancel', onUp)
     }
   }, [])
 }
