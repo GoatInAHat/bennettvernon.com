@@ -10,6 +10,7 @@ import {
   ModuleRole,
   CPUDescriptor,
   DataType,
+  type VizGroup,
 } from "../../module";
 
 export const DEFAULT_INTERACTION_MODE: "attract" | "repel" = "attract";
@@ -76,6 +77,27 @@ export class Interaction extends Module<"interaction", InteractionInputs> {
   setPosition(x: number, y: number): void {
     this.write({ positionX: x, positionY: y });
   }
+  viz(): VizGroup[] {
+    const v = this.read();
+    if (!this.isEnabled() || !v.active) return [];
+    return [
+      {
+        key: `interaction:${v.mode === 1 ? "repel" : "attract"}`,
+        dynamic: true,
+        primitives: [
+          {
+            kind: "ring",
+            x: v.positionX ?? 0,
+            y: v.positionY ?? 0,
+            r0: 0,
+            r1: v.radius ?? 0,
+            intensity: v.strength ?? 1,
+          },
+        ],
+      },
+    ];
+  }
+
   setActive(active: boolean): void {
     this.write({ active: active ? 1 : 0 });
   }

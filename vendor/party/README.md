@@ -25,9 +25,23 @@ Every divergence from upstream is listed here.
   sibling arrays. Added `getCombinedArrayStorageCapacity()`.
 - `runtimes/webgpu/cell-census.ts` (new) + `interfaces.ts`,
   `engine.ts`, both runtime engines — `updateCellCensus()`: a persistent
-  compute pass (LocalQuery-style) that buckets in-disc particles into
-  caller-defined cells, with per-cell counts, bounded candidate-index
-  collection, and an outside reservoir. The readback is asynchronous and
-  double-checked against disposal; callers get the latest completed
-  result without ever stalling the pipeline. CPU runtime mirrors it
-  synchronously.
+  compute pass that buckets in-disc particles into caller-defined cells,
+  with per-cell counts, bounded candidate-index collection, and an
+  outside reservoir. The readback is asynchronous and double-checked
+  against disposal; callers get the latest completed result without ever
+  stalling the pipeline. CPU runtime mirrors it synchronously.
+- `EngineOptions.onFrame` — host per-frame hook called by both runtimes
+  before the simulation step, so host writes (uniform lerps, particle
+  edits) land in the same frame instead of racing a second rAF loop.
+- `module.ts` — debug-visualization contract (`VizPrimitive`,
+  `VizGroup`, optional `Module.viz()`): modules describe their own live
+  spatial influence so a generic viewer can render body geometry, range
+  limits, and falloff gradients for any physics without viewer changes.
+  `Interaction` implements it in-fork.
+- `gpu-resources.ts` — the initialize() failure path destroys a
+  partially-created GPUDevice instead of leaking it.
+- Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`
+  modules, `Spawner`, and `LocalQuery`/`getParticlesInRadius` (the cell
+  census replaced the site's only bounded-query use; the query API's
+  three serial full-queue-drain readbacks made it a per-call pipeline
+  stall anyway).

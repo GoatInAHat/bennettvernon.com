@@ -2,10 +2,7 @@ import {
   AbstractEngine,
   CellCensusConfig,
   CellCensusResult,
-  GetParticlesInRadiusOptions,
-  GetParticlesInRadiusResult,
   IParticle,
-  ParticleQuery,
 } from "../../interfaces";
 import {
   Module,
@@ -23,6 +20,7 @@ export class CPUEngine extends AbstractEngine {
   private canvas: HTMLCanvasElement;
   private grid: SpatialGrid;
   private animationId: number | null = null;
+  private destroyed: boolean = false;
   private particleIdToIndex: Map<number, number> = new Map();
 
   constructor(options: {
@@ -32,6 +30,7 @@ export class CPUEngine extends AbstractEngine {
     constrainIterations?: number;
     clearColor?: { r: number; g: number; b: number; a: number };
     cellSize?: number;
+    onFrame?: (dtSeconds: number) => void;
   }) {
     super(options);
     this.canvas = options.canvas;
@@ -161,51 +160,6 @@ export class CPUEngine extends AbstractEngine {
     return Promise.resolve(this.particles[index]);
   }
 
-  async getParticlesInRadius(
-    center: { x: number; y: number },
-    radius: number,
-    opts?: GetParticlesInRadiusOptions
-  ): Promise<GetParticlesInRadiusResult> {
-    const maxResults = Math.max(1, Math.floor(opts?.maxResults ?? 20000));
-
-    // Expand search radius to ensure we can find large particles whose discs
-    // intersect the query circle: dist <= radius + p.size.
-    const searchRadius = Math.max(0, radius) + this.getMaxSize();
-
-    // Use the existing spatial grid (built during the last simulation tick).
-    // Snapshot semantics: this is "as of last grid build" which is good enough
-    // for tool usage and avoids global scans.
-    const neighbors = this.grid.getParticles(
-      new Vector(center.x, center.y),
-      searchRadius,
-      // Ask for up to maxResults+1 so we can mark truncated more reliably.
-      maxResults + 1
-    );
-
-    const out: ParticleQuery[] = [];
-    const r = Math.max(0, radius);
-    for (const p of neighbors) {
-      if (p.mass === 0) continue;
-      const index = this.particleIdToIndex.get(p.id);
-      if (index === undefined) continue;
-      const dx = p.position.x - center.x;
-      const dy = p.position.y - center.y;
-      const rr = r + p.size;
-      if (dx * dx + dy * dy <= rr * rr) {
-        out.push({
-          index,
-          position: { x: p.position.x, y: p.position.y },
-          size: p.size,
-          mass: p.mass,
-        });
-        if (out.length >= maxResults + 1) break;
-      }
-    }
-
-    const truncated = out.length > maxResults;
-    return { particles: truncated ? out.slice(0, maxResults) : out, truncated };
-  }
-
   /** Synchronous mirror of the WebGPU cell census compute pass. */
   updateCellCensus(config: CellCensusConfig): CellCensusResult | null {
     const c = config.cellCount;
@@ -238,11 +192,20 @@ export class CPUEngine extends AbstractEngine {
         if (slot < m) outside[slot] = i;
       }
     }
-    return { counts, samples, samplesPerCell: k, outside, outsideCount };
+    return {
+      version: config.version,
+      counts,
+      samples,
+      samplesPerCell: k,
+      outside,
+      outsideCount,
+    };
   }
 
   destroy(): Promise<void> {
+    this.destroyed = true;
     this.pause();
+    this.stopAnimationLoop();
     this.particles = [];
     this.grid.clear();
     this.particleIdToIndex.clear();
@@ -274,8 +237,12 @@ export class CPUEngine extends AbstractEngine {
   }
 
   private animate = (): void => {
+    if (this.destroyed) return;
     const dt = this.getTimeDelta();
     this.updateFPS(dt);
+
+    // Host per-frame hook, before the physics step (parity with WebGPU).
+    this.onFrame?.(dt);
 
     if (this.playing) {
       // Update engine-owned oscillators before module updates

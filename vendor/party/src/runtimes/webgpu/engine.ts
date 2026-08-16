@@ -21,15 +21,12 @@ import {
   AbstractEngine,
   CellCensusConfig,
   CellCensusResult,
-  GetParticlesInRadiusOptions,
-  GetParticlesInRadiusResult,
   IParticle,
 } from "../../interfaces";
 import { ModuleRegistry } from "./module-registry";
 import { SpacialGrid } from "./spacial-grid";
 import { SimulationPipeline } from "./simulation-pipeline";
 import { RenderPipeline } from "./render-pipeline";
-import { LocalQuery } from "./local-query";
 import { CellCensus } from "./cell-census";
 
 export class WebGPUEngine extends AbstractEngine {
@@ -45,8 +42,8 @@ export class WebGPUEngine extends AbstractEngine {
   private shouldSyncNextTick: boolean = false;
   private animationId: number | null = null;
   private didSwapchainWarmup: boolean = false;
+  private destroyed: boolean = false;
 
-  private localQuery: LocalQuery;
   private cellCensus: CellCensus;
 
   constructor(options: {
@@ -59,6 +56,7 @@ export class WebGPUEngine extends AbstractEngine {
     maxParticles?: number;
     workgroupSize?: number;
     maxNeighbors?: number;
+    onFrame?: (dtSeconds: number) => void;
   }) {
     super({
       ...options,
@@ -75,7 +73,6 @@ export class WebGPUEngine extends AbstractEngine {
     this.sim = new SimulationPipeline();
     this.render = new RenderPipeline();
     this.grid = new SpacialGrid(this.cellSize);
-    this.localQuery = new LocalQuery();
     this.cellCensus = new CellCensus();
   }
 
@@ -142,13 +139,13 @@ export class WebGPUEngine extends AbstractEngine {
   }
 
   async destroy(): Promise<void> {
+    this.destroyed = true;
     this.pause();
     // Stop animation loop to prevent using destroyed resources
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
     }
-    this.localQuery.dispose();
     this.cellCensus.dispose();
     await this.resources.dispose();
   }
@@ -220,20 +217,6 @@ export class WebGPUEngine extends AbstractEngine {
     return this.particles.getParticle(index);
   }
 
-  async getParticlesInRadius(
-    center: { x: number; y: number },
-    radius: number,
-    opts?: GetParticlesInRadiusOptions
-  ): Promise<GetParticlesInRadiusResult> {
-    return await this.localQuery.getParticlesInRadius(
-      this.resources,
-      center,
-      radius,
-      this.getCount(),
-      opts
-    );
-  }
-
   getCount(): number {
     const actualCount = this.particles.getCount();
     if (this.maxParticles === null) {
@@ -257,8 +240,15 @@ export class WebGPUEngine extends AbstractEngine {
   }
 
   private animate = async (): Promise<void> => {
+    // An in-flight async invocation must not reschedule itself after
+    // destroy() cancelled the pending frame, or a zombie loop survives.
+    if (this.destroyed) return;
     const dt = this.getTimeDelta();
     this.updateFPS(dt);
+
+    // Host per-frame hook: runs before uniforms/simulation are encoded so
+    // host writes apply to this frame.
+    this.onFrame?.(dt);
 
     // Write view uniforms
     const snapshot = this.view.getSnapshot();

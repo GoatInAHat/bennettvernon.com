@@ -24,6 +24,68 @@ export enum DataType {
   ARRAY = "array",
 }
 
+/**
+ * Debug-visualization contract. A module can describe its live spatial
+ * influence as geometric primitives in world units; a generic debug viewer
+ * renders every module that implements `viz()` — the body geometry, the
+ * range limit, and the falloff gradient between them — so new physics never
+ * requires viewer changes. `intensity` values are relative within a group
+ * (the viewer normalizes); group `key`s drive deterministic coloring.
+ */
+export type VizPrimitive =
+  | {
+      kind: "ring";
+      x: number;
+      y: number;
+      /** Body radius (0 for a point source) and range-limit radius. */
+      r0: number;
+      r1: number;
+      intensity: number;
+    }
+  | {
+      kind: "capsule";
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      range: number;
+      /** Intensity at each endpoint (interpolated along the segment). */
+      i1: number;
+      i2: number;
+    }
+  | {
+      kind: "rectRing";
+      x: number;
+      y: number;
+      hw: number;
+      hh: number;
+      range: number;
+      intensity: number;
+    }
+  | {
+      kind: "field";
+      originX: number;
+      originY: number;
+      cell: number;
+      cols: number;
+      rows: number;
+      /** Scalar samples (row-major) starting at `valuesStart`. */
+      values: ArrayLike<number>;
+      valuesStart: number;
+      /** Body isoline (full force inside) and range-limit isoline values. */
+      inner: number;
+      outer: number;
+      intensity: number;
+    };
+
+export interface VizGroup {
+  /** Stable identity used for deterministic coloring. */
+  key: string;
+  /** True when the group changes every frame (viewers skip static caches). */
+  dynamic?: boolean;
+  primitives: VizPrimitive[];
+}
+
 export abstract class Module<
   Name extends string = string,
   Inputs extends Record<string, number | number[]> = Record<
@@ -108,6 +170,10 @@ export abstract class Module<
 
   abstract webgpu(): WebGPUDescriptor<Inputs, StateKeys>;
   abstract cpu(): CPUDescriptor<Inputs, StateKeys>;
+
+  /** Optional: describe this module's live spatial influence for debug
+   * viewers. See {@link VizGroup}. */
+  viz?(): VizGroup[];
 }
 
 export interface WebGPUForceDescriptor<

@@ -233,12 +233,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const c = config.cellCount;
       const k = config.samplesPerCell;
       const m = config.outsideSamples;
+      const version = config.version;
       staging
         .mapAsync(GPUMapMode.READ)
         .then(() => {
           if (staging !== this.staging) return; // disposed/reshaped meanwhile
           const view = new Uint32Array(staging.getMappedRange());
           this.latest = {
+            version,
             counts: view.slice(1, 1 + c),
             samples: view.slice(1 + c, 1 + c + c * k),
             samplesPerCell: k,

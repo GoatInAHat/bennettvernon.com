@@ -3,8 +3,6 @@ import {
   IParticle,
   CellCensusConfig,
   CellCensusResult,
-  GetParticlesInRadiusOptions,
-  GetParticlesInRadiusResult,
 } from "./interfaces";
 import { Module } from "./module";
 import { WebGPUEngine } from "./runtimes/webgpu/engine";
@@ -21,6 +19,8 @@ export type EngineOptions = {
   maxParticles?: number;
   workgroupSize?: number;
   maxNeighbors?: number;
+  /** Called once per animation frame before the simulation step. */
+  onFrame?: (dtSeconds: number) => void;
 };
 
 export class Engine implements IEngine {
@@ -230,13 +230,6 @@ export class Engine implements IEngine {
   }
   getParticle(index: number): Promise<IParticle> {
     return this.engine.getParticle(index);
-  }
-  getParticlesInRadius(
-    center: { x: number; y: number },
-    radius: number,
-    opts?: GetParticlesInRadiusOptions
-  ): Promise<GetParticlesInRadiusResult> {
-    return this.engine.getParticlesInRadius(center, radius, opts);
   }
   updateCellCensus(config: CellCensusConfig): CellCensusResult | null {
     return this.engine.updateCellCensus(config);

@@ -15,22 +15,6 @@ export interface IParticle {
   };
 }
 
-export type ParticleQuery = {
-  index: number;
-  position: { x: number; y: number };
-  size: number;
-  mass: number;
-};
-
-export type GetParticlesInRadiusOptions = {
-  maxResults?: number;
-};
-
-export type GetParticlesInRadiusResult = {
-  particles: ParticleQuery[];
-  truncated: boolean;
-};
-
 /**
  * Configuration for the cell census: classifies particles inside a
  * world-space disc into caller-defined cells via a coarse lookup grid.
@@ -58,6 +42,9 @@ export interface CellCensusConfig {
 }
 
 export type CellCensusResult = {
+  /** The config `version` this census was dispatched against; callers that
+   * rebuilt their cells since should discard mismatching results. */
+  version: number;
   /** Live particles found per cell (uncapped). */
   counts: Uint32Array;
   /** samplesPerCell indices per cell; valid up to min(count, samplesPerCell). */
@@ -96,18 +83,6 @@ export interface IEngine {
   setParticles(p: IParticle[]): void;
   getParticles(): Promise<IParticle[]>;
   getParticle(index: number): Promise<IParticle>;
-  /**
-   * Fetch particles near a region for local occupancy queries (Brush/Pin/Remove tools).
-   * Implementations should avoid full-scene GPU->CPU readbacks when possible.
-   *
-   * Semantics: returns particles whose discs intersect the query circle, i.e.
-   * `distance(center, p.position) <= radius + p.size`.
-   */
-  getParticlesInRadius(
-    center: { x: number; y: number },
-    radius: number,
-    opts?: GetParticlesInRadiusOptions
-  ): Promise<GetParticlesInRadiusResult>;
   /**
    * Per-frame cell occupancy census. Never stalls: on WebGPU the scan runs
    * as a compute pass with an asynchronous readback and the latest completed
@@ -210,6 +185,10 @@ export abstract class AbstractEngine implements IEngine {
   protected modules: Module[];
   protected maxSize: number = 0;
   protected oscillatorManager: OscillatorManager;
+  /** Host callback invoked once per animation frame, before the simulation
+   * step, so host-side writes (uniforms, particle edits) land in the same
+   * frame. Runs even while paused (rendering continues while paused). */
+  protected onFrame?: (dtSeconds: number) => void;
 
   constructor(options: {
     canvas: HTMLCanvasElement;
@@ -219,6 +198,7 @@ export abstract class AbstractEngine implements IEngine {
     clearColor?: { r: number; g: number; b: number; a: number };
     cellSize?: number;
     maxNeighbors?: number;
+    onFrame?: (dtSeconds: number) => void;
   }) {
     this.view = new View(options.canvas.width, options.canvas.height);
     this.modules = [...options.forces, ...options.render];
@@ -226,6 +206,7 @@ export abstract class AbstractEngine implements IEngine {
     this.clearColor = options.clearColor ?? { r: 0, g: 0, b: 0, a: 1 };
     this.cellSize = options.cellSize ?? 16;
     this.maxNeighbors = options.maxNeighbors ?? 100;
+    this.onFrame = options.onFrame;
     // Initialize oscillator manager with a setter bound to module input writes
     this.oscillatorManager = new OscillatorManager(
       (moduleName: string, inputName: string, value: number) => {
@@ -250,11 +231,6 @@ export abstract class AbstractEngine implements IEngine {
   abstract setParticles(p: IParticle[]): void;
   abstract getParticles(): Promise<IParticle[]>;
   abstract getParticle(index: number): Promise<IParticle>;
-  abstract getParticlesInRadius(
-    center: { x: number; y: number },
-    radius: number,
-    opts?: GetParticlesInRadiusOptions
-  ): Promise<GetParticlesInRadiusResult>;
   abstract updateCellCensus(config: CellCensusConfig): CellCensusResult | null;
   abstract clear(): void;
   abstract getCount(): number;
