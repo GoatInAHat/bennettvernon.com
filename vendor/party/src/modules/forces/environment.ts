@@ -213,25 +213,18 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
       )};
   }
 
-  // Inertia: acceleration += velocity * inertia. A rate in 1/s, the exact
-  // negation of friction below; the integrator supplies the dt.
-  let inertia = ${getUniform("inertia")};
-  if (inertia > 0.0) {
-    ${particleVar}.acceleration += ${particleVar}.velocity * inertia;
-  }
-
-  // Friction: acceleration += -velocity * friction
-  let friction = ${getUniform("friction")};
-  if (friction > 0.0) {
-    ${particleVar}.acceleration += -${particleVar}.velocity * friction;
-  }
-
-  // Damping: exponential velocity decay, in units of per second. exp() is the
-  // only form that composes exactly — two half-steps equal one whole step —
-  // so the decay per second is identical at any frame rate.
-  let damping = ${getUniform("damping")};
-  if (damping != 0.0) {
-    ${particleVar}.velocity *= exp(-damping * (${dtVar}));
+  // Inertia, friction, and damping are all velocity rates in 1/s: inertia
+  // grows speed, friction and damping shed it. They compose into a single
+  // exponential because exp(a*dt)*exp(b*dt) == exp((a+b)*dt), and exp is the
+  // only form that is exact under any dt — two half-steps equal one whole
+  // step — so the per-second result is identical at every frame rate.
+  // Inertia and friction keep their upstream positive-only gates; damping
+  // stays signed.
+  let rate = max(${getUniform("inertia")}, 0.0)
+    - max(${getUniform("friction")}, 0.0)
+    - ${getUniform("damping")};
+  if (rate != 0.0) {
+    ${particleVar}.velocity *= exp(rate * (${dtVar}));
   }
 `,
     };
@@ -263,27 +256,19 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
           particle.acceleration.add(gravityForce);
         }
 
-        // Inertia: acceleration += velocity * inertia. A rate in 1/s, the exact
-        // negation of friction below; the integrator supplies the dt.
-        const inertia = input.inertia;
-        if (inertia > 0) {
-          const inertiaForce = particle.velocity.clone().multiply(inertia);
-          particle.acceleration.add(inertiaForce);
-        }
-
-        // Friction: acceleration += -velocity * friction
-        const friction = input.friction;
-        if (friction > 0) {
-          const frictionForce = particle.velocity.clone().multiply(-friction);
-          particle.acceleration.add(frictionForce);
-        }
-
-        // Damping: exponential velocity decay at `damping` per second. exp() is
-        // the only form that composes exactly — two half-steps equal one whole
-        // step — so the decay per second is identical at any frame rate.
-        const damping = input.damping;
-        if (damping !== 0) {
-          particle.velocity.multiply(Math.exp(-damping * dt));
+        // Inertia, friction, and damping are all velocity rates in 1/s:
+        // inertia grows speed, friction and damping shed it. They compose into
+        // a single exponential because exp(a*dt)*exp(b*dt) == exp((a+b)*dt),
+        // and exp is the only form that is exact under any dt — two half-steps
+        // equal one whole step — so the per-second result is identical at every
+        // frame rate. Inertia and friction keep their upstream positive-only
+        // gates; damping stays signed.
+        const rate =
+          Math.max(input.inertia, 0) -
+          Math.max(input.friction, 0) -
+          input.damping;
+        if (rate !== 0) {
+          particle.velocity.multiply(Math.exp(rate * dt));
         }
       },
     };

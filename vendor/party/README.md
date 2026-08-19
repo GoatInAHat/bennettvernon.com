@@ -65,11 +65,19 @@ Every divergence from upstream is listed here.
   24 and 240 Hz. Damping is now `exp(-damping * dt)`: the exponential is the
   only form that composes exactly, so two half-steps equal one whole step and
   the per-second decay is identical at any rate, with no reference frame rate
-  in the math and no NaN domain to guard. Inertia dropped its `dt` factor
-  (`velocity * inertia`), which the integrator scaled by dt a second time,
-  making it weaker the faster the display; it is now the exact negation of
-  friction. Both changed units, so `SettingsPanel` retunes their ranges —
-  every demo preset has inertia and damping at 0, so nothing else moves.
+  in the math and no NaN domain to guard. Inertia dropped its `dt` factor,
+  which the integrator scaled by dt a second time, making it weaker the
+  faster the display ran. All three of inertia, friction, and damping are
+  velocity rates in 1/s that differ only in sign, so they now compose into
+  one `exp(rate * dt)` — `exp(a*dt)*exp(b*dt) == exp((a+b)*dt)` — which is
+  exact at every frame rate rather than the first-order approximation
+  upstream got by routing friction and inertia through acceleration (a ~1.9%
+  drift across 24..240 Hz). Inertia and friction keep their positive-only
+  gates; damping stays signed. Friction consequently moves out of
+  acceleration into velocity space, so it no longer shares an integration
+  step with gravity; terminal velocity converges to the same g/friction.
+  All three changed units, so `SettingsPanel` retunes their ranges — every
+  demo preset has inertia, friction, and damping at 0, so nothing moves.
 - Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`,
   `Interaction` modules, `Spawner`, `LocalQuery`/`getParticlesInRadius`
   (the cell census replaced the site's only bounded-query use; the query
