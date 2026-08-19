@@ -24,9 +24,12 @@ interface SliderDef<K> {
 // with headroom. Angles are radians.
 const MODE_SLIDERS: SliderDef<ModeSettingKey>[] = [
   { group: 'environment', key: 'gravity', label: 'gravity', min: 0, max: 4000, step: 50 },
-  { group: 'environment', key: 'inertia', label: 'inertia', min: 0, max: 100, step: 1 },
+  // inertia/friction/damping are all velocity rates in 1/s. friction and
+  // inertia are integrated explicitly so they must stay small to be stable;
+  // damping is an exact exponential, so it can safely run much higher.
+  { group: 'environment', key: 'inertia', label: 'inertia', min: 0, max: 2, step: 0.01 },
   { group: 'environment', key: 'envFriction', label: 'friction', min: 0, max: 2, step: 0.01 },
-  { group: 'environment', key: 'damping', label: 'damping', min: 0, max: 1, step: 0.01 },
+  { group: 'environment', key: 'damping', label: 'damping', min: 0, max: 20, step: 0.1 },
   { group: 'boundary', key: 'restitution', label: 'restitution', min: 0, max: 1, step: 0.05 },
   { group: 'boundary', key: 'boundaryFriction', label: 'friction', min: 0, max: 1, step: 0.05 },
   { group: 'collisions', key: 'collisionRestitution', label: 'restitution', min: 0, max: 1, step: 0.05 },

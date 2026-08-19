@@ -213,10 +213,11 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
       )};
   }
 
-  // Inertia: acceleration += velocity * dt * inertia
+  // Inertia: acceleration += velocity * inertia. A rate in 1/s, the exact
+  // negation of friction below; the integrator supplies the dt.
   let inertia = ${getUniform("inertia")};
   if (inertia > 0.0) {
-    ${particleVar}.acceleration += ${particleVar}.velocity * (${dtVar}) * inertia;
+    ${particleVar}.acceleration += ${particleVar}.velocity * inertia;
   }
 
   // Friction: acceleration += -velocity * friction
@@ -225,10 +226,12 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
     ${particleVar}.acceleration += -${particleVar}.velocity * friction;
   }
 
-  // Damping: directly scale velocity (post-force effect in CPU code)
+  // Damping: exponential velocity decay, in units of per second. exp() is the
+  // only form that composes exactly — two half-steps equal one whole step —
+  // so the decay per second is identical at any frame rate.
   let damping = ${getUniform("damping")};
   if (damping != 0.0) {
-    ${particleVar}.velocity *= (1.0 - damping * 0.2);
+    ${particleVar}.velocity *= exp(-damping * (${dtVar}));
   }
 `,
     };
@@ -260,10 +263,11 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
           particle.acceleration.add(gravityForce);
         }
 
-        // Inertia: acceleration += velocity * dt * inertia
+        // Inertia: acceleration += velocity * inertia. A rate in 1/s, the exact
+        // negation of friction below; the integrator supplies the dt.
         const inertia = input.inertia;
         if (inertia > 0) {
-          const inertiaForce = particle.velocity.clone().multiply(dt * inertia);
+          const inertiaForce = particle.velocity.clone().multiply(inertia);
           particle.acceleration.add(inertiaForce);
         }
 
@@ -274,10 +278,12 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
           particle.acceleration.add(frictionForce);
         }
 
-        // Damping: directly scale velocity (post-force effect in CPU code)
+        // Damping: exponential velocity decay at `damping` per second. exp() is
+        // the only form that composes exactly — two half-steps equal one whole
+        // step — so the decay per second is identical at any frame rate.
         const damping = input.damping;
         if (damping !== 0) {
-          particle.velocity.multiply(1 - damping * 0.2);
+          particle.velocity.multiply(Math.exp(-damping * dt));
         }
       },
     };

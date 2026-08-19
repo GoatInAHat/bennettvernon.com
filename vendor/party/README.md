@@ -58,6 +58,18 @@ Every divergence from upstream is listed here.
   with a single GPU buffer upload (per-index `setParticle` costs one
   `writeBuffer` each; the host respawns hundreds of revealed particles per
   frame while a rising particle budget animates).
+- `modules/forces/environment.ts` — inertia and damping are frame-rate
+  independent, and both are now rates in 1/s. Upstream damped velocity once
+  per frame (`v *= 1 - damping * 0.2`), so a 120 Hz display damped twice as
+  hard per second as 60 Hz — a 8.6e20 spread in one second of decay between
+  24 and 240 Hz. Damping is now `exp(-damping * dt)`: the exponential is the
+  only form that composes exactly, so two half-steps equal one whole step and
+  the per-second decay is identical at any rate, with no reference frame rate
+  in the math and no NaN domain to guard. Inertia dropped its `dt` factor
+  (`velocity * inertia`), which the integrator scaled by dt a second time,
+  making it weaker the faster the display; it is now the exact negation of
+  friction. Both changed units, so `SettingsPanel` retunes their ranges —
+  every demo preset has inertia and damping at 0, so nothing else moves.
 - Deleted upstream code this site never uses: `Joints`, `Grab`, `Lines`,
   `Interaction` modules, `Spawner`, `LocalQuery`/`getParticlesInRadius`
   (the cell census replaced the site's only bounded-query use; the query
