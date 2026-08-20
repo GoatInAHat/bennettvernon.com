@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "dev server",
+      "type": "npm",
+      "script": "dev",
+      "isBackground": true,
+      "presentation": {
+        "reveal": "silent"
+      },
+      "problemMatcher": {
+        "owner": "vite",
+        "source": "vite",
+        "fileLocation": "absolute",
+        "pattern": {
+          "regexp": "\\[vite\\] (?:Internal server error|Error): (.+?): (.*)$",
+          "kind": "file",
+          "file": 1,
+          "message": 2
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "VITE v",
+          "endsPattern": "(Local:|ready in)"
+        }
+      }
+    }
+  ]
+}
