@@ -116,11 +116,14 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameWeight: 700,
   nameDensity: 1000,
   nameDensityRes: 36,
-  // Mean particles per name cell above which the surplus is evicted. 0 is
-  // off. The name's natural equilibrium under the current pulls is a few
-  // hundred per cell, so a cap below that evicts continuously rather than
-  // settling -- which is a real choice, not a misconfiguration.
-  maxNameDensity: 0,
+  // The other end of `nameDensity`: that is the fewest particles the name is
+  // allowed to hold, this is the most. Same units -- a total across the whole
+  // name -- so the pair reads as one quantity's two bounds. 0 lifts the cap.
+  // Set above the ~21k the pulls settle at on their own, so the name keeps
+  // the density it has always had and this stays a real ceiling for the
+  // cases that would otherwise overpack it -- a stronger pull, a denser
+  // mode, a smaller name. Lower it to deliberately thin the letters out.
+  maxNameDensity: 24_000,
   nameBaseOpacity: 0.05,
   nameDensityOpacity: 0.35,
   opacityDamping: 0.85,
@@ -129,12 +132,22 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
 // Name-density enforcement runs off the engine's cell census: a per-frame
 // GPU compute pass with an asynchronous readback, so it never stalls the
 // pipeline. Corrections apply whenever a fresh census lands (~every frame).
-/** Donor candidates collected per cell per census. This bounds how many
- * particles the letter balancer can move in one round, and the pulls re-skew
- * the distribution every frame, so too small a budget leaves the letters
- * permanently uneven no matter how long it runs. */
-const CENSUS_SAMPLES_PER_CELL = 192
-const CENSUS_OUTSIDE_SAMPLES = 512
+/**
+ * Donor candidates collected per cell per census. This is the hard ceiling on
+ * how many particles one round can move OUT of a cell, so it has to cover the
+ * largest surplus any cell can present in a frame or enforcement never
+ * finishes its work and the letters stay permanently uneven. Sized well above
+ * the per-cell population the cap allows, so in practice every move a round
+ * asks for is a move it can make.
+ */
+const CENSUS_SAMPLES_PER_CELL = 1024
+/**
+ * Candidates collected from outside the name per census. This is the ceiling
+ * on how many particles one round can pull IN, so like the per-cell budget it
+ * has to cover the largest deficit a frame can present -- otherwise topping
+ * the name up to `name density` stalls partway and never finishes.
+ */
+const CENSUS_OUTSIDE_SAMPLES = 8192
 /** Distance-field raster resolution in page px per cell. */
 const FIELD_CELL_PX = 3
 /**
@@ -381,6 +394,10 @@ export function PartyBackground() {
       fromCells: 0,
       fromOutside: 0,
       evicted: 0,
+      /** Moves a round asked for but could not make, because the cell had no
+       * uncollected census candidate left. Non-zero means the sample budget
+       * is binding and enforcement is falling behind the field. */
+      unmet: 0,
       lastCounts: [] as number[],
     }
     let censusCells: Int32Array | null = null
@@ -1637,29 +1654,37 @@ export function PartyBackground() {
         : Array.from(res.counts)
       pendingDelta1 = new Array<number>(voroSeeds.length).fill(0)
       densityStats.lastCounts = counts.slice()
-      // Equal totals per LETTER, not per cell. Two things follow from that.
-      // Cells are equal-area, so a flat per-cell target hands a wide M more
-      // particles than a narrow I -- each letter is instead owed the same
-      // share, split evenly across the cells that make it up. And the share
-      // is measured against how many particles are actually in the name right
-      // now, not against the configured minimum: the pulls park far more
-      // there than the minimum ever asks for, so a floor alone never engages
-      // and the letters keep whatever uneven population the field gave them.
-      // Targeting the live mean makes over-full letters donate to under-full
-      // ones, which is what levels them.
+      // One rule sets every target, and the three knobs are its three cases.
+      //
+      //   how many the name holds = clamp(what it holds now, min, max)
+      //
+      // Below `name density` the name is topped up from outside, which is
+      // what that setting has always meant. Above `max name density` the
+      // surplus is sent back out. In between, the population is whatever the
+      // pulls delivered and the only work is redistribution. Both bounds are
+      // TOTALS across the name, the same units `name density` has always
+      // used, so the pair reads as the two ends of one quantity.
+      //
+      // That total is then split equally per LETTER, not per cell: cells are
+      // equal-area, so a flat per-cell share hands a wide M more particles
+      // than a narrow I.
       const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
       for (let i = 0; i < cellLetter.length; i++) {
         if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
       }
       let inNameNow = 0
       for (let i = 0; i < counts.length; i++) inNameNow += counts[i]
-      const shareTotal = Math.max(totalMin, inNameNow)
+      const capTotal =
+        globals.maxNameDensity > 0 ? Math.max(totalMin, globals.maxNameDensity) : Infinity
+      const shareTotal = Math.min(Math.max(inNameNow, totalMin), capTotal)
       const perLetter = letterCount > 0 ? shareTotal / letterCount : 0
       const cellTarget = new Int32Array(voroSeeds.length)
       for (let i = 0; i < cellTarget.length; i++) {
         const li = i < cellLetter.length ? cellLetter[i] : -1
         cellTarget[i] =
-          li >= 0 && cellsPerLetter[li] > 0 ? Math.round(perLetter / cellsPerLetter[li]) : perCell
+          li >= 0 && cellsPerLetter[li] > 0
+            ? Math.round(perLetter / cellsPerLetter[li])
+            : Math.round(shareTotal / counts.length)
       }
       const used = new Uint32Array(counts.length) // sample cursor per cell
       let outsideUsed = 0
@@ -1764,6 +1789,7 @@ export function PartyBackground() {
           pendingDelta1[ci]++
           need--
         }
+        if (need > 0) densityStats.unmet += need
       }
 
       // Cap the name's mean occupancy. Once the average cell holds more than
@@ -1774,22 +1800,26 @@ export function PartyBackground() {
       // in empty space. Those positions ride along in the census readback;
       // asking the engine for a position instead would sync the whole
       // particle buffer back off the GPU every frame.
-      const maxMean = globals.maxNameDensity
-      if (maxMean > 0 && counts.length > 0) {
-        let inName = 0
-        for (let i = 0; i < counts.length; i++) inName += counts[i]
-        let excess = inName - Math.round(maxMean * counts.length)
+      // Whatever the cap trimmed off the target has to leave the name
+      // entirely -- the refill above can only shuffle between cells, and when
+      // every cell is over target there is nowhere inside to shuffle to.
+      // Most-over-target first, so the name levels on the way down, and each
+      // one lands on a particle that is already outside so it rejoins the
+      // field where the field is rather than in empty space.
+      {
+        let excess = inNameNow - Math.round(shareTotal)
         const posAvail = Math.min(res.outsideCount, res.outside.length, res.outsidePos.length >> 1)
         while (excess > 0 && posAvail > 0) {
           let densest = -1
-          let densestCount = 0
+          let bestSurplus = 0
           for (let i = 0; i < counts.length; i++) {
-            if (counts[i] > densestCount && used[i] < Math.min(res.counts[i], k)) {
-              densestCount = counts[i]
+            const surplus = counts[i] - cellTarget[i]
+            if (surplus > bestSurplus && used[i] < Math.min(res.counts[i], k)) {
+              bestSurplus = surplus
               densest = i
             }
           }
-          if (densest < 0) break // no cell has uncollected candidates left
+          if (densest < 0) break
           let donor = -1
           const avail = Math.min(res.counts[densest], k)
           while (used[densest] < avail) {
@@ -1799,7 +1829,7 @@ export function PartyBackground() {
               break
             }
           }
-          if (donor < 0) continue // cursor exhausted; rescan
+          if (donor < 0) continue
           const j = Math.floor(Math.random() * posAvail)
           recentlyMoved.set(donor, densityRound)
           engine.setParticle(donor, {
@@ -1815,6 +1845,7 @@ export function PartyBackground() {
           pendingDelta1[densest]--
           excess--
         }
+        if (excess > 0) densityStats.unmet += excess
       }
 
       // Density-weighted name opacity targets: the densest cell pins the
