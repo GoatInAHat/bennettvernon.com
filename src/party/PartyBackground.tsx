@@ -407,9 +407,6 @@ export function PartyBackground() {
        * uncollected census candidate left. Non-zero means the sample budget
        * is binding and enforcement is falling behind the field. */
       unmet: 0,
-      /** Destinations rejected because the census position they came from is
-       * no longer where that particle is. */
-      staleDest: 0,
       lastCounts: [] as number[],
     }
     let censusCells: Int32Array | null = null
@@ -1657,9 +1654,17 @@ export function PartyBackground() {
       // TOTALS across the name, the same units `name density` has always
       // used, so the pair reads as the two ends of one quantity.
       //
-      // That total is then split equally per LETTER, not per cell: cells are
-      // equal-area, so a flat per-cell share hands a wide M more particles
-      // than a narrow I.
+      // That total is spread at EQUAL DENSITY. The Voronoi cells are built
+      // equal-area, so equal density is simply an equal count in every cell,
+      // and each letter ends up holding particles in proportion to its own
+      // ink area -- a B more than a T, because a B is more letter.
+      //
+      // The alternative, an equal COUNT per letter, was measured and does not
+      // survive contact with the field: the smallest letter is a single cell
+      // of 124 glyph pixels, so an equal share works out at 13.9 particles
+      // per pixel against a median achieved density of 5.14. Those particles
+      // were teleported in and immediately bled back out, every frame, and
+      // the letter still sat 897 short.
       const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
       for (let i = 0; i < cellLetter.length; i++) {
         if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
@@ -1669,32 +1674,13 @@ export function PartyBackground() {
       const capTotal =
         globals.maxNameDensity > 0 ? Math.max(totalMin, globals.maxNameDensity) : Infinity
       const shareTotal = Math.min(Math.max(inNameNow, totalMin), capTotal)
-      const perLetter = letterCount > 0 ? shareTotal / letterCount : 0
-      const cellTarget = new Int32Array(voroSeeds.length)
-      for (let i = 0; i < cellTarget.length; i++) {
-        const li = i < cellLetter.length ? cellLetter[i] : -1
-        cellTarget[i] =
-          li >= 0 && cellsPerLetter[li] > 0
-            ? Math.round(perLetter / cellsPerLetter[li])
-            : Math.round(shareTotal / counts.length)
-      }
+      const perCellShare = Math.round(shareTotal / Math.max(1, counts.length))
+      const cellTarget = new Int32Array(voroSeeds.length).fill(perCellShare)
       densityStats.lastTargets = Array.from(cellTarget)
       densityStats.lastCellLetter = Array.from(cellLetter)
       densityStats.lastCellsPerLetter = Array.from(cellsPerLetter)
       densityStats.lastShareTotal = Math.round(shareTotal)
       densityStats.lastInName = inNameNow
-      // Which cell a world position falls in RIGHT NOW. The census records
-      // where particles were one or two rounds ago, so a recorded position is
-      // not evidence of where that particle is today -- and a destination
-      // taken from one lands wherever the field has since carried it.
-      const cellAtWorld = (wx: number, wy: number) => {
-        const g = glyphGrid
-        if (!g) return -1
-        const gx = Math.floor((wx * zoom - g.minX) / g.step)
-        const gy = Math.floor((wy * zoom - g.minY) / g.step)
-        if (gx < 0 || gy < 0 || gx >= g.cols || gy >= g.rows) return -1
-        return g.cellOf[gy * g.cols + gx]
-      }
       const used = new Uint32Array(counts.length) // sample cursor per cell
       let outsideUsed = 0
       const outsideAvail = Math.min(res.outsideCount, res.outside.length)
@@ -1766,18 +1752,14 @@ export function PartyBackground() {
           // to a random glyph pixel.
           const occupied = Math.min(res.counts[ci], k)
           let dest: { x: number; y: number } | null = null
-          // Land on a particle already in the cell -- but only if it is STILL
-          // in the cell. Crediting a stale position as an arrival is what let
-          // cells sit under target forever while the bookkeeping read full.
-          for (let tries = 0; tries < 8 && occupied > 0; tries++) {
+          // Land on a particle the census saw in this cell. Its recorded
+          // position cannot be re-validated here: any check would classify
+          // that position with the same partition the census used, so it
+          // would agree by construction. The position is one or two frames
+          // old and is accepted as such.
+          if (occupied > 0) {
             const si = ci * k + Math.floor(Math.random() * occupied)
-            const wx = res.samplePos[si * 2]
-            const wy = res.samplePos[si * 2 + 1]
-            if (cellAtWorld(wx, wy) === ci) {
-              dest = { x: wx, y: wy }
-              break
-            }
-            densityStats.staleDest++
+            dest = { x: res.samplePos[si * 2], y: res.samplePos[si * 2 + 1] }
           }
           if (!dest) {
             // Jitter stays within one glyph pixel so the next census still
@@ -1817,7 +1799,13 @@ export function PartyBackground() {
       // one lands on a particle that is already outside so it rejoins the
       // field where the field is rather than in empty space.
       {
-        let excess = inNameNow - Math.round(shareTotal)
+        // Re-total AFTER the refill: that loop may have imported particles
+        // from outside, and sizing the eviction from the pre-refill total
+        // under-evicts by exactly that many, so the name settles above the
+        // cap and never reaches it.
+        let inNameAfterRefill = 0
+        for (let i = 0; i < counts.length; i++) inNameAfterRefill += counts[i]
+        let excess = inNameAfterRefill - Math.round(shareTotal)
         const posAvail = Math.min(res.outsideCount, res.outside.length, res.outsidePos.length >> 1)
         while (excess > 0 && posAvail > 0) {
           // Densest cell first, by population -- cells are equal-area, so the
@@ -1847,23 +1835,15 @@ export function PartyBackground() {
             }
           }
           if (donor < 0) continue
-          // Same staleness applies here: a recorded outside particle may have
-          // drifted into the name since, and evicting onto it would put the
-          // particle straight back where it came from.
-          let ex = 0
-          let ey = 0
-          let found = false
-          for (let tries = 0; tries < 8; tries++) {
-            const j = Math.floor(Math.random() * posAvail)
-            ex = res.outsidePos[j * 2]
-            ey = res.outsidePos[j * 2 + 1]
-            if (cellAtWorld(ex, ey) < 0) {
-              found = true
-              break
-            }
-            densityStats.staleDest++
-          }
-          if (!found) break
+          // Only draw from reservoir entries this round has not already
+          // consumed as refill donors: those particles were just teleported
+          // INTO the name, so evicting onto them would put this one straight
+          // back where it came from.
+          const pool = posAvail - outsideUsed
+          if (pool <= 0) break
+          const j = outsideUsed + Math.floor(Math.random() * pool)
+          const ex = res.outsidePos[j * 2]
+          const ey = res.outsidePos[j * 2 + 1]
           recentlyMoved.set(donor, densityRound)
           engine.setParticle(donor, {
             position: { x: ex, y: ey },
@@ -1887,13 +1867,17 @@ export function PartyBackground() {
       // Derived from the post-refill counts so the weights match the
       // enforced state; the tick loop eases the displayed opacity toward
       // these targets (opacity damping) to eliminate flicker.
-      if (cellWeights.length === counts.length) {
+      // Weighted from what the census MEASURED, not from the working array:
+      // `counts` carries this round's intended moves, so a cell that is
+      // chronically starved would still render at full density opacity while
+      // visibly sparse.
+      if (cellWeights.length === res.counts.length) {
         let maxCount = 0
-        for (let i = 0; i < counts.length; i++) maxCount = Math.max(maxCount, counts[i])
+        for (let i = 0; i < res.counts.length; i++) maxCount = Math.max(maxCount, res.counts[i])
         const span = maxCount - perCell
-        for (let i = 0; i < counts.length; i++) {
+        for (let i = 0; i < res.counts.length; i++) {
           cellWeights[i] =
-            span > 0 ? Math.min(1, Math.max(0, (counts[i] - perCell) / span)) : 0
+            span > 0 ? Math.min(1, Math.max(0, (res.counts[i] - perCell) / span)) : 0
         }
       }
     }
