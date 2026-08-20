@@ -398,19 +398,24 @@ export function PartyBackground() {
       lastCellLetter: [] as number[],
       lastCellsPerLetter: [] as number[],
       lastCountsAfter: [] as number[],
+      /** The census counts as measured, with no credit applied: reality, one
+       * or two frames old, as opposed to what the bookkeeping believes. */
+      lastRawCounts: [] as number[],
       lastShareTotal: 0,
       lastInName: 0,
       /** Moves a round asked for but could not make, because the cell had no
        * uncollected census candidate left. Non-zero means the sample budget
        * is binding and enforcement is falling behind the field. */
       unmet: 0,
+      /** Destinations rejected because the census position they came from is
+       * no longer where that particle is. */
+      staleDest: 0,
       lastCounts: [] as number[],
     }
     let censusCells: Int32Array | null = null
     let censusVersion = 0
     let lastCensus: CellCensusResult | null = null
     /** Net corrections issued since the in-flight census was dispatched. */
-    let pendingDelta1: number[] = []
     let densityRound = 0
     /** Particle index → round it was relocated (stale in census samples). */
     const recentlyMoved = new Map<number, number>()
@@ -1098,7 +1103,6 @@ export function PartyBackground() {
       glyphGrid = null
       censusCells = null
       lastCensus = null
-      pendingDelta1 = []
       cellWeights = new Float32Array(0)
       cellWeightsShown = new Float32Array(0)
       voroCacheDirty = true
@@ -1630,18 +1634,18 @@ export function PartyBackground() {
         if (densityRound - r > 2) recentlyMoved.delete(idx)
       }
       const isFreshDonor = (idx: number) => !recentlyMoved.has(idx)
-      // On WebGPU the next census is dispatched before this round's
-      // teleports are written, so it is exactly one round of corrections
-      // stale: credit them here or every refill double-fills and
-      // oscillates. The CPU census is synchronous and needs no credit.
-      if (pendingDelta1.length !== voroSeeds.length) {
-        pendingDelta1 = new Array<number>(voroSeeds.length).fill(0)
-      }
-      const counts = webgpu
-        ? Array.from(res.counts, (v, i) => v + pendingDelta1[i])
-        : Array.from(res.counts)
-      pendingDelta1 = new Array<number>(voroSeeds.length).fill(0)
+      // Work from what the census MEASURED, never from what this code
+      // believes it achieved. Crediting the previous round's teleports made
+      // the bookkeeping self-confirming: a cell the field had emptied again
+      // still read as full, so no deficit was seen and no retry was made,
+      // and every internal metric reported success while the cell sat
+      // hundreds short. Acting on the measurement each round costs at worst
+      // a bounded overshoot when the readback lags, which the surplus path
+      // then redistributes away -- an error that corrects itself, rather than
+      // one that hides.
+      const counts = Array.from(res.counts)
       densityStats.lastCounts = counts.slice()
+      densityStats.lastRawCounts = Array.from(res.counts)
       // One rule sets every target, and the three knobs are its three cases.
       //
       //   how many the name holds = clamp(what it holds now, min, max)
@@ -1679,6 +1683,18 @@ export function PartyBackground() {
       densityStats.lastCellsPerLetter = Array.from(cellsPerLetter)
       densityStats.lastShareTotal = Math.round(shareTotal)
       densityStats.lastInName = inNameNow
+      // Which cell a world position falls in RIGHT NOW. The census records
+      // where particles were one or two rounds ago, so a recorded position is
+      // not evidence of where that particle is today -- and a destination
+      // taken from one lands wherever the field has since carried it.
+      const cellAtWorld = (wx: number, wy: number) => {
+        const g = glyphGrid
+        if (!g) return -1
+        const gx = Math.floor((wx * zoom - g.minX) / g.step)
+        const gy = Math.floor((wy * zoom - g.minY) / g.step)
+        if (gx < 0 || gy < 0 || gx >= g.cols || gy >= g.rows) return -1
+        return g.cellOf[gy * g.cols + gx]
+      }
       const used = new Uint32Array(counts.length) // sample cursor per cell
       let outsideUsed = 0
       const outsideAvail = Math.min(res.outsideCount, res.outside.length)
@@ -1726,7 +1742,6 @@ export function PartyBackground() {
             }
             if (donor < 0) continue // cursor exhausted; rescan donors
             counts[densest]--
-            pendingDelta1[densest]--
             densityStats.fromCells++
           } else if (outsideUsed < outsideAvail) {
             while (outsideUsed < outsideAvail) {
@@ -1751,10 +1766,20 @@ export function PartyBackground() {
           // to a random glyph pixel.
           const occupied = Math.min(res.counts[ci], k)
           let dest: { x: number; y: number } | null = null
-          if (occupied > 0) {
+          // Land on a particle already in the cell -- but only if it is STILL
+          // in the cell. Crediting a stale position as an arrival is what let
+          // cells sit under target forever while the bookkeeping read full.
+          for (let tries = 0; tries < 8 && occupied > 0; tries++) {
             const si = ci * k + Math.floor(Math.random() * occupied)
-            dest = { x: res.samplePos[si * 2], y: res.samplePos[si * 2 + 1] }
-          } else {
+            const wx = res.samplePos[si * 2]
+            const wy = res.samplePos[si * 2 + 1]
+            if (cellAtWorld(wx, wy) === ci) {
+              dest = { x: wx, y: wy }
+              break
+            }
+            densityStats.staleDest++
+          }
+          if (!dest) {
             // Jitter stays within one glyph pixel so the next census still
             // counts the arrival in this cell.
             const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
@@ -1772,7 +1797,6 @@ export function PartyBackground() {
           })
           teleportCount++
           counts[ci]++
-          pendingDelta1[ci]++
           need--
         }
         if (need > 0) densityStats.unmet += need
@@ -1823,10 +1847,26 @@ export function PartyBackground() {
             }
           }
           if (donor < 0) continue
-          const j = Math.floor(Math.random() * posAvail)
+          // Same staleness applies here: a recorded outside particle may have
+          // drifted into the name since, and evicting onto it would put the
+          // particle straight back where it came from.
+          let ex = 0
+          let ey = 0
+          let found = false
+          for (let tries = 0; tries < 8; tries++) {
+            const j = Math.floor(Math.random() * posAvail)
+            ex = res.outsidePos[j * 2]
+            ey = res.outsidePos[j * 2 + 1]
+            if (cellAtWorld(ex, ey) < 0) {
+              found = true
+              break
+            }
+            densityStats.staleDest++
+          }
+          if (!found) break
           recentlyMoved.set(donor, densityRound)
           engine.setParticle(donor, {
-            position: { x: res.outsidePos[j * 2], y: res.outsidePos[j * 2 + 1] },
+            position: { x: ex, y: ey },
             velocity: { x: 0, y: 0 },
             size: 3,
             mass: 1,
@@ -1835,7 +1875,6 @@ export function PartyBackground() {
           teleportCount++
           densityStats.evicted++
           counts[densest]--
-          pendingDelta1[densest]--
           excess--
         }
         if (excess > 0) densityStats.unmet += excess
