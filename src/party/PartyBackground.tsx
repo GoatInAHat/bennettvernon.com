@@ -394,6 +394,12 @@ export function PartyBackground() {
       fromCells: 0,
       fromOutside: 0,
       evicted: 0,
+      lastTargets: [] as number[],
+      lastCellLetter: [] as number[],
+      lastCellsPerLetter: [] as number[],
+      lastCountsAfter: [] as number[],
+      lastShareTotal: 0,
+      lastInName: 0,
       /** Moves a round asked for but could not make, because the cell had no
        * uncollected census candidate left. Non-zero means the sample budget
        * is binding and enforcement is falling behind the field. */
@@ -1571,11 +1577,15 @@ export function PartyBackground() {
         cellWeights.fill(0)
         return
       }
-      // No work while the name is scrolled out of view.
-      if (window.scrollY > name.bottom + 200) {
-        densityStatus = 'offscreen'
-        return
-      }
+      // Deliberately NOT skipped while the name is scrolled out of view.
+      // Enforcement is what holds the letters level, and the pulls do not
+      // pause when the name is off screen: skipping it let the distribution
+      // drift the whole time the reader was further down the page, so the
+      // name was visibly uneven -- letters 2.25x apart, cells near empty --
+      // for the first seconds after scrolling back, and one round cannot undo
+      // that much drift because a donated particle is not eligible again
+      // until a census has seen it. Enforcing continuously keeps every round
+      // a small correction instead of an occasional large one.
       // The CPU census is synchronous, so uncapped per-frame enforcement
       // just fights the (slow) CPU sim; a 2Hz cadence keeps the name legible
       // without the churn.
@@ -1686,46 +1696,44 @@ export function PartyBackground() {
             ? Math.round(perLetter / cellsPerLetter[li])
             : Math.round(shareTotal / counts.length)
       }
+      densityStats.lastTargets = Array.from(cellTarget)
+      densityStats.lastCellLetter = Array.from(cellLetter)
+      densityStats.lastCellsPerLetter = Array.from(cellsPerLetter)
+      densityStats.lastShareTotal = Math.round(shareTotal)
+      densityStats.lastInName = inNameNow
       const used = new Uint32Array(counts.length) // sample cursor per cell
       let outsideUsed = 0
       const outsideAvail = Math.min(res.outsideCount, res.outside.length)
       const k = res.samplesPerCell
       // Donors keep a margin above the minimum so continuous drift between
       // neighboring cells doesn't ping-pong the same particles every round.
-      const floorFor = (i: number) =>
-        cellTarget[i] + Math.max(2, Math.round(cellTarget[i] * 0.25))
+      // A donor is any cell over its own target. Redistribution comes first
+      // and the outside pool second: moving one from an over-target cell to
+      // an under-target cell strictly reduces the total deviation and cannot
+      // ping-pong, whereas pulling from outside leaves the over-full cell
+      // over-full and grows the name instead of levelling it.
+      //
+      // The old rule demanded a donor sit 25% ABOVE target and only consulted
+      // over-target cells once the outside pool was spent. Against a loose
+      // minimum that was sensible hysteresis; against a real equalization
+      // target it blocks precisely the moves that level the letters, so the
+      // distribution stayed skewed however long it ran. One particle of
+      // hysteresis is enough to stop a cell trading with itself.
       for (let ci = 0; ci < counts.length; ci++) {
         const cellPx = voroCellPx[ci]
         if (!cellPx || cellPx.length === 0) continue
         let need = cellTarget[ci] - counts[ci]
         while (need > 0) {
-          // Densest donor cell that stays comfortably above the minimum
-          // after giving one up (and still has uncollected candidates).
           // The candidate cursor is bounded by the RAW census count — only
           // min(res.counts[i], k) sample slots were written this dispatch;
           // the credited count must never index into stale slots.
-          // Surplus is measured against each cell's own target, so a donor
-          // is a cell genuinely over its share rather than merely populous.
           let densest = -1
-          let bestSurplus = 0
+          let bestSurplus = 1
           for (let i = 0; i < counts.length; i++) {
-            const surplus = counts[i] - floorFor(i)
+            const surplus = counts[i] - cellTarget[i]
             if (surplus > bestSurplus && used[i] < Math.min(res.counts[i], k)) {
               bestSurplus = surplus
               densest = i
-            }
-          }
-          if (densest < 0 && outsideUsed >= outsideAvail) {
-            // Last tier: margin donors and the outside pool are exhausted.
-            // Take from any cell still above the bare minimum so no cell is
-            // left under it while surplus exists anywhere.
-            let best = 0
-            for (let i = 0; i < counts.length; i++) {
-              const surplus = counts[i] - cellTarget[i]
-              if (surplus > best && used[i] < Math.min(res.counts[i], k)) {
-                best = surplus
-                densest = i
-              }
             }
           }
           let donor = -1
@@ -1847,6 +1855,8 @@ export function PartyBackground() {
         }
         if (excess > 0) densityStats.unmet += excess
       }
+
+      densityStats.lastCountsAfter = counts.slice()
 
       // Density-weighted name opacity targets: the densest cell pins the
       // max, the rest interpolate by their surplus above the minimum.
@@ -2254,6 +2264,8 @@ export function PartyBackground() {
             teleportRate,
             densityStatus,
             cellAreas: voroCellPx.map((a) => a.length),
+            cellLetter: Array.from(cellLetter),
+            letterCount,
             letterTotals: (() => {
               const counts = densityStats.lastCounts
               if (!counts.length || !letterCount) return []
