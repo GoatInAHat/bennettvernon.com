@@ -122,8 +122,15 @@ const EFFECTOR_STRENGTH = 20_000
 const GLOBAL_DEFAULTS: GlobalSettings = {
   particleCount: 0, // resolved to the device budget once the runtime is known
   dragStrength: EFFECTOR_STRENGTH,
-  nameAttraction: EFFECTOR_STRENGTH,
-  concaveAvoidance: 1,
+  // Below the shared reference on purpose: the name is a distance FIELD, so
+  // every glyph pulls from its own surface rather than from one point, and at
+  // parity with the other bodies it out-pulls them everywhere near the top of
+  // the page.
+  nameAttraction: 11_000,
+  // Multiplier on the name's pull inside the pockets between a letter and its
+  // convex hull, where a particle would otherwise be drawn into the concavity
+  // and sit in it. 1 is no boost.
+  concaveAvoidance: 3,
   boxAttraction: EFFECTOR_STRENGTH,
   // The force body is the glyph shape barely dilated, matching the inner
   // isoline the old renderer drew as the body. The reach past it is the
@@ -139,20 +146,22 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   // softening length away as a half -- so it is measured in the same currency
   // as the pull itself rather than as a headcount inside some radius.
   // 0 switches the falloff off and the divider pulls at full strength forever,
-  // which is what it did before this existed -- so that is the default, and
-  // turning it up is an explicit choice rather than a look the site changed
-  // into on its own. For scale: the two dividers measure a load of roughly
-  // 2,000 and 4,500 at rest, so values under about 5,000 start to bite.
-  separatorZeroPoint: 0,
+  // which is what it did before this existed. For scale: the dividers measure
+  // a load of roughly 2,000 and 4,500 at rest, so values under about 5,000
+  // start to bite, and this one bites -- a divider sheds most of its pull well
+  // before it has gathered a crowd, which is the point.
+  separatorZeroPoint: 1_600,
   cursorStrength: EFFECTOR_STRENGTH,
-  trailIntensity: 0.5,
-  cursorFalloff: 0.5,
-  modeDuration: 15,
-  transitionLength: 2.5,
+  trailIntensity: 0.7,
+  // How fast a trail expires with the length of the stroke that drew it.
+  // Small values keep a long stroke alive nearly as long as a short one.
+  cursorFalloff: 0.06,
+  modeDuration: 20,
+  transitionLength: 5,
   nameFont: 1, // Helvetica
   nameWeight: 700,
-  nameDensity: 1000,
-  nameDensityRes: 72,
+  nameDensity: 900,
+  nameDensityRes: 96,
   // The most any ONE LETTER may hold. Per letter, not per name and not per
   // Voronoi cell: a cell is an arbitrary subdivision of the glyphs that
   // nobody looking at the page can see, and a name-wide total says nothing
@@ -165,13 +174,11 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   // between them. When the caps cannot deliver the floor the cap wins and the
   // plan simply targets less, so the two never fight.
   //
-  // 2400 is where the old whole-name 24,000 landed for the widest letter
-  // (24,000 spread over 72 equal-area cells is 333 a cell, and the widest
-  // letter owns 7 of them), so the name keeps the thickness it has always
-  // had and this stays a ceiling for the cases that would otherwise overpack
-  // it -- a stronger pull, a denser mode, a smaller name. Lower it to thin
-  // the letters out; 0 lifts it entirely.
-  maxNameDensity: 2_400,
+  // The cells are equal-area, so a letter's allowance is proportional to its
+  // own ink and the widest letter is the one this binds on first -- it owns
+  // about a tenth of the name. Lower it to thin the letters out; 0 lifts it
+  // entirely.
+  maxNameDensity: 1_500,
   // How far a cell may sit from its equal share before particles are moved,
   // as a fraction of that share. Without it every rule in the enforcement
   // path was an exact integer: a cell one particle light was corrected, and
@@ -185,7 +192,7 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   // count can have.
   densityVariance: 0.1,
   nameBaseOpacity: 0.05,
-  nameDensityOpacity: 0.35,
+  nameDensityOpacity: 0.66,
   opacityDamping: 0.85,
   debugOpacity: 0.85,
 }

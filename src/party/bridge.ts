@@ -149,7 +149,7 @@ export const bridge: {
   applyGlobal: () => {},
   getGlobals: () => null,
   setModeEnabled: () => {},
-  enabledModes: [true, true, true, true, true, true, true],
+  enabledModes: [true, false, true, false, false, true, true],
   getAllSettings: () => ({}),
   setDebug: () => {},
   debugOn: false,

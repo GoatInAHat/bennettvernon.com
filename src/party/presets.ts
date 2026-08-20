@@ -129,18 +129,22 @@ export interface DemoPreset {
   session: SessionData
   /** Fraction of the device particle budget this demo simulates. */
   budgetFactor: number
+  /** Where this mode's name-density enforcement lands a teleported particle
+   * (see `nameTpMethod` below). Here rather than in the session JSON because
+   * it is not something the upstream presets configure. */
+  tpMethod: 0 | 1
 }
 
 // Same order and particle budgets as the caza.la/party homepage rotation
 // (playground useDemo.ts); timing is user-configurable and lives in settings.
 export const DEMO_PRESETS: DemoPreset[] = [
-  { session: demo3 as SessionData, budgetFactor: 1 },
-  { session: demo1 as SessionData, budgetFactor: 1 / 4 },
-  { session: demo4 as SessionData, budgetFactor: 1 },
-  { session: demo5 as SessionData, budgetFactor: 1 / 4 },
-  { session: demo6 as SessionData, budgetFactor: 1 / 6 },
-  { session: demo7 as SessionData, budgetFactor: 1 / 4 },
-  { session: demo2 as SessionData, budgetFactor: 1 / 2.5 },
+  { session: demo3 as SessionData, budgetFactor: 1, tpMethod: 1 },
+  { session: demo1 as SessionData, budgetFactor: 1 / 4, tpMethod: 0 },
+  { session: demo4 as SessionData, budgetFactor: 1, tpMethod: 0 },
+  { session: demo5 as SessionData, budgetFactor: 1 / 4, tpMethod: 1 },
+  { session: demo6 as SessionData, budgetFactor: 1 / 6, tpMethod: 0 },
+  { session: demo7 as SessionData, budgetFactor: 1 / 4, tpMethod: 1 },
+  { session: demo2 as SessionData, budgetFactor: 1 / 2.5, tpMethod: 0 },
 ]
 
 /**
@@ -236,7 +240,7 @@ export const PARAM_DEFS: ParamDef[] = [
     // 0.5 exactly at the transition midpoint. Nothing to `set` -- the host
     // reads it off currentParams when it places a particle.
     key: 'nameTpMethod',
-    from: () => 1,
+    from: (p) => p.tpMethod,
     set: () => {},
   },
 ]
