@@ -411,7 +411,6 @@ export function PartyBackground() {
     let lastCensus: CellCensusResult | null = null
     /** Net corrections issued since the in-flight census was dispatched. */
     let pendingDelta1: number[] = []
-    let lastCpuRound = 0
     let densityRound = 0
     /** Particle index → round it was relocated (stale in census samples). */
     const recentlyMoved = new Map<number, number>()
@@ -1301,41 +1300,27 @@ export function PartyBackground() {
       pushNameField()
 
       // Concave pockets: inside a letter's convex hull but outside the
-      // letter itself (the notch of an N, the bays of an E). Per connected
-      // component: monotone-chain hull of its cells, scanline-filled, minus
-      // the glyph mask.
+      // letter itself (the notch of an N, the bays of an E). Grouped by
+      // LETTER, not by connected component: adjacent glyphs touch in the
+      // raster and flood-fill merges them into one blob, so two letters
+      // shared a hull and the pair between them was treated as a pocket.
+      // The letter boxes are already exact, so use them.
       const zone = new Float32Array(cols * rows)
       // The hull polygons are kept as well as filled: the debug view outlines
       // the real geometry rather than re-tracing the rasterized mask.
       const hulls: number[][][] = []
       {
-        const label = new Int32Array(cols * rows).fill(-1)
-        const stack: number[] = []
-        let comp = 0
-        for (let seed = 0; seed < mask.length; seed++) {
-          if (!mask[seed] || label[seed] >= 0) continue
-          const cells: number[] = []
-          stack.length = 0
-          stack.push(seed)
-          label[seed] = comp
-          while (stack.length) {
-            const c = stack.pop()!
-            cells.push(c)
-            const cx = c % cols
-            for (const nb of [
-              cx > 0 ? c - 1 : -1,
-              cx < cols - 1 ? c + 1 : -1,
-              c - cols,
-              c + cols,
-            ]) {
-              if (nb >= 0 && nb < mask.length && mask[nb] && label[nb] < 0) {
-                label[nb] = comp
-                stack.push(nb)
-              }
-            }
-          }
-          comp++
-          if (cells.length < 24) continue
+        const byLetter: number[][] = Array.from({ length: letterBoxes.length }, () => [])
+        for (let i = 0; i < mask.length; i++) {
+          if (!mask[i]) continue
+          const gx = i % cols
+          const gy = (i / cols) | 0
+          const li = letterAt(minX + (gx + 0.5) * step, minY + (gy + 0.5) * step)
+          if (li >= 0) byLetter[li].push(i)
+        }
+        for (const cells of byLetter) {
+          // A hull needs three points; that is the only real requirement.
+          if (cells.length < 3) continue
           const pts = cells.map((c) => [c % cols, (c / cols) | 0])
           pts.sort((a, b) => a[0] - b[0] || a[1] - b[1])
           const cross = (o: number[], a: number[], b: number[]) =>
@@ -1567,9 +1552,10 @@ export function PartyBackground() {
         densityStatus = `guards e=${!!engine} n=${!!name} g=${!!glyphGrid} c=${!!censusCells} s=${voroSeeds.length}`
         return
       }
-      // Never demand more than half the population, or a small swarm (CPU
-      // fallback) gets teleported into the name wholesale every round.
-      const totalMin = Math.round(Math.min(globals.nameDensity, engine.getCount() * 0.5))
+      // `name density` means what it says. The only ceiling is the number of
+      // particles that exist -- asking for more than that is not a taste
+      // decision to make on the setting's behalf, it is arithmetic.
+      const totalMin = Math.round(Math.min(globals.nameDensity, engine.getCount()))
       if (totalMin <= 0) {
         densityStatus = 'min<=0'
         // With enforcement off, the density opacity eases back to baseline
@@ -1586,13 +1572,6 @@ export function PartyBackground() {
       // that much drift because a donated particle is not eligible again
       // until a census has seen it. Enforcing continuously keeps every round
       // a small correction instead of an occasional large one.
-      // The CPU census is synchronous, so uncapped per-frame enforcement
-      // just fights the (slow) CPU sim; a 2Hz cadence keeps the name legible
-      // without the churn.
-      if (!webgpu && lastTickAt - lastCpuRound < 500) {
-        densityStatus = 'cpu-throttle'
-        return
-      }
       densityStatus = 'active'
       // The overall density stays put as the cell count changes: each cell
       // owes an equal share of the total. No floor — flooring to one per
@@ -1641,7 +1620,6 @@ export function PartyBackground() {
         return
       }
       lastCensus = res
-      lastCpuRound = lastTickAt
       densityStats.rounds++
       densityRound++
       // Particles this system relocated in the last two rounds still appear
@@ -1818,12 +1796,19 @@ export function PartyBackground() {
         let excess = inNameNow - Math.round(shareTotal)
         const posAvail = Math.min(res.outsideCount, res.outside.length, res.outsidePos.length >> 1)
         while (excess > 0 && posAvail > 0) {
+          // Densest cell first, by population -- cells are equal-area, so the
+          // fullest cell is the densest one. Restricted to cells at or over
+          // their target so evicting never opens a deficit the refill would
+          // just have to close again.
           let densest = -1
-          let bestSurplus = 0
+          let bestCount = 0
           for (let i = 0; i < counts.length; i++) {
-            const surplus = counts[i] - cellTarget[i]
-            if (surplus > bestSurplus && used[i] < Math.min(res.counts[i], k)) {
-              bestSurplus = surplus
+            if (
+              counts[i] > cellTarget[i] &&
+              counts[i] > bestCount &&
+              used[i] < Math.min(res.counts[i], k)
+            ) {
+              bestCount = counts[i]
               densest = i
             }
           }
