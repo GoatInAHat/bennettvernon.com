@@ -40,7 +40,7 @@ function makeParticle(x: number, y: number) {
 }
 
 /** Build a signed-distance grid for a disc, so gradients are well defined. */
-function discField(strength: number, padding: number, falloff: number): DistanceField {
+function discField(strength: number, padding: number): DistanceField {
   const cols = 48
   const rows = 48
   const cell = 10
@@ -55,7 +55,7 @@ function discField(strength: number, padding: number, falloff: number): Distance
       distances[r * cols + c] = Math.hypot(wx - cx, wy - cy) - radius
     }
   }
-  return { originX: 0, originY: 0, cell, cols, rows, strength, padding, falloff, distances }
+  return { originX: 0, originY: 0, cell, cols, rows, strength, padding, distances }
 }
 
 function run() {
@@ -71,11 +71,11 @@ function run() {
     { x: 290, y: 265, s: 6_000 },
     { x: 330, y: 280, s: -9_000 },
   ])
-  fx.setField(discField(50_000, 44, 30))
+  fx.setField(discField(50_000, 44))
 
-  const nameField = discField(10_000, 0, 0)
+  const nameField = discField(10_000, 0)
   fx.setNameField(nameField)
-  fx.setNameParams(10_000, 90, 1.6, 3)
+  fx.setNameParams(10_000, 3)
   const zone = new Float32Array(nameField.cols * nameField.rows)
   for (let i = 0; i < zone.length; i++) zone[i] = (i % 7) / 6
   fx.setNameZone(zone)

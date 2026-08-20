@@ -40,10 +40,10 @@ export interface DistanceField {
   cols: number
   rows: number
   strength: number
-  /** Particles are kept this far outside the shape (world units). */
+  /** Particles are kept this far outside the shape (world units): the body
+   * is the glyph shape dilated by this much, so it is geometry, not
+   * falloff. The push saturates anywhere inside it. */
   padding: number
-  /** Distance over which the force ramps to full (world units). */
-  falloff: number
   /** Row-major distances, world units, negative inside the shape. */
   distances: Float32Array
 }
@@ -179,15 +179,16 @@ export function forceAt(
   const offset = p.offset ?? 0
   let m: number
   if (p.push) {
-    // Acts only inside the offset surface, growing with penetration depth.
-    if (!(s.v < offset)) return 0
-    const cap = p.cap ?? 1
-    m = p.strength * Math.min(Math.max((offset - s.v) / p.range, 0), cap)
+    // Saturates at the peak anywhere inside the offset surface, then falls
+    // off as the inverse square outside it -- no reach, no overdrive cap.
+    m = forceMag(p.strength, Math.max(s.v - offset, 0), p.soften)
   } else {
-    // Acts outside the surface, fading to zero at `range`.
+    // Pull acts only outside the surface: inside the letters there is no
+    // force at all, which is what keeps pinned type from being dragged
+    // through its own glyphs.
     const r = s.v - offset
-    if (!(r > 0 && r < p.range)) return 0
-    m = p.strength * Math.pow(1 - r / p.range, p.exponent ?? 1)
+    if (!(r > 0)) return 0
+    m = forceMag(p.strength, r, p.soften)
     if (p.boost && p.boost.factor !== 1) {
       const bv = p.boost.values
       const zf =
@@ -208,7 +209,7 @@ export function forceAt(
 export function peakForce(p: VizPrimitive): number {
   if (p.kind === 'field') {
     const boost = p.boost && p.boost.factor > 1 ? p.boost.factor : 1
-    return Math.abs(p.strength) * (p.push ? (p.cap ?? 1) : boost)
+    return Math.abs(p.strength) * (p.push ? 1 : boost)
   }
   return Math.abs(p.strength)
 }
@@ -216,7 +217,7 @@ export function peakForce(p: VizPrimitive): number {
 const SHAPE_CODE: Record<EffectorShape, number> = { rect: 0, pill: 1 }
 const STRIDE = 6
 const NODE_STRIDE = 3
-const FIELD_HEADER = 8
+const FIELD_HEADER = 7
 
 type EffectorsInputs = {
   /** One global softening length in world units (see SOFTEN_PX in the host):
@@ -298,7 +299,6 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     arr[4] = field.rows
     arr[5] = field.strength
     arr[6] = field.padding
-    arr[7] = field.falloff
     for (let i = 0; i < field.distances.length; i++) arr[FIELD_HEADER + i] = field.distances[i]
     return arr
   }
@@ -315,15 +315,13 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     this.write({ nameField: field ? this.packField(field) : [] })
   }
 
-  /** Name-pull tuning, all world units where applicable:
-   * strength — peak pull at the letter surface;
-   * range — reach beyond the surface (force is zero past it);
-   * sharpness — falloff exponent from the surface out (1 = linear;
-   *   higher concentrates the pull near the letters);
+  /** Name-pull tuning:
+   * strength — peak pull at the letter surface, falling off as the inverse
+   *   square outward with no reach to configure;
    * concave — pull multiplier inside the nameZone pockets (1 = none).
    * Inside the letters no force applies. */
-  setNameParams(strength: number, range: number, sharpness: number, concave: number): void {
-    this.write({ nameParams: [strength, range, sharpness, concave] })
+  setNameParams(strength: number, concave: number): void {
+    this.write({ nameParams: [strength, concave] })
   }
 
   /** Concave-pocket mask, same grid as the name field (see inputs doc). */
@@ -410,20 +408,19 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         values: field,
         valuesStart: FIELD_HEADER,
         strength: field[5],
-        range: field[7],
+        soften,
         offset: field[6],
         push: true,
-        cap: 1.5,
       })
     }
 
     const nameField = state.nameField
     const nameParams = state.nameParams
-    if (nameField && nameField.length > FIELD_HEADER && nameParams && nameParams.length >= 3) {
+    if (nameField && nameField.length > FIELD_HEADER && nameParams && nameParams.length >= 1) {
       const cols = nameField[3]
       const rows = nameField[4]
       const zone = state.nameZone
-      const concave = nameParams[3] ?? 1
+      const concave = nameParams[1] ?? 1
       // The pocket boost is part of the name's force, not a body of its own,
       // so it rides along as a multiplier instead of a second primitive.
       const boost =
@@ -440,9 +437,8 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         values: nameField,
         valuesStart: FIELD_HEADER,
         strength: nameParams[0],
-        range: nameParams[1],
+        soften,
         offset: 0,
-        exponent: nameParams[2],
         boost,
       })
     }
@@ -455,9 +451,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     >[0]
     // The static array carries rect/pill bodies; the dynamic array carries
     // the trail samples and has its own layout. Both obey one law, emitted
-    // once as `fx` so a change here cannot miss a call site.
+    // once as force_mag so a change here cannot miss a call site. The name
+    // is deliberately unabbreviated: the field blocks below declare local
+    // `fx`/`fy` grid coordinates, and a helper called `fx` is shadowed by
+    // them into a WGSL compile error that no JS-side check can catch.
     const lawFn = `
-fn fx(s: f32, r: f32, L: f32) -> f32 {
+fn force_mag(s: f32, r: f32, L: f32) -> f32 {
   return s * L * L / (r * r + L * L);
 }`
     const shapeLoop = (
@@ -485,15 +484,15 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
       let dist2 = dx * dx + dy * dy;
       if (dist2 > 0.0) {
         let dist = sqrt(dist2);
-        ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * fx(strength, dist, L);
+        ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * force_mag(strength, dist, L);
       }
     } else {
       let lx = px - ex;
       let ly = py - ey;
       if (abs(lx) < hw && abs(ly) < hh) {
         // Inside a repelling rect: eject along the nearest edge at the
-        // surface peak, which is fx(strength, 0, L) -- continuous with the
-        // exterior. Attracting rects exert nothing here.
+        // surface peak, which is force_mag(strength, 0, L) -- continuous
+        // with the exterior. Attracting rects exert nothing here.
         if (strength < 0.0) {
           let exitX = select(hw - lx, -(hw + lx), lx < 0.0);
           let exitY = select(hh - ly, -(hh + ly), ly < 0.0);
@@ -509,7 +508,7 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
         let dist2 = dx * dx + dy * dy;
         if (dist2 > 0.0) {
           let dist = sqrt(dist2);
-          ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * fx(strength, dist, L);
+          ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * force_mag(strength, dist, L);
         }
       }
     }
@@ -535,7 +534,7 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
     let dist2 = dx * dx + dy * dy;
     if (dist2 > 0.0) {
       let dist = sqrt(dist2);
-      let c = abs(fx(ns, dist, tL));
+      let c = abs(force_mag(ns, dist, tL));
       if (c > t_best) {
         t_best = c;
         let sgn = sign(ns);
@@ -557,7 +556,7 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
     let rows = u32(${getUniform('field', '4u')});
     let fstrength = ${getUniform('field', '5u')};
     let pad = ${getUniform('field', '6u')};
-    let falloff = ${getUniform('field', '7u')};
+    let fL = ${getUniform('soften')};
     let fx = (${particleVar}.position.x - ox) / cw;
     let fy = (${particleVar}.position.y - oy) / cw;
     if (fx >= 1.5 && fy >= 1.5 && fx < f32(cols) - 2.5 && fy < f32(rows) - 2.5) {
@@ -572,16 +571,15 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
       let d10 = ${getUniform('field', 'i00 + 1u')};
       let d01 = ${getUniform('field', 'i00 + cols')};
       let d11 = ${getUniform('field', 'i00 + cols + 1u')};
-      let d = mix(mix(d00, d10, tx), mix(d01, d11, tx), ty);
-      if (d < pad) {
-        // Gradient points toward the nearest exit; force scales with depth.
-        let gx = mix(d10 - d00, d11 - d01, ty);
-        let gy = mix(d01 - d00, d11 - d10, tx);
-        let gl = sqrt(gx * gx + gy * gy);
-        if (gl > 0.0) {
-          let m = clamp((pad - d) / falloff, 0.0, 1.5);
-          ${particleVar}.acceleration += vec2<f32>(gx, gy) / gl * (fstrength * m);
-        }
+      // The body is the glyph shape dilated by pad; the push saturates
+      // anywhere inside it and falls off as the inverse square outside.
+      let gx = mix(d10 - d00, d11 - d01, ty);
+      let gy = mix(d01 - d00, d11 - d10, tx);
+      let gl = sqrt(gx * gx + gy * gy);
+      if (gl > 0.0) {
+        let d = mix(mix(d00, d10, tx), mix(d01, d11, tx), ty);
+        let m = force_mag(fstrength, max(d - pad, 0.0), fL);
+        ${particleVar}.acceleration += vec2<f32>(gx, gy) / gl * m;
       }
     }
   }`
@@ -591,16 +589,15 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
     const namePart = ({ particleVar, getUniform, getLength }: WgslArgs) => `
   let nflen = ${getLength('nameField')};
   let nplen = ${getLength('nameParams')};
-  if (nflen > ${FIELD_HEADER}u && nplen >= 3u) {
+  if (nflen > ${FIELD_HEADER}u && nplen >= 1u) {
     let nox = ${getUniform('nameField', '0u')};
     let noy = ${getUniform('nameField', '1u')};
     let ncw = ${getUniform('nameField', '2u')};
     let ncols = u32(${getUniform('nameField', '3u')});
     let nrows = u32(${getUniform('nameField', '4u')});
     let nstrength = ${getUniform('nameParams', '0u')};
-    let nrange = ${getUniform('nameParams', '1u')};
-    let nsharp = ${getUniform('nameParams', '2u')};
-    let nconcave = select(1.0, ${getUniform('nameParams', '3u')}, nplen >= 4u);
+    let nL = ${getUniform('soften')};
+    let nconcave = select(1.0, ${getUniform('nameParams', '1u')}, nplen >= 2u);
     let nzlen = ${getLength('nameZone')};
     let nfx = (${particleVar}.position.x - nox) / ncw;
     let nfy = (${particleVar}.position.y - noy) / ncw;
@@ -615,12 +612,12 @@ fn fx(s: f32, r: f32, L: f32) -> f32 {
       let nd01 = ${getUniform('nameField', 'ni00 + ncols')};
       let nd11 = ${getUniform('nameField', 'ni00 + ncols + 1u')};
       let nd = mix(mix(nd00, nd10, ntx), mix(nd01, nd11, ntx), nty);
-      if (nd > 0.0 && nd < nrange) {
+      if (nd > 0.0) {
         let ngx = mix(nd10 - nd00, nd11 - nd01, nty);
         let ngy = mix(nd01 - nd00, nd11 - nd10, ntx);
         let ngl = sqrt(ngx * ngx + ngy * ngy);
         if (ngl > 0.0) {
-          var nm = nstrength * pow(1.0 - nd / nrange, nsharp);
+          var nm = force_mag(nstrength, nd, nL);
           if (nconcave != 1.0 && nzlen >= ncols * nrows) {
             // Concave-pocket boost, bilinearly faded at pocket edges.
             let zi00 = u32(nuy) * ncols + u32(nux);
@@ -745,7 +742,6 @@ ${namePart(args)}
           const rows = field[4]
           const fstrength = field[5]
           const pad = field[6]
-          const falloff = field[7]
           const fx = (px - ox) / cw
           const fy = (py - oy) / cw
           if (fx >= 1.5 && fy >= 1.5 && fx < cols - 2.5 && fy < rows - 2.5) {
@@ -759,30 +755,26 @@ ${namePart(args)}
             const d01 = field[i00 + cols]
             const d11 = field[i00 + cols + 1]
             const d = (d00 * (1 - tx) + d10 * tx) * (1 - ty) + (d01 * (1 - tx) + d11 * tx) * ty
-            if (d < pad) {
-              const gx = (d10 - d00) * (1 - ty) + (d11 - d01) * ty
-              const gy = (d01 - d00) * (1 - tx) + (d11 - d10) * tx
-              const gl = Math.hypot(gx, gy)
-              if (gl > 0) {
-                const m = Math.min(Math.max((pad - d) / falloff, 0), 1.5)
-                particle.acceleration.x += (gx / gl) * fstrength * m
-                particle.acceleration.y += (gy / gl) * fstrength * m
-              }
+            const gx = (d10 - d00) * (1 - ty) + (d11 - d01) * ty
+            const gy = (d01 - d00) * (1 - tx) + (d11 - d10) * tx
+            const gl = Math.hypot(gx, gy)
+            if (gl > 0) {
+              const m = forceMag(fstrength, Math.max(d - pad, 0), L)
+              particle.acceleration.x += (gx / gl) * m
+              particle.acceleration.y += (gy / gl) * m
             }
           }
         }
         const nf = input.nameField
         const np = input.nameParams
-        if (nf && nf.length > FIELD_HEADER && np && np.length >= 3) {
+        if (nf && nf.length > FIELD_HEADER && np && np.length >= 1) {
           const ox = nf[0]
           const oy = nf[1]
           const cw = nf[2]
           const cols = nf[3]
           const rows = nf[4]
           const strength = np[0]
-          const range = np[1]
-          const sharp = np[2]
-          const concave = np.length >= 4 ? np[3] : 1
+          const concave = np.length >= 2 ? np[1] : 1
           const zone = input.nameZone
           const fx = (px - ox) / cw
           const fy = (py - oy) / cw
@@ -795,12 +787,12 @@ ${namePart(args)}
             const d =
               (nf[i00] * (1 - tx) + nf[i00 + 1] * tx) * (1 - ty) +
               (nf[i00 + cols] * (1 - tx) + nf[i00 + cols + 1] * tx) * ty
-            if (d > 0 && d < range) {
+            if (d > 0) {
               const gx = (nf[i00 + 1] - nf[i00]) * (1 - ty) + (nf[i00 + cols + 1] - nf[i00 + cols]) * ty
               const gy = (nf[i00 + cols] - nf[i00]) * (1 - tx) + (nf[i00 + cols + 1] - nf[i00 + 1]) * tx
               const gl = Math.hypot(gx, gy)
               if (gl > 0) {
-                let nm = strength * Math.pow(1 - d / range, sharp)
+                let nm = forceMag(strength, d, L)
                 if (concave !== 1 && zone && zone.length >= cols * rows) {
                   // Concave-pocket boost, bilinearly faded at pocket edges.
                   const zi00 = Math.floor(uy) * cols + Math.floor(ux)

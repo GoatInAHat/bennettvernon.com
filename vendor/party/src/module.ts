@@ -72,18 +72,15 @@ export type VizPrimitive =
       values: ArrayLike<number>;
       valuesStart: number;
       strength: number;
-      /** Reach measured from `offset`. */
-      range: number;
+      /** See `soften` on `segment`. */
+      soften: number;
       /** Isoline treated as the body surface (default 0). */
       offset?: number;
-      /** true: acts where the sample is inside `offset` and pushes down the
-       * gradient. false: acts within `range` outside `offset` and pulls up
-       * it. */
+      /** true: pushes down the gradient, saturating at `strength` anywhere
+       * inside `offset`. false: pulls up the gradient, acting only outside
+       * `offset`. Either way the falloff away from the surface is the same
+       * inverse-square law, with no reach to configure. */
       push?: boolean;
-      /** Falloff exponent from the surface outward (default 1, linear). */
-      exponent?: number;
-      /** Magnitude ceiling as a multiple of `strength` (default 1). */
-      cap?: number;
       /** Per-cell multiplier on the same grid; magnitude is scaled by
        * `1 + (factor - 1) * sample`. */
       boost?: { values: ArrayLike<number>; factor: number };

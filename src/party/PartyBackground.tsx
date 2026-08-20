@@ -89,12 +89,9 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   particleCount: 0, // resolved to the device budget once the runtime is known
   dragStrength: 200_000,
   nameAttraction: 10_000,
-  nameRange: 90,
-  nameSharpness: 1,
   concaveAvoidance: 1,
-  boxAttraction: 100_000,
-  textPaddingInner: 4,
-  textPaddingOuter: 44,
+  boxAttraction: 50_000,
+  textStandoff: 44,
   textSmoothing: 1.8,
   separatorAttraction: 15_000,
   cursorStrength: 5_000,
@@ -118,7 +115,13 @@ const CENSUS_SAMPLES_PER_CELL = 64
 const CENSUS_OUTSIDE_SAMPLES = 512
 /** Distance-field raster resolution in page px per cell. */
 const FIELD_CELL_PX = 3
-const FIELD_MARGIN_PX = 60
+/**
+ * How far past a body's own bounds its distance grid is rasterized. The
+ * force is unbounded, but a grid is not: past this the field simply stops.
+ * At 10x the softening length the force there is under 1% of peak, which is
+ * below what an 8-bit glow can show.
+ */
+const FIELD_REACH_PX = 10 * SOFTEN_PX
 
 function nameWidth(pageW: number): number {
   // ~1/3 of the page on desktop (min sized for a regular ~1440px desktop);
@@ -279,8 +282,6 @@ export function PartyBackground() {
     let demoTimer = 0
     let maxParticlesRaf = 0
     /** Field-grid reach the name field was last built with. */
-    let builtNameRange = 0
-    let nameRangeRebuildTimer = 0
     let syncScheduled = false
     const globals: GlobalSettings = { ...GLOBAL_DEFAULTS }
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
@@ -456,10 +457,10 @@ export function PartyBackground() {
         return
       }
       const rects = spans.map((el) => toPageRect(el.getBoundingClientRect()))
-      const minX = Math.min(...rects.map((r) => r.x)) - FIELD_MARGIN_PX
-      const minY = Math.min(...rects.map((r) => r.y)) - FIELD_MARGIN_PX
-      const maxX = Math.max(...rects.map((r) => r.x + r.w)) + FIELD_MARGIN_PX
-      const maxY = Math.max(...rects.map((r) => r.y + r.h)) + FIELD_MARGIN_PX
+      const minX = Math.min(...rects.map((r) => r.x)) - FIELD_REACH_PX
+      const minY = Math.min(...rects.map((r) => r.y)) - FIELD_REACH_PX
+      const maxX = Math.max(...rects.map((r) => r.x + r.w)) + FIELD_REACH_PX
+      const maxY = Math.max(...rects.map((r) => r.y + r.h)) + FIELD_REACH_PX
       const cell = FIELD_CELL_PX
       const cols = Math.ceil((maxX - minX) / cell)
       const rows = Math.ceil((maxY - minY) / cell)
@@ -533,11 +534,9 @@ export function PartyBackground() {
         cols: textField.cols,
         rows: textField.rows,
         strength: globals.boxAttraction,
-        // The push is zero at the outer padding and saturates at the
-        // inner padding; the field header keeps its (padding, falloff)
-        // parametrization with padding = outer, falloff = outer - inner.
-        padding: globals.textPaddingOuter / zoom,
-        falloff: Math.max(1, globals.textPaddingOuter - globals.textPaddingInner) / zoom,
+        // The keep-out surface: the body is the text shape dilated by
+        // this much, and the push saturates anywhere inside it.
+        padding: globals.textStandoff / zoom,
         distances: world,
       })
     }
@@ -1020,17 +1019,14 @@ export function PartyBackground() {
       }
 
       const step = FIELD_CELL_PX
-      // Margin wide enough for the attraction field's reach.
-      const margin = globals.nameRange + step * 4
+      // Fixed margin: it no longer tracks any slider, so strength drags
+      // never need the grid rebuilt.
+      const margin = FIELD_REACH_PX + step * 4
       const minX = NAME_MARGIN_PX - margin
       const minY = name.topY - margin
       const cols = Math.ceil((name.width + margin * 2) / step)
       const rows = Math.ceil((name.bottom - name.topY + margin * 2) / step)
       if (cols < 4 || rows < 4 || cols * rows > 1_000_000) return
-      // Only claim the built range once the grid is actually built: recording
-      // it above the guard would convince the widen-rebuild check that this
-      // margin already exists, and the debounced retry would never fire again.
-      builtNameRange = globals.nameRange
       const raster = document.createElement('canvas')
       raster.width = cols
       raster.height = rows
@@ -1251,12 +1247,7 @@ export function PartyBackground() {
     /** Name-pull tuning (world units); tiny upload, safe to call per slider
      * tick — the multi-MB distance array itself stays byte-stable. */
     const pushNameParams = () => {
-      effectors.setNameParams(
-        globals.nameAttraction,
-        globals.nameRange / zoom,
-        globals.nameSharpness,
-        globals.concaveAvoidance,
-      )
+      effectors.setNameParams(globals.nameAttraction, globals.concaveAvoidance)
     }
 
     /** Uploads the name distance field; tuning lives in nameParams. */
@@ -1277,7 +1268,6 @@ export function PartyBackground() {
         // keep the big array's bytes stable across slider drags.
         strength: 0,
         padding: 0,
-        falloff: 0,
         distances: world,
       })
       pushNameParams()
@@ -1836,7 +1826,7 @@ export function PartyBackground() {
         staticVizDirty = true
         scheduleSync()
       } else if (key === 'modeDuration') scheduleNextDemo()
-      else if (key === 'textPaddingInner' || key === 'textPaddingOuter' || key === 'boxAttraction') {
+      else if (key === 'textStandoff' || key === 'boxAttraction') {
         pushField()
         staticVizDirty = true
         scheduleSync()
@@ -1844,21 +1834,12 @@ export function PartyBackground() {
         buildTextField()
         staticVizDirty = true
         scheduleSync()
-      } else if (
-        key === 'nameAttraction' ||
-        key === 'nameRange' ||
-        key === 'nameSharpness' ||
-        key === 'concaveAvoidance'
-      ) {
+      } else if (key === 'nameAttraction' || key === 'concaveAvoidance') {
+        // Two floats; the grid margin is fixed now, so a strength drag never
+        // needs the multi-MB distance field rebuilt.
         pushNameParams()
         staticVizDirty = true
         if (bridge.debugOn) drawDebug()
-        // A radius past the built grid margin needs a wider field; rebuild
-        // once the slider settles.
-        if (key === 'nameRange' && value > builtNameRange) {
-          window.clearTimeout(nameRangeRebuildTimer)
-          nameRangeRebuildTimer = window.setTimeout(() => rebuildVoronoi(), 250)
-        }
       } else if (key === 'nameBaseOpacity' || key === 'nameDensityOpacity') {
         renderNameOpacity()
       } else if (key === 'debugOpacity') {
@@ -2204,7 +2185,6 @@ export function PartyBackground() {
       window.removeEventListener('pointercancel', onPointerUp)
       document.documentElement.removeEventListener('pointerleave', onLeaveWindow)
       document.documentElement.removeEventListener('pointerenter', onEnterWindow)
-      window.clearTimeout(nameRangeRebuildTimer)
     })
 
     // pressure.js supplies cross-platform mouse pressure: real Force Touch
