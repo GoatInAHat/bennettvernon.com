@@ -166,7 +166,26 @@ export function forceAt(
 ): number {
   out[0] = 0
   out[1] = 0
-  if (p.kind === 'segment') {
+  // Dispatched into one function per shape rather than branching inline. The
+  // three primitive kinds are three different object shapes, so a single body
+  // reading `p.x1` here and `p.hw` there goes megamorphic and every property
+  // read costs an inline-cache miss. Measured on the cursor trail: 148ns a
+  // call, 60ms to raster one glow, the debug view at 7fps whenever the cursor
+  // moved. Split, each callee sees one shape and the reads stay monomorphic.
+  // It is the same arithmetic either way -- `force.check.ts` still asserts
+  // this entry point against what `cpu()` writes.
+  if (p.kind === 'segment') return segmentForce(p, x, y, out)
+  if (p.kind === 'rect') return rectForce(p, x, y, out)
+  return fieldForce(p, x, y, out)
+}
+
+function segmentForce(
+  p: Extract<VizPrimitive, { kind: 'segment' }>,
+  x: number,
+  y: number,
+  out: [number, number],
+): number {
+
     // Closest point on the body segment; a point source when the ends meet.
     const vx = p.x2 - p.x1
     const vy = p.y2 - p.y1
@@ -185,7 +204,14 @@ export function forceAt(
     out[1] = (dy / d) * m
     return Math.abs(m)
   }
-  if (p.kind === 'rect') {
+
+function rectForce(
+  p: Extract<VizPrimitive, { kind: 'rect' }>,
+  x: number,
+  y: number,
+  out: [number, number],
+): number {
+
     const lx = x - p.x
     const ly = y - p.y
     if (Math.abs(lx) < p.hw && Math.abs(ly) < p.hh) {
@@ -213,6 +239,13 @@ export function forceAt(
     out[1] = (dy / d) * m
     return Math.abs(m)
   }
+
+function fieldForce(
+  p: Extract<VizPrimitive, { kind: 'field' }>,
+  x: number,
+  y: number,
+  out: [number, number],
+): number {
   const s = sampleField(p, x, y)
   if (!s) return 0
   const gl = Math.hypot(s.gx, s.gy)

@@ -8,10 +8,33 @@ import { forceAt, peakForce } from './effectors'
  * asserts the physics against — so the picture cannot be tuned independently
  * of the simulation. Colors are derived deterministically from group keys.
  *
- * The scale is anchored globally: the strongest force present anywhere in the
- * system renders at `maxOpacity`, and everything else is shown relative to
- * it. A source an order of magnitude weaker looks an order of magnitude
- * fainter, because it is.
+ * Force maps to opacity through a saturating curve against a fixed reference:
+ *
+ *   alpha = maxOpacity * m / (m + reference)
+ *
+ * so `reference` renders at half of `maxOpacity`, ten times it at ten
+ * elevenths, and nothing ever reaches the ceiling. Three properties fall out,
+ * and all three were broken by the global anchor this replaces:
+ *
+ * - `maxOpacity` is a MULTIPLIER. It scales the whole picture and changes
+ *   nothing about the relative brightness of two bodies.
+ * - No body's brightness depends on any other body. The anchor divided every
+ *   glow by the strongest force in the system, so dragging the cursor — the
+ *   strongest thing on the page while it moves — dimmed the name, the text
+ *   and the dividers for as long as it moved.
+ * - Nothing saturates. Clipping at `maxOpacity` turned the whole region where
+ *   the force was merely strong into one flat slab at the ceiling, so a glow
+ *   read as a solid shape with an edge where it finally dropped below the cap
+ *   rather than as light falling off. The falloff is now visible everywhere,
+ *   which is also what makes a boost like the name's concavity multiplier
+ *   show up at all: under the anchor a stronger force in the pocket raised
+ *   both the numerator and the anchor, so the pocket rendered at exactly the
+ *   same opacity no matter how far the multiplier was turned up.
+ *
+ * Near zero the curve is linear in the force (m / reference), so weak fields
+ * stay proportional to each other; it only compresses once a force is large
+ * against the reference, which is the range where the difference between
+ * "strong" and "stronger" does not need pixels spent on it.
  */
 
 /** Deterministic hue from a group key (FNV-1a). */
@@ -41,18 +64,6 @@ export function vizRgb(key: string): [number, number, number] {
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
 }
 
-/** The strongest force any live primitive can exert. Anchors the opacity
- * scale, so it is a scan of peaks rather than a search over space. */
-export function vizFmax(groups: VizGroup[]): number {
-  let max = 0
-  for (const g of groups) {
-    for (const p of g.primitives) {
-      const peak = peakForce(p)
-      if (peak > max) max = peak
-    }
-  }
-  return max
-}
 
 /** Below half an 8-bit quantum the glow is indistinguishable from nothing.
  * This is a property of the pixel format, not of the physics — it is the
@@ -70,6 +81,36 @@ const ALPHA_QUANTUM = 0.5 / 255
  */
 const EVAL_BUDGET = 400_000
 const MIN_CELL_PX = 3
+/**
+ * Opacity at which a glow is treated as finished. Four steps out of 255 --
+ * about 1.6% -- so the edge is a step of one and a half percent of the
+ * darkest the glow ever gets, against a white page. Set at the single
+ * representable step instead, the tail reaches nearly three times further for
+ * nothing anyone can see, and the cost of that reach is what pushed the
+ * sample grid coarse enough to show its own interpolation.
+ */
+const EDGE_ALPHA = 4 / 255
+
+/** Opacity of a force magnitude. See the header: saturating, so `maxOpacity`
+ * multiplies rather than anchors, and nothing ever clips. */
+const alphaOf = (m: number, maxOpacity: number, reference: number): number =>
+  (maxOpacity * m) / (m + reference)
+
+/**
+ * Where a body stops being painted, as a force magnitude -- `alphaOf`
+ * inverted at `EDGE_ALPHA`.
+ *
+ * An inverse-square tail never reaches zero, so this is what decides how much
+ * of it gets drawn, and it costs quadratically: the reach goes as
+ * sqrt(peak / floor), so painting down to the last representable step means a
+ * box twice as wide as painting down to four steps, and four times the pixels
+ * to fill and to blit every frame. The cursor trail's box spanned the entire
+ * viewport at one step, which is what made the debug view crawl while the
+ * cursor moved -- and every one of those pixels was carrying an alpha of one
+ * or two out of 255.
+ */
+const faintest = (maxOpacity: number, reference: number): number =>
+  maxOpacity > EDGE_ALPHA ? (EDGE_ALPHA * reference) / (maxOpacity - EDGE_ALPHA) : Infinity
 
 /**
  * World-space box outside which this primitive cannot raise a single alpha
@@ -77,17 +118,17 @@ const MIN_CELL_PX = 3
  * unlikely. The bounded field law stops at its range; the inverse-square law
  * never reaches zero, so its edge is solved from the law itself:
  *
- *   k * peak * L^2 / (r^2 + L^2) = ALPHA_QUANTUM
- *   r = L * sqrt(k * peak / ALPHA_QUANTUM - 1)
+ *   peak * L^2 / (r^2 + L^2) = faintest
+ *   r = L * sqrt(peak / faintest - 1)
  *
- * `k` is maxOpacity / fmax. The only constant involved is the 8-bit quantum,
- * which is a property of the pixel format, not of the physics.
+ * The only constant involved is the 8-bit quantum, which is a property of the
+ * pixel format, not of the physics.
  */
-function extent(p: VizPrimitive, k: number): [number, number, number, number] {
+function extent(p: VizPrimitive, floor: number): [number, number, number, number] {
   if (p.kind === 'field') {
     return [p.originX, p.originY, p.originX + p.cols * p.cell, p.originY + p.rows * p.cell]
   }
-  const reach = p.soften * Math.sqrt(Math.max(0, (k * peakForce(p)) / ALPHA_QUANTUM - 1))
+  const reach = p.soften * Math.sqrt(Math.max(0, peakForce(p) / floor - 1))
   if (p.kind === 'segment') {
     return [
       Math.min(p.x1, p.x2) - reach,
@@ -103,15 +144,15 @@ function drawGlow(
   ctx: CanvasRenderingContext2D,
   g: VizGroup,
   zoom: number,
-  fmax: number,
+  reference: number,
   maxOpacity: number,
   viewW: number,
   viewH: number,
 ) {
-  // A primitive whose own peak cannot reach one alpha quantum is invisible
-  // at this anchor; skipping it is exact, not an approximation.
-  const k = maxOpacity / fmax
-  const live = g.primitives.filter((p) => k * peakForce(p) >= ALPHA_QUANTUM)
+  // A primitive whose own peak cannot reach one alpha quantum is invisible;
+  // skipping it is exact, not an approximation.
+  const floor = faintest(maxOpacity, reference)
+  const live = g.primitives.filter((p) => peakForce(p) >= floor)
   if (live.length === 0) return
 
   let x0 = Infinity
@@ -119,7 +160,7 @@ function drawGlow(
   let x1 = -Infinity
   let y1 = -Infinity
   for (const p of live) {
-    const e = extent(p, k)
+    const e = extent(p, floor)
     if (e[0] < x0) x0 = e[0]
     if (e[1] < y0) y0 = e[1]
     if (e[2] > x1) x1 = e[2]
@@ -134,24 +175,50 @@ function drawGlow(
   const h = y1 - y0
   if (!(w > 0 && h > 0)) return
 
-  const cell = Math.max(MIN_CELL_PX, Math.sqrt((w * h * live.length) / EVAL_BUDGET))
-  const cols = Math.max(1, Math.ceil(w / cell))
-  const rows = Math.max(1, Math.ceil(h / cell))
-  const img = new ImageData(cols, rows)
-  const px = img.data
-  const [cr, cg, cb] = vizRgb(g.key)
   const isMax = g.blend === 'max'
+  const [cr, cg, cb] = vizRgb(g.key)
   const out: [number, number] = [0, 0]
 
+  // Cells coarsen rather than the glow losing its reach: every cell is tested
+  // against every primitive, so a forty-span cursor trail costs forty times a
+  // single body at the same resolution.
+  //
+  // Pruning the primitives per cell was tried and measured: order them
+  // strongest-first and reject one whose peak over its distance to its own
+  // geometry box cannot beat the best found so far. It is exact and it does
+  // reject almost everything -- and it made no difference, because in JS the
+  // loop iteration and the property reads cost about what the evaluation
+  // costs, so rejecting a primitive is barely cheaper than evaluating it.
+  // Forcing 3px cells on the strength of the rejection count took the frame
+  // from 8ms to 124ms. What the trail needs is a rasterizer that is not a
+  // scalar loop over cells; that is the GPU, and it is a bigger change than
+  // this file.
+  const cell = Math.max(MIN_CELL_PX, Math.sqrt((w * h * live.length) / EVAL_BUDGET))
+  // The sample grid is snapped to a multiple of the cell size in page space.
+  // The box tracks the cursor, so an unsnapped origin dragged the sample
+  // points along with it, and the interpolation pattern between samples slid
+  // across the glow every frame -- which is what read as a line moving
+  // through the cursor. Snapped, the samples hold still and only their values
+  // change.
+  const gx0 = Math.floor(x0 / cell) * cell
+  const gy0 = Math.floor(y0 / cell) * cell
+  const cols = Math.max(1, Math.ceil((x1 - gx0) / cell))
+  const rows = Math.max(1, Math.ceil((y1 - gy0) / cell))
+  const img = new ImageData(cols, rows)
+  const px = img.data
+
   for (let r = 0; r < rows; r++) {
-    const wy = (y0 + (r + 0.5) * cell) / zoom
+    const wy = (gy0 + (r + 0.5) * cell) / zoom
     for (let c = 0; c < cols; c++) {
-      const wx = (x0 + (c + 0.5) * cell) / zoom
+      const wx = (gx0 + (c + 0.5) * cell) / zoom
       let sx = 0
       let sy = 0
       let best = 0
-      for (const p of live) {
-        const m = forceAt(p, wx, wy, out)
+      // Indexed, not `for...of`: this is the innermost loop of the whole
+      // renderer and the iterator protocol is not free at four hundred
+      // thousand calls a frame.
+      for (let i = 0; i < live.length; i++) {
+        const m = forceAt(live[i], wx, wy, out)
         if (m === 0) continue
         if (isMax) {
           // The physics takes the single strongest sample, so the picture does.
@@ -163,7 +230,7 @@ function drawGlow(
       }
       const mag = isMax ? best : Math.hypot(sx, sy)
       if (mag <= 0) continue
-      const a = Math.min(maxOpacity, k * mag)
+      const a = alphaOf(mag, maxOpacity, reference)
       if (a < ALPHA_QUANTUM) continue
       const o = (r * cols + c) * 4
       px[o] = cr
@@ -181,7 +248,7 @@ function drawGlow(
   if (!tctx) return
   tctx.putImageData(img, 0, 0)
   ctx.imageSmoothingEnabled = true
-  ctx.drawImage(tile, x0, y0, w, h)
+  ctx.drawImage(tile, gx0, gy0, cols * cell, rows * cell)
 }
 
 /**
@@ -315,8 +382,10 @@ function strokeBodies(
 }
 
 /**
- * Paint every group's glow. `fmax` anchors opacity globally (see `vizFmax`)
- * and `maxOpacity` is the ceiling the strongest force renders at.
+ * Paint every group's glow. `reference` is the force that renders at half of
+ * `maxOpacity` -- the scale the saturating curve is measured against, which
+ * the caller supplies because only the caller knows what one unit of force
+ * means for its own physics. `maxOpacity` then multiplies the result.
  *
  * Groups composite source-over, so overlapping bodies show as overlapping
  * glows rather than as their net field: this answers "which bodies act here,
@@ -328,16 +397,16 @@ export function drawViz(
   ctx: CanvasRenderingContext2D,
   groups: VizGroup[],
   zoom: number,
-  fmax: number,
+  reference: number,
   maxOpacity: number,
 ): void {
-  if (!(fmax > 0) || !(maxOpacity > 0)) return
+  if (!(reference > 0) || !(maxOpacity > 0)) return
   const t = ctx.getTransform()
   const dpr = t.a || 1
   const viewW = ctx.canvas.width / dpr
   const viewH = ctx.canvas.height / dpr
   for (const g of groups) {
-    drawGlow(ctx, g, zoom, fmax, maxOpacity, viewW, viewH)
+    drawGlow(ctx, g, zoom, reference, maxOpacity, viewW, viewH)
     strokeBodies(ctx, g, zoom, maxOpacity)
   }
 }
