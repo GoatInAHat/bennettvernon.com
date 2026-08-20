@@ -1,10 +1,40 @@
 name: Validate agent configuration
 
+# Runs only when agent configuration itself changes, so ordinary pull requests
+# cost nothing. Drop the paths filters to validate every pull request instead —
+# and drop them before making this a required status check, since a filtered
+# workflow never reports on the pull requests it skips.
 on:
   pull_request:
+    paths:
+      - '.agents/**'
+      - '.claude/**'
+      - '.codex/**'
+      - '.cursor/**'
+      - '.gemini/**'
+      - '.devcontainer/**'
+      - '.github/workflows/agent-config.yml'
+      - '.mcp.json'
+      - '.pre-commit-config.yaml'
+      - 'skills-lock.json'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
   push:
     branches:
-      - particles
+      - main
+    paths:
+      - '.agents/**'
+      - '.claude/**'
+      - '.codex/**'
+      - '.cursor/**'
+      - '.gemini/**'
+      - '.devcontainer/**'
+      - '.github/workflows/agent-config.yml'
+      - '.mcp.json'
+      - '.pre-commit-config.yaml'
+      - 'skills-lock.json'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
   workflow_dispatch:
 
 permissions:
@@ -16,10 +46,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Validate shell scripts
-        run: bash -n .agents/scripts/bootstrap.sh .agents/scripts/link-skills.sh .agents/scripts/sync-mcp.sh
+      - name: Validate scripts
+        run: |
+          bash -n .agents/scripts/bootstrap.sh \
+                  .agents/scripts/link-skills.sh \
+                  .agents/scripts/sync-mcp.sh \
+                  .claude/hooks/session-start.sh
+          python3 -m py_compile .agents/scripts/check-skills.py
 
       - name: Verify skill links
         shell: bash
@@ -39,6 +74,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify skill lock
+        run: .agents/scripts/check-skills.py
+
       - name: Verify MCP adapters
         run: .agents/scripts/sync-mcp.sh check
 
@@ -53,22 +91,19 @@ jobs:
           for path in (
               Path(".agents/mcp/servers.json"),
               Path(".claude/settings.json"),
+              Path(".gemini/settings.json"),
+              Path(".devcontainer/devcontainer.json"),
               Path(".mcp.json"),
               Path(".cursor/mcp.json"),
               Path("skills-lock.json"),
           ):
               json.loads(path.read_text(encoding="utf-8"))
 
-          tomllib.loads(Path(".codex/config.toml").read_text(encoding="utf-8"))
-
-          lock = json.loads(Path("skills-lock.json").read_text(encoding="utf-8"))["skills"]
-          dirs = {p.name for p in Path(".agents/skills").iterdir() if p.is_dir()}
-          if set(lock) != dirs:
-              raise SystemExit(
-                  "skills-lock.json out of sync with .agents/skills/: "
-                  f"only in lock {sorted(set(lock) - dirs)}, "
-                  f"only on disk {sorted(dirs - set(lock))}"
-              )
+          for path in (
+              Path(".codex/config.toml"),
+              Path(".codex/environments/environment.toml"),
+          ):
+              tomllib.loads(path.read_text(encoding="utf-8"))
           PY
 
       - name: Reject trailing whitespace outside vendored code

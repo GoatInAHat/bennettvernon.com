@@ -1,0 +1,5 @@
+version = 1
+
+# Codex cloud runs the same bootstrap as every other environment.
+[setup]
+script = "bash .agents/scripts/bootstrap.sh"

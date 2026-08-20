@@ -1,18 +1,74 @@
-# Dependencies and build output
-node_modules/
-dist/
-
-# Agent skills (machine-local)
-.agents/skills-local/*
-!.agents/skills-local/.gitkeep
-
-# Agent settings (machine-local)
+# ─── Agent local state ────────────────────────────────────
 .claude/settings.local.json
 .claude/worktrees/
+.agent-tools/
 
-# OS junk
+# ─── Secrets & env ────────────────────────────────────────
+.env
+.env.*
+!.env.example
+secrets.*
+credentials.*
+*-credentials.md
+
+# Keys & certs
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.gpg
+service-account*.json
+gcp-*.json
+google-credentials*.json
+
+# Auth / session state
+.auth/
+tokens.json
+.netrc
+
+# ─── Node ─────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+.yarn/
+
+# ─── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Build / dist ─────────────────────────────────────────
+dist/
+build/
+out/
+.next/
+coverage/
+
+# ─── Logs / runtime ───────────────────────────────────────
+*.log
+logs/
+*.pid
+
+# ─── Editors / OS ─────────────────────────────────────────
 .DS_Store
 Thumbs.db
+.idea/
+*.swp
+*~
 
-# Logs
-*.log
+# ─── Local data ───────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+tmp/
+.cache/

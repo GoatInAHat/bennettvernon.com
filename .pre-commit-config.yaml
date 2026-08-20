@@ -7,6 +7,12 @@ repos:
         language: system
         always_run: true
         pass_filenames: false
+      - id: lock-agent-skills
+        name: Re-lock skills and verify frontmatter
+        entry: .agents/scripts/check-skills.py --update
+        language: system
+        always_run: true
+        pass_filenames: false
       - id: check-agent-mcp
         name: Verify MCP adapters are current
         entry: .agents/scripts/sync-mcp.sh check
