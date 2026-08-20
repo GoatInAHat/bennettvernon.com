@@ -66,6 +66,10 @@ const BOX_CORNER_PX = 6
  * lets a single slider drive two different bodies.
  */
 const SOFTEN_PX = 30
+/** How fast a section divider's pull follows its load. Long enough that a
+ * passing clump does not flicker the force, short enough to feel like a
+ * response. */
+const SEPARATOR_EASE_SECONDS = 0.4
 const SPAWN_SPREAD_PX = 60
 const SPAWN_SPEED = 100
 const TRAIL_BASE_TTL_MS = 900
@@ -108,6 +112,19 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   textStandoff: 4,
   textSmoothing: 1.8,
   separatorAttraction: EFFECTOR_STRENGTH,
+  // The load at which a section divider has no pull left. Real gravity gets
+  // STRONGER as mass gathers; this does the opposite, so a divider that has
+  // already collected a crowd stops calling for more and the particles it
+  // holds drift back off. Load is the inverse-square-weighted count of
+  // particles near the line -- one sitting on it counts as one, one a
+  // softening length away as a half -- so it is measured in the same currency
+  // as the pull itself rather than as a headcount inside some radius.
+  // 0 switches the falloff off and the divider pulls at full strength forever,
+  // which is what it did before this existed -- so that is the default, and
+  // turning it up is an explicit choice rather than a look the site changed
+  // into on its own. For scale: the two dividers measure a load of roughly
+  // 2,000 and 4,500 at rest, so values under about 5,000 start to bite.
+  separatorZeroPoint: 0,
   cursorStrength: EFFECTOR_STRENGTH,
   trailIntensity: 0.5,
   cursorFalloff: 0.5,
@@ -498,6 +515,12 @@ export function PartyBackground() {
     let teleportWindowStart = 0
     let teleportRate = 0
     let staticEffectors: Effector[] = []
+    /** Per static effector, how much of its strength survives the separator
+     * falloff. 1 for everything that is not a separator. Eased rather than
+     * applied raw, so a crowd arriving does not snap the pull off. */
+    let separatorFactor: number[] = []
+    /** Scratch for the segment-load pass: x1,y1,x2,y2 per separator. */
+    let separatorSegments = new Float32Array(0)
     let dynamicDirty = false
     const frameDts = new Float32Array(120)
     let frameDtIndex = 0
@@ -861,9 +884,91 @@ export function PartyBackground() {
         }
       }
       staticEffectors = list
-      effectors.set(staticEffectors)
+      // Rebuilt on scroll and resize, which is often; keep whatever falloff
+      // has been eased in rather than snapping every divider back to full.
+      if (separatorFactor.length !== list.length) separatorFactor = list.map(() => 1)
+      pushEffectors()
       staticVizDirty = true
       drawDebug()
+    }
+
+    /** The only writer of the static effector array: geometry from the DOM,
+     * strength scaled by the separator falloff. The debug view reads the same
+     * packed values, so a divider that has gone quiet renders quiet too. */
+    const pushEffectors = () => {
+      effectors.set(
+        staticEffectors.map((e, i) => {
+          const f = separatorFactor[i] ?? 1
+          return f === 1 ? e : { ...e, strength: e.strength * f }
+        }),
+      )
+    }
+
+    /**
+     * Section dividers lose their pull as particles gather on them.
+     *
+     * Real gravity runs the other way: mass attracts mass, so a clump pulls
+     * harder and grows faster. Here a divider that has already collected a
+     * crowd stops calling for more, which keeps a line from becoming a black
+     * hole that drains the rest of the page onto it. `separator zero point`
+     * is the load at which nothing is left.
+     *
+     * Load is the inverse-square-weighted count of particles near the line --
+     * a particle on it counts as one, one a softening length away as a half --
+     * so it is the same falloff the pull itself uses, and "how much force is
+     * this line spending" and "how loaded is it" are in one currency.
+     */
+    const updateSeparatorLoad = (dtSec: number) => {
+      if (!engine) return
+      const pills: number[] = []
+      for (let i = 0; i < staticEffectors.length; i++) {
+        if (staticEffectors[i].shape === 'pill') pills.push(i)
+      }
+      if (pills.length === 0) return
+      let loads: Float32Array | null = null
+      if (globals.separatorZeroPoint > 0) {
+        if (separatorSegments.length !== pills.length * 4) {
+          separatorSegments = new Float32Array(pills.length * 4)
+        }
+        for (let k = 0; k < pills.length; k++) {
+          const e = staticEffectors[pills[k]]
+          separatorSegments[k * 4] = e.x - e.halfW
+          separatorSegments[k * 4 + 1] = e.y
+          separatorSegments[k * 4 + 2] = e.x + e.halfW
+          separatorSegments[k * 4 + 3] = e.y
+        }
+        loads =
+          engine.updateSegmentLoad({
+            segments: separatorSegments,
+            count: pills.length,
+            soften: SOFTEN_PX / zoom,
+          })?.loads ?? null
+      }
+      // Exponential ease, so the rate is the same at any frame rate.
+      const keep = Math.exp(-dtSec / SEPARATOR_EASE_SECONDS)
+      let moved = false
+      for (let k = 0; k < pills.length; k++) {
+        const i = pills[k]
+        const load = loads && k < loads.length ? loads[k] : 0
+        const wanted =
+          globals.separatorZeroPoint > 0
+            ? Math.max(0, 1 - load / globals.separatorZeroPoint)
+            : 1
+        const was = separatorFactor[i] ?? 1
+        let next = was * keep + wanted * (1 - keep)
+        // Land exactly on the target rather than asymptoting near it: "no
+        // force left" has to mean none, not a hundredth of full strength,
+        // and settling exactly is also what lets this stop writing.
+        if (Math.abs(next - wanted) < 0.002) next = wanted
+        if (next !== was) {
+          separatorFactor[i] = next
+          moved = true
+        }
+      }
+      if (moved) {
+        pushEffectors()
+        staticVizDirty = true
+      }
     }
 
     const scheduleSync = () => {
@@ -1111,6 +1216,7 @@ export function PartyBackground() {
         dynamicDirty = anyLive
         if (bridge.debugOn) drawDebug()
       }
+      updateSeparatorLoad(Math.min(dtMs, 100) / 1000)
       if (now - teleportWindowStart > 1000) {
         teleportRate = teleportCount
         teleportCount = 0
@@ -1121,12 +1227,7 @@ export function PartyBackground() {
       // the damping setting controls how much it may move per frame.
       // Frame-rate independent: the per-60Hz-frame retention is the
       // setting, scaled to the actual frame interval.
-      if (
-        cellWeightsShown.length > 0 &&
-        cellWeightsShown.length === cellWeights.length &&
-        name &&
-        window.scrollY <= name.bottom + 200
-      ) {
+      if (cellWeightsShown.length > 0 && cellWeightsShown.length === cellWeights.length) {
         const dtFrames = frameDts[(frameDtIndex + frameDts.length - 1) % frameDts.length] / 16.7
         const keep = Math.pow(
           Math.min(0.98, Math.max(0, globals.opacityDamping)),
@@ -1670,15 +1771,6 @@ export function PartyBackground() {
         cellWeights.fill(0)
         return
       }
-      // Deliberately NOT skipped while the name is scrolled out of view.
-      // Enforcement is what holds the letters level, and the pulls do not
-      // pause when the name is off screen: skipping it let the distribution
-      // drift the whole time the reader was further down the page, so the
-      // name was visibly uneven -- letters 2.25x apart, cells near empty --
-      // for the first seconds after scrolling back, and one round cannot undo
-      // that much drift because a donated particle is not eligible again
-      // until a census has seen it. Enforcing continuously keeps every round
-      // a small correction instead of an occasional large one.
       densityStatus = 'active'
       // The overall density stays put as the cell count changes: each cell
       // owes an equal share of the total. No floor — flooring to one per
