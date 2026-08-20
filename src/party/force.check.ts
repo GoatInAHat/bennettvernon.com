@@ -7,7 +7,7 @@
  * second: change one law and forget the other, and this fails instead of the
  * debug view quietly lying.
  *
- * Run: npx tsx src/party/force.check.ts
+ * Run: npm run check:force
  */
 import { Effectors, forceAt, peakForce, type DistanceField } from './effectors'
 
