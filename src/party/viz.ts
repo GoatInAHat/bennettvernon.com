@@ -1,5 +1,5 @@
 import type { VizGroup, VizPrimitive } from '@cazala/party'
-import { bodyDistance, forceAt, peakForce } from './effectors'
+import { forceAt, peakForce } from './effectors'
 
 /**
  * Generic debug renderer for the engine's viz contract. Every body is drawn
@@ -133,10 +133,6 @@ function drawGlow(
   const px = img.data
   const [cr, cg, cb] = vizRgb(g.key)
   const isMax = g.blend === 'max'
-  // Outline the body the force is measured from, one cell thick. Skipped for
-  // max-blend groups: their primitives are dense curve samples, so per-sample
-  // outlines would be noise rather than geometry.
-  const halfLine = isMax ? -1 : (cell / zoom) * 0.5
   const out: [number, number] = [0, 0]
 
   for (let r = 0; r < rows; r++) {
@@ -157,18 +153,9 @@ function drawGlow(
           sy += out[1]
         }
       }
-      let a = 0
-      if (halfLine > 0) {
-        for (const p of live) {
-          const bd = bodyDistance(p, wx, wy)
-          if (bd === bd && Math.abs(bd) <= halfLine) { a = maxOpacity; break }
-        }
-      }
-      if (a === 0) {
-        const mag = isMax ? best : Math.hypot(sx, sy)
-        if (mag <= 0) continue
-        a = Math.min(maxOpacity, k * mag)
-      }
+      const mag = isMax ? best : Math.hypot(sx, sy)
+      if (mag <= 0) continue
+      const a = Math.min(maxOpacity, k * mag)
       if (a < ALPHA_QUANTUM) continue
       const o = (r * cols + c) * 4
       px[o] = cr
@@ -187,6 +174,115 @@ function drawGlow(
   tctx.putImageData(img, 0, 0)
   ctx.imageSmoothingEnabled = true
   ctx.drawImage(tile, x0, y0, w, h)
+}
+
+/**
+ * Append the `iso` contour of a field to the current path by marching
+ * squares, interpolating each crossing along its cell edge. Traced as vector
+ * segments rather than tested per raster cell: a distance grid quantizes to
+ * whole cells, so a "within half a cell of the isoline" test misses most of
+ * the contour and draws a dotted ghost of it.
+ */
+function isoPath(
+  ctx: CanvasRenderingContext2D,
+  p: Extract<VizPrimitive, { kind: 'field' }>,
+  iso: number,
+  zoom: number,
+) {
+  const { cols, rows } = p
+  if (cols < 2 || rows < 2) return
+  const v = (gx: number, gy: number) => Number(p.values[p.valuesStart + gy * cols + gx])
+  const cx = (g: number) => (p.originX + (g + 0.5) * p.cell) * zoom
+  const cy = (g: number) => (p.originY + (g + 0.5) * p.cell) * zoom
+  for (let gy = 0; gy < rows - 1; gy++) {
+    for (let gx = 0; gx < cols - 1; gx++) {
+      const a = v(gx, gy)
+      const b = v(gx + 1, gy)
+      const c = v(gx + 1, gy + 1)
+      const d = v(gx, gy + 1)
+      let idx = 0
+      if (a >= iso) idx |= 1
+      if (b >= iso) idx |= 2
+      if (c >= iso) idx |= 4
+      if (d >= iso) idx |= 8
+      if (idx === 0 || idx === 15) continue
+      const t = (v1: number, v2: number) => (iso - v1) / (v2 - v1)
+      const top = (): [number, number] => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(a, b), cy(gy)]
+      const right = (): [number, number] => [cx(gx + 1), cy(gy) + (cy(gy + 1) - cy(gy)) * t(b, c)]
+      const bottom = (): [number, number] => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(d, c), cy(gy + 1)]
+      const left = (): [number, number] => [cx(gx), cy(gy) + (cy(gy + 1) - cy(gy)) * t(a, d)]
+      const seg = (e1: [number, number], e2: [number, number]) => {
+        ctx.moveTo(e1[0], e1[1])
+        ctx.lineTo(e2[0], e2[1])
+      }
+      switch (idx) {
+        case 1:
+        case 14:
+          seg(left(), top())
+          break
+        case 2:
+        case 13:
+          seg(top(), right())
+          break
+        case 3:
+        case 12:
+          seg(left(), right())
+          break
+        case 4:
+        case 11:
+          seg(right(), bottom())
+          break
+        case 6:
+        case 9:
+          seg(top(), bottom())
+          break
+        case 7:
+        case 8:
+          seg(left(), bottom())
+          break
+        case 5:
+          seg(left(), top())
+          seg(right(), bottom())
+          break
+        case 10:
+          seg(top(), right())
+          seg(left(), bottom())
+          break
+      }
+    }
+  }
+}
+
+/**
+ * Outline the body each primitive's force is measured from: the segment a
+ * pill pulls toward, the rect's edge, and for a field the isoline that is its
+ * surface — the text shape dilated by its standoff, the letter surface of the
+ * name. Drawn from the same geometry the physics uses, on top of the glow.
+ *
+ * Max-blend groups are skipped: their primitives are dense samples of one
+ * curve, so per-sample outlines would be noise rather than geometry.
+ */
+function strokeBodies(
+  ctx: CanvasRenderingContext2D,
+  g: VizGroup,
+  zoom: number,
+  maxOpacity: number,
+) {
+  if (g.blend === 'max') return
+  ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
+  ctx.lineWidth = 1.25
+  ctx.beginPath()
+  for (const p of g.primitives) {
+    if (p.kind === 'rect') {
+      ctx.rect((p.x - p.hw) * zoom, (p.y - p.hh) * zoom, p.hw * 2 * zoom, p.hh * 2 * zoom)
+    } else if (p.kind === 'segment') {
+      ctx.moveTo(p.x1 * zoom, p.y1 * zoom)
+      ctx.lineTo(p.x2 * zoom, p.y2 * zoom)
+    } else {
+      isoPath(ctx, p, p.offset ?? 0, zoom)
+    }
+  }
+  ctx.stroke()
 }
 
 /**
@@ -211,5 +307,8 @@ export function drawViz(
   const dpr = t.a || 1
   const viewW = ctx.canvas.width / dpr
   const viewH = ctx.canvas.height / dpr
-  for (const g of groups) drawGlow(ctx, g, zoom, fmax, maxOpacity, viewW, viewH)
+  for (const g of groups) {
+    drawGlow(ctx, g, zoom, fmax, maxOpacity, viewW, viewH)
+    strokeBodies(ctx, g, zoom, maxOpacity)
+  }
 }

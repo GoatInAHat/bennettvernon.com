@@ -27,11 +27,12 @@ Every divergence from upstream is listed here.
   `engine.ts`, both runtime engines — `updateCellCensus()`: a persistent
   compute pass that buckets in-disc particles into caller-defined cells,
   with per-cell counts, bounded candidate-index collection, and an
-  outside reservoir carrying both the indices and the world positions of
-  those particles (f32 bit-cast into the same u32 result buffer, so one
-  readback serves both). Positions are there because relocating a particle
-  onto an existing one otherwise means `getParticle`, which syncs the whole
-  particle buffer back off the GPU — the stall this pass exists to avoid.
+  outside reservoir. Both the per-cell samples and the outside reservoir
+  carry the world positions of their particles alongside the indices (f32
+  bit-cast into the same u32 result buffer, so one readback serves both).
+  Positions are there because relocating a particle onto an existing one
+  otherwise means `getParticle`, which syncs the whole particle buffer back
+  off the GPU — the stall this pass exists to avoid.
   The readback is asynchronous and double-checked against disposal; callers
   get the latest completed result without ever stalling the pipeline. CPU
   runtime mirrors it synchronously.
@@ -42,8 +43,10 @@ Every divergence from upstream is listed here.
   `VizGroup`, optional `Module.viz()`): modules describe their own live
   spatial influence so a generic viewer renders any physics without viewer
   changes. Primitives are `segment`, `rect`, and `field`, and each carries
-  the parameters its force law actually uses — signed `strength`, the
-  `soften` length of the inverse-square falloff, and for fields the surface
+  the parameters its force law actually uses — signed `strength` (with an
+  optional `strengthEnd` so one segment can taper along its length instead
+  of becoming a chain of primitives), the `soften` length of the
+  inverse-square falloff, and for fields the surface
   `offset`, the `push` direction, and an optional per-cell `boost` grid —
   rather than a pre-baked picture of the falloff. That lets a viewer
   evaluate the true force at any point

@@ -49,19 +49,29 @@ export interface DistanceField {
 }
 
 /**
- * One sample of the cursor-trail curve. The trail field is the MAX-magnitude
- * sample (not the sum), so the densely sampled curve forms one smooth
- * tapered blob with no seams where samples overlap, and a stationary cursor
- * is simply the single-sample degenerate case. Because every sample shares
- * the one global softening length, the max over samples is exactly the same
- * law applied to the distance to the trail curve. Strength is SIGNED:
- * positive pulls, negative pushes (drag trails); the taper down the tail
- * lives in the strength, which is all the shape the law needs.
+ * One span of the cursor-trail curve: the straight piece between two
+ * consecutive spline samples, with a strength at each end.
+ *
+ * Spans rather than points because the field is the MAX over the list, and
+ * the max of a law applied to point distances is that law applied to the
+ * distance to the nearest point -- a bumpy chain of beads, since the distance
+ * to a set of dots is not the distance to the curve through them. Measuring
+ * to the segment instead makes the same max exactly the law applied to the
+ * distance to the polyline, which is the curve, so the field is a smooth
+ * tube along the stroke with no seams and no beading. A stationary cursor is
+ * the degenerate span whose ends coincide.
+ *
+ * Strength is SIGNED: positive pulls, negative pushes (drag trails). It
+ * interpolates along the span, so the taper down the tail lives in the
+ * strength -- all the shape the law needs.
  */
 export interface TrailNode {
-  x: number
-  y: number
-  s: number
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  s1: number
+  s2: number
 }
 
 /**
@@ -150,8 +160,11 @@ export function forceAt(
     const dy = p.y1 + vy * t - y
     const d2 = dx * dx + dy * dy
     if (d2 <= 0) return 0
+    const end = p.strengthEnd ?? p.strength
+    const s = p.strength + (end - p.strength) * t
+    if (s === 0) return 0
     const d = Math.sqrt(d2)
-    const m = forceMag(p.strength, d, p.soften)
+    const m = forceMag(s, d, p.soften)
     out[0] = (dx / d) * m
     out[1] = (dy / d) * m
     return Math.abs(m)
@@ -252,12 +265,15 @@ export function peakForce(p: VizPrimitive): number {
     const boost = p.boost && p.boost.factor > 1 ? p.boost.factor : 1
     return Math.abs(p.strength) * (p.push ? 1 : boost)
   }
+  if (p.kind === 'segment') {
+    return Math.max(Math.abs(p.strength), Math.abs(p.strengthEnd ?? p.strength))
+  }
   return Math.abs(p.strength)
 }
 
 const SHAPE_CODE: Record<EffectorShape, number> = { rect: 0, pill: 1 }
 const STRIDE = 6
-const NODE_STRIDE = 3
+const NODE_STRIDE = 6
 const FIELD_HEADER = 7
 
 type EffectorsInputs = {
@@ -326,7 +342,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   setDynamic(nodes: TrailNode[]): void {
     const data: number[] = []
     for (const n of nodes) {
-      data.push(n.x, n.y, n.s)
+      data.push(n.x1, n.y1, n.x2, n.y2, n.s1, n.s2)
     }
     this.write({ dynamic: data })
   }
@@ -425,13 +441,22 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
 
     const dyn = state.dynamic ?? []
     for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
-      const [x, y, s] = dyn.slice(base, base + NODE_STRIDE)
-      if (s === 0) continue
+      const [x1, y1, x2, y2, s1, s2] = dyn.slice(base, base + NODE_STRIDE)
+      if (s1 === 0 && s2 === 0) continue
       // One group, not one per sign: the physics takes a single strongest
-      // sample across the whole curve, so a pull node and a push node never
+      // span across the whole curve, so a pull span and a push span never
       // both act. Splitting them by color would make the viewer sum two
       // winners and show a force that is not there.
-      add('effectors:trail', true, { kind: 'segment', x1: x, y1: y, x2: x, y2: y, strength: s, soften })
+      add('effectors:trail', true, {
+        kind: 'segment',
+        x1,
+        y1,
+        x2,
+        y2,
+        strength: s1,
+        strengthEnd: s2,
+        soften,
+      })
     }
     const trail = groups.get('effectors:trail')
     if (trail) trail.blend = 'max'
@@ -581,14 +606,27 @@ fn field_grad(v00: f32, v10: f32, v01: f32, v11: f32, tx: f32, ty: f32,
   var t_dy = 0.0;
   for (var i: u32 = 0u; i < n_dyn; i = i + 1u) {
     let base = i * ${NODE_STRIDE}u;
-    let nx = ${getUniform('dynamic', 'base + 0u')};
-    let ny = ${getUniform('dynamic', 'base + 1u')};
-    let ns = ${getUniform('dynamic', 'base + 2u')};
-    if (ns == 0.0) { continue; }
-    let dx = nx - ${particleVar}.position.x;
-    let dy = ny - ${particleVar}.position.y;
+    let ax = ${getUniform('dynamic', 'base + 0u')};
+    let ay = ${getUniform('dynamic', 'base + 1u')};
+    let bx = ${getUniform('dynamic', 'base + 2u')};
+    let by = ${getUniform('dynamic', 'base + 3u')};
+    let s1 = ${getUniform('dynamic', 'base + 4u')};
+    let s2 = ${getUniform('dynamic', 'base + 5u')};
+    if (s1 == 0.0 && s2 == 0.0) { continue; }
+    // Closest point on the span, and the strength interpolated to it: the
+    // max over spans is then the law applied to the distance to the curve.
+    let ex = bx - ax;
+    let ey = by - ay;
+    let len2 = ex * ex + ey * ey;
+    var t = 0.0;
+    if (len2 > 0.0) {
+      t = clamp(((${particleVar}.position.x - ax) * ex + (${particleVar}.position.y - ay) * ey) / len2, 0.0, 1.0);
+    }
+    let ns = mix(s1, s2, t);
+    let dx = (ax + ex * t) - ${particleVar}.position.x;
+    let dy = (ay + ey * t) - ${particleVar}.position.y;
     let dist2 = dx * dx + dy * dy;
-    if (dist2 > 0.0) {
+    if (dist2 > 0.0 && ns != 0.0) {
       let dist = sqrt(dist2);
       let c = abs(force_mag(ns, dist, tL));
       if (c > t_best) {
@@ -778,10 +816,20 @@ ${namePart(args)}
             let bx = 0
             let by = 0
             for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
-              const ns = dyn[base + 2]
+              const ax = dyn[base]
+              const ay = dyn[base + 1]
+              const s1 = dyn[base + 4]
+              const s2 = dyn[base + 5]
+              if (s1 === 0 && s2 === 0) continue
+              const ex = dyn[base + 2] - ax
+              const ey = dyn[base + 3] - ay
+              const len2 = ex * ex + ey * ey
+              const t =
+                len2 > 0 ? Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / len2)) : 0
+              const ns = s1 + (s2 - s1) * t
               if (ns === 0) continue
-              const dx = dyn[base] - px
-              const dy = dyn[base + 1] - py
+              const dx = ax + ex * t - px
+              const dy = ay + ey * t - py
               const dist2 = dx * dx + dy * dy
               if (dist2 <= 0) continue
               const dist = Math.sqrt(dist2)

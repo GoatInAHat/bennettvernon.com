@@ -43,6 +43,11 @@ export type VizPrimitive =
       x2: number;
       y2: number;
       strength: number;
+      /** Strength at the (x2,y2) end, when it differs. The value used is
+       * interpolated to the closest point on the segment, which is how a
+       * tapering stroke is one primitive rather than a chain of them.
+       * Defaults to `strength` -- a uniform body. */
+      strengthEnd?: number;
       /** Softening length: the distance from the surface at which the force
        * is half its peak. There is no outer limit -- the force falls off as
        * the inverse square and is merely negligible far away. */

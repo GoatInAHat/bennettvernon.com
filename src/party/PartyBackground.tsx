@@ -126,7 +126,11 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
 // Name-density enforcement runs off the engine's cell census: a per-frame
 // GPU compute pass with an asynchronous readback, so it never stalls the
 // pipeline. Corrections apply whenever a fresh census lands (~every frame).
-const CENSUS_SAMPLES_PER_CELL = 64
+/** Donor candidates collected per cell per census. This bounds how many
+ * particles the letter balancer can move in one round, and the pulls re-skew
+ * the distribution every frame, so too small a budget leaves the letters
+ * permanently uneven no matter how long it runs. */
+const CENSUS_SAMPLES_PER_CELL = 192
 const CENSUS_OUTSIDE_SAMPLES = 512
 /** Distance-field raster resolution in page px per cell. */
 const FIELD_CELL_PX = 3
@@ -342,6 +346,12 @@ export function PartyBackground() {
     let voroSeeds: { x: number; y: number }[] = []
     /** Fine-grid indices of the glyph pixels owned by each Voronoi cell. */
     let voroCellPx: number[][] = []
+    /** Which letter of the name each Voronoi cell belongs to, and how many
+     * letters there are. Enforcement targets equal totals per letter rather
+     * than per cell, so every letter carries the same number of particles
+     * however much area it covers. */
+    let cellLetter = new Int32Array(0)
+    let letterCount = 0
     let glyphGrid: {
       minX: number
       minY: number
@@ -467,7 +477,13 @@ export function PartyBackground() {
     // the closing radius.
     const buildTextField = () => {
       textField = null
-      const spans = [...document.querySelectorAll<HTMLElement>('main .g')]
+      // Section titles ("Projects", "Work") are deliberately excluded: the
+      // separator rule beside them already carries their physics, and a repel
+      // body around the heading text as well left them walled off from the
+      // field instead of sitting in it.
+      const spans = [...document.querySelectorAll<HTMLElement>('main .g')].filter(
+        (el) => !el.closest('.section-sep'),
+      )
       if (spans.length === 0) {
         effectors.setField(null)
         return
@@ -772,13 +788,43 @@ export function PartyBackground() {
      * module's array offsets stay stable. */
     const trailNodes = (now: number): TrailNode[] => {
       const nodes: TrailNode[] = []
+      // Samples of one pointer's spline, flushed into spans between
+      // consecutive points. The force measures to those spans, so the field
+      // is a smooth tube along the stroke rather than a chain of beads
+      // around the sample dots.
+      let curve: { x: number; y: number; s: number }[] = []
       const push = (x: number, y: number, s: number) => {
-        if (nodes.length >= TRAIL_NODES_PAD) return
-        nodes.push({ x: x / zoom, y: y / zoom, s })
+        curve.push({ x, y, s })
+      }
+      const flushCurve = () => {
+        if (curve.length === 1) {
+          // A stationary cursor: the degenerate span whose ends coincide.
+          const p = curve[0]
+          if (nodes.length < TRAIL_NODES_PAD) {
+            const wx = p.x / zoom
+            const wy = p.y / zoom
+            nodes.push({ x1: wx, y1: wy, x2: wx, y2: wy, s1: p.s, s2: p.s })
+          }
+        } else {
+          for (let i = 0; i + 1 < curve.length && nodes.length < TRAIL_NODES_PAD; i++) {
+            const a = curve[i]
+            const b = curve[i + 1]
+            nodes.push({
+              x1: a.x / zoom,
+              y1: a.y / zoom,
+              x2: b.x / zoom,
+              y2: b.y / zoom,
+              s1: a.s,
+              s2: b.s,
+            })
+          }
+        }
+        curve = []
       }
       const gamma = 0.4 + (1 - globals.trailIntensity) * 2.6
 
       for (const [id, ps] of pointers) {
+        curve = []
         let pathLen = 0
         for (let i = 1; i < ps.trail.length; i++) {
           pathLen += Math.hypot(
@@ -847,9 +893,10 @@ export function PartyBackground() {
           const last = pts[pts.length - 1]
           push(last.x, last.y, last.s)
         }
+        flushCurve()
       }
       while (nodes.length < TRAIL_NODES_PAD) {
-        nodes.push({ x: 0, y: 0, s: 0 })
+        nodes.push({ x1: 0, y1: 0, x2: 0, y2: 0, s1: 0, s2: 0 })
       }
       return nodes
     }
@@ -1020,6 +1067,8 @@ export function PartyBackground() {
     const rebuildVoronoi = () => {
       voroSeeds = []
       voroCellPx = []
+      cellLetter = new Int32Array(0)
+      letterCount = 0
       voroPower = null
       glyphGrid = null
       censusCells = null
@@ -1055,6 +1104,34 @@ export function PartyBackground() {
       NAME_LINES.forEach((text, i) => {
         ctx.fillText(text, NAME_MARGIN_PX, name!.topY + i * name!.lineGap)
       })
+      // Per-letter page-space boxes, measured by prefix so kerning is
+      // included. Letters are separated by blank raster, so a pixel only ever
+      // falls in the box of the letter it belongs to.
+      const letterBoxes: { x0: number; x1: number; y0: number; y1: number }[] = []
+      NAME_LINES.forEach((text, li) => {
+        const yTop = name!.topY + li * name!.lineGap
+        const yBot = yTop + name!.lineGap
+        let prev = 0
+        for (let j = 0; j < text.length; j++) {
+          const w = ctx.measureText(text.slice(0, j + 1)).width
+          if (text[j].trim()) {
+            letterBoxes.push({
+              x0: NAME_MARGIN_PX + prev,
+              x1: NAME_MARGIN_PX + w,
+              y0: yTop,
+              y1: yBot,
+            })
+          }
+          prev = w
+        }
+      })
+      const letterAt = (x: number, y: number) => {
+        for (let i = 0; i < letterBoxes.length; i++) {
+          const b = letterBoxes[i]
+          if (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1) return i
+        }
+        return -1
+      }
       const alpha = ctx.getImageData(0, 0, cols, rows).data
       const px: number[] = [] // fine-grid indices of glyph pixels
       const pxX: number[] = [] // page-space centers
@@ -1149,12 +1226,34 @@ export function PartyBackground() {
 
       const cellOf = new Int16Array(cols * rows).fill(-1)
       voroCellPx = Array.from({ length: target }, () => [])
+      // Which letter each cell mostly covers. Cells are compact and letters
+      // are disjoint, so a cell is almost always wholly inside one; the
+      // majority vote settles the rare straddler.
+      const letterVotes = Array.from({ length: target }, () => new Map<number, number>())
       for (let p = 0; p < n; p++) {
         cellOf[px[p]] = own[p]
         voroCellPx[own[p]].push(px[p])
+        const li = letterAt(pxX[p], pxY[p])
+        if (li >= 0) {
+          const v = letterVotes[own[p]]
+          v.set(li, (v.get(li) ?? 0) + 1)
+        }
       }
       voroSeeds = Array.from({ length: target }, (_, s) => ({ x: sx[s], y: sy[s] }))
       voroPower = { sx: [...sx], sy: [...sy], w: Float64Array.from(w) }
+      cellLetter = new Int32Array(target).fill(-1)
+      for (let c = 0; c < target; c++) {
+        let bestLi = -1
+        let bestN = 0
+        for (const [li, n] of letterVotes[c]) {
+          if (n > bestN) {
+            bestN = n
+            bestLi = li
+          }
+        }
+        cellLetter[c] = bestLi
+      }
+      letterCount = letterBoxes.length
       glyphGrid = { minX, minY, cols, rows, step, cellOf }
       censusCells = Int32Array.from(cellOf)
       censusVersion++
@@ -1525,28 +1624,56 @@ export function PartyBackground() {
         : Array.from(res.counts)
       pendingDelta1 = new Array<number>(voroSeeds.length).fill(0)
       densityStats.lastCounts = counts.slice()
+      // Equal totals per LETTER, not per cell. Two things follow from that.
+      // Cells are equal-area, so a flat per-cell target hands a wide M more
+      // particles than a narrow I -- each letter is instead owed the same
+      // share, split evenly across the cells that make it up. And the share
+      // is measured against how many particles are actually in the name right
+      // now, not against the configured minimum: the pulls park far more
+      // there than the minimum ever asks for, so a floor alone never engages
+      // and the letters keep whatever uneven population the field gave them.
+      // Targeting the live mean makes over-full letters donate to under-full
+      // ones, which is what levels them.
+      const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
+      for (let i = 0; i < cellLetter.length; i++) {
+        if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
+      }
+      let inNameNow = 0
+      for (let i = 0; i < counts.length; i++) inNameNow += counts[i]
+      const shareTotal = Math.max(totalMin, inNameNow)
+      const perLetter = letterCount > 0 ? shareTotal / letterCount : 0
+      const cellTarget = new Int32Array(voroSeeds.length)
+      for (let i = 0; i < cellTarget.length; i++) {
+        const li = i < cellLetter.length ? cellLetter[i] : -1
+        cellTarget[i] =
+          li >= 0 && cellsPerLetter[li] > 0 ? Math.round(perLetter / cellsPerLetter[li]) : perCell
+      }
       const used = new Uint32Array(counts.length) // sample cursor per cell
       let outsideUsed = 0
       const outsideAvail = Math.min(res.outsideCount, res.outside.length)
       const k = res.samplesPerCell
       // Donors keep a margin above the minimum so continuous drift between
       // neighboring cells doesn't ping-pong the same particles every round.
-      const donorFloor = perCell + Math.max(2, Math.round(perCell * 0.25))
+      const floorFor = (i: number) =>
+        cellTarget[i] + Math.max(2, Math.round(cellTarget[i] * 0.25))
       for (let ci = 0; ci < counts.length; ci++) {
         const cellPx = voroCellPx[ci]
         if (!cellPx || cellPx.length === 0) continue
-        let need = perCell - counts[ci]
+        let need = cellTarget[ci] - counts[ci]
         while (need > 0) {
           // Densest donor cell that stays comfortably above the minimum
           // after giving one up (and still has uncollected candidates).
           // The candidate cursor is bounded by the RAW census count — only
           // min(res.counts[i], k) sample slots were written this dispatch;
           // the credited count must never index into stale slots.
+          // Surplus is measured against each cell's own target, so a donor
+          // is a cell genuinely over its share rather than merely populous.
           let densest = -1
-          let densestCount = donorFloor
+          let bestSurplus = 0
           for (let i = 0; i < counts.length; i++) {
-            if (counts[i] > densestCount && used[i] < Math.min(res.counts[i], k)) {
-              densestCount = counts[i]
+            const surplus = counts[i] - floorFor(i)
+            if (surplus > bestSurplus && used[i] < Math.min(res.counts[i], k)) {
+              bestSurplus = surplus
               densest = i
             }
           }
@@ -1554,10 +1681,11 @@ export function PartyBackground() {
             // Last tier: margin donors and the outside pool are exhausted.
             // Take from any cell still above the bare minimum so no cell is
             // left under it while surplus exists anywhere.
-            let dc = perCell
+            let best = 0
             for (let i = 0; i < counts.length; i++) {
-              if (counts[i] > dc && used[i] < Math.min(res.counts[i], k)) {
-                dc = counts[i]
+              const surplus = counts[i] - cellTarget[i]
+              if (surplus > best && used[i] < Math.min(res.counts[i], k)) {
+                best = surplus
                 densest = i
               }
             }
@@ -1590,14 +1718,29 @@ export function PartyBackground() {
             break
           }
           recentlyMoved.set(donor, densityRound)
-          // Land on a random glyph pixel of the deficient cell; jitter
-          // stays within that pixel so the next census counts it here.
-          const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
-          const g = glyphGrid
-          const tx = g.minX + ((gi % g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
-          const ty = g.minY + (Math.floor(gi / g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
+          // Land on a particle already in the deficient cell, so arrivals
+          // join the crowd instead of scattering over the glyph: a random
+          // glyph pixel is uniform over the letter's area, which reads as a
+          // fine even dust, while landing on a neighbour inherits whatever
+          // clumping the field has already produced there. Only a cell the
+          // census found empty has no neighbour to copy, and that falls back
+          // to a random glyph pixel.
+          const occupied = Math.min(res.counts[ci], k)
+          let dest: { x: number; y: number } | null = null
+          if (occupied > 0) {
+            const si = ci * k + Math.floor(Math.random() * occupied)
+            dest = { x: res.samplePos[si * 2], y: res.samplePos[si * 2 + 1] }
+          } else {
+            // Jitter stays within one glyph pixel so the next census still
+            // counts the arrival in this cell.
+            const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
+            const g = glyphGrid
+            const tx = g.minX + ((gi % g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
+            const ty = g.minY + (Math.floor(gi / g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
+            dest = pageToWorld(tx, ty)
+          }
           engine.setParticle(donor, {
-            position: pageToWorld(tx, ty),
+            position: dest,
             velocity: { x: 0, y: 0 },
             size: 3,
             mass: 1,
@@ -2067,6 +2210,15 @@ export function PartyBackground() {
             teleportRate,
             densityStatus,
             cellAreas: voroCellPx.map((a) => a.length),
+            letterTotals: (() => {
+              const counts = densityStats.lastCounts
+              if (!counts.length || !letterCount) return []
+              const t = new Array<number>(letterCount).fill(0)
+              for (let i = 0; i < counts.length && i < cellLetter.length; i++) {
+                if (cellLetter[i] >= 0) t[cellLetter[i]] += counts[i]
+              }
+              return t
+            })(),
             densityStats: { ...densityStats, lastCounts: [...densityStats.lastCounts] },
             lastTickAt,
             census: lastCensus

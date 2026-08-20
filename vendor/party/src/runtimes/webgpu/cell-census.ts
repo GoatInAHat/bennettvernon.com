@@ -17,7 +17,7 @@ import type { GPUResources } from "./gpu-resources";
  *
  * Result buffer layout (u32): [outsideCount, counts[cellCount],
  * samples[cellCount * samplesPerCell], outside[outsideSamples],
- * outsidePos[outsideSamples * 2]]. Positions are f32 bit-cast into the same
+ * outsidePos[outsideSamples * 2], samplePos[cellCount * samplesPerCell * 2]]. Positions are f32 bit-cast into the same
  * u32 storage so one readback carries both.
  */
 export class CellCensus {
@@ -77,7 +77,8 @@ export class CellCensus {
         config.cellCount +
         config.cellCount * config.samplesPerCell +
         config.outsideSamples +
-        config.outsideSamples * 2;
+        config.outsideSamples * 2 +
+        config.cellCount * config.samplesPerCell * 2;
       this.result = device.createBuffer({
         size: this.resultLen * 4,
         usage:
@@ -151,6 +152,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot = atomicAdd(&res[1u + u32(cell)], 1u);
     if (slot < k) {
       atomicStore(&res[1u + cellCount + u32(cell) * k + slot], i);
+      let sbase = 1u + cellCount + cellCount * k + m + m * 2u + (u32(cell) * k + slot) * 2u;
+      atomicStore(&res[sbase], bitcast<u32>(p.position.x));
+      atomicStore(&res[sbase + 1u], bitcast<u32>(p.position.y));
     }
   } else {
     let slot = atomicAdd(&res[0], 1u);
@@ -258,6 +262,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
               view.buffer.slice(
                 view.byteOffset + (1 + c + c * k + m) * 4,
                 view.byteOffset + (1 + c + c * k + m + m * 2) * 4
+              )
+            ),
+            samplePos: new Float32Array(
+              view.buffer.slice(
+                view.byteOffset + (1 + c + c * k + m + m * 2) * 4,
+                view.byteOffset + (1 + c + c * k + m + m * 2 + c * k * 2) * 4
               )
             ),
             outsideCount: view[0],

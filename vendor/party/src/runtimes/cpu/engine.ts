@@ -172,6 +172,7 @@ export class CPUEngine extends AbstractEngine {
     const m = config.outsideSamples;
     const counts = new Uint32Array(c);
     const samples = new Uint32Array(c * k);
+    const samplePos = new Float32Array(c * k * 2);
     const outside = new Uint32Array(m);
     const outsidePos = new Float32Array(m * 2);
     let outsideCount = 0;
@@ -191,7 +192,11 @@ export class CPUEngine extends AbstractEngine {
       }
       if (cell >= 0 && cell < c) {
         const slot = counts[cell]++;
-        if (slot < k) samples[cell * k + slot] = i;
+        if (slot < k) {
+          samples[cell * k + slot] = i;
+          samplePos[(cell * k + slot) * 2] = p.position.x;
+          samplePos[(cell * k + slot) * 2 + 1] = p.position.y;
+        }
       } else {
         const slot = outsideCount++;
         if (slot < m) {
@@ -205,6 +210,7 @@ export class CPUEngine extends AbstractEngine {
       version: config.version,
       counts,
       samples,
+      samplePos,
       samplesPerCell: k,
       outside,
       outsidePos,

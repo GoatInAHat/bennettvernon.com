@@ -66,10 +66,11 @@ function run() {
     { shape: 'rect', x: 160, y: 320, halfW: 70, halfH: 40, strength: -40_000 },
     { shape: 'rect', x: 420, y: 400, halfW: 30, halfH: 30, strength: 8_000 },
   ])
+  // A stroke of spans plus one degenerate (stationary-cursor) span.
   fx.setDynamic([
-    { x: 250, y: 250, s: 6_000 },
-    { x: 290, y: 265, s: 6_000 },
-    { x: 330, y: 280, s: -9_000 },
+    { x1: 250, y1: 250, x2: 290, y2: 265, s1: 6_000, s2: 5_200 },
+    { x1: 290, y1: 265, x2: 330, y2: 280, s1: 5_200, s2: -9_000 },
+    { x1: 400, y1: 180, x2: 400, y2: 180, s1: -4_000, s2: -4_000 },
   ])
   fx.setField(discField(50_000, 44))
 
@@ -140,6 +141,48 @@ function run() {
       checks++
       if (observed > peak * (1 + 1e-9)) {
         throw new Error(`${g.key} ${prim.kind}: observed ${observed} exceeds peak ${peak}`)
+      }
+    }
+  }
+
+  // The trail is a curve, not a string of beads. Along a polyline of spans
+  // with uniform strength every point is ON the body, so the force there is
+  // the surface peak everywhere -- flat. Measuring to the sample points
+  // instead would dip between them, which is the beading this replaced.
+  {
+    const trail = new Effectors()
+    trail.setSoften(30)
+    const step = 30
+    const nodes = []
+    for (let x = 0; x + step <= 300; x += step) {
+      nodes.push({ x1: x, y1: 100, x2: x + step, y2: 100, s1: 7_000, s2: 7_000 })
+    }
+    trail.setDynamic(nodes)
+    const prim = trail.viz()[0].primitives
+    // Sampled a fixed 2 units off the curve, so the distance to the body is
+    // the same at every x. (Exactly ON the curve is skipped: there the push
+    // direction is a genuine tie between the two sides, so the law returns
+    // nothing -- a measure-zero set no particle lands on.)
+    let lo = Infinity
+    let hi = 0
+    for (let x = 0; x <= 300; x += 3) {
+      let best = 0
+      for (const p of prim) best = Math.max(best, forceAt(p, x, 102, out))
+      lo = Math.min(lo, best)
+      hi = Math.max(hi, best)
+    }
+    checks++
+    if (hi / lo > 1.0001) {
+      throw new Error(`trail ripples along its own curve: ${lo}..${hi}`)
+    }
+    // And the falloff away from the curve is the same law as any other body.
+    for (const d of [2, 15, 30, 90]) {
+      let got = 0
+      for (const p of prim) got = Math.max(got, forceAt(p, 150, 100 + d, out))
+      const want = (7_000 * 30 * 30) / (d * d + 30 * 30)
+      checks++
+      if (Math.abs(got - want) > 1e-9) {
+        throw new Error(`trail falloff at ${d}: ${got} !== ${want}`)
       }
     }
   }

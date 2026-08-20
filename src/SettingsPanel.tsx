@@ -74,7 +74,7 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'particleCount', label: 'particles', min: 500, max: 80000, step: 500 },
   { key: 'dragStrength', label: 'drag power', min: 0, max: 100000, step: 1000 },
   { key: 'nameAttraction', label: 'name pull', min: 0, max: 100000, step: 1000 },
-  { key: 'concaveAvoidance', label: 'concave avoidance', min: 1, max: 10, step: 0.1 },
+  { key: 'concaveAvoidance', label: 'concavity multiplier', min: 1, max: 10, step: 0.1 },
   { key: 'boxAttraction', label: 'text repel', min: 0, max: 100000, step: 1000 },
   { key: 'textStandoff', label: 'text standoff', min: 2, max: 150, step: 1 },
   { key: 'textSmoothing', label: 'blob smoothing', min: 1.05, max: 3, step: 0.05 },

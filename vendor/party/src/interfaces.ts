@@ -48,6 +48,10 @@ export type CellCensusResult = {
   counts: Uint32Array;
   /** samplesPerCell indices per cell; valid up to min(count, samplesPerCell). */
   samples: Uint32Array;
+  /** World positions of those same particles, x,y interleaved, same indexing
+   * as `samples`. Lets a caller place a particle onto one that is already in
+   * a cell without reading the particle buffer back off the GPU. */
+  samplePos: Float32Array;
   samplesPerCell: number;
   /** Indices of unclassified in-disc particles. */
   outside: Uint32Array;
