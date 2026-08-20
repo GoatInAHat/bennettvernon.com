@@ -115,7 +115,7 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameFont: 1, // Helvetica
   nameWeight: 700,
   nameDensity: 1000,
-  nameDensityRes: 36,
+  nameDensityRes: 72,
   // The other end of `nameDensity`: that is the fewest particles the name is
   // allowed to hold, this is the most. Same units -- a total across the whole
   // name -- so the pair reads as one quantity's two bounds. 0 lifts the cap.
