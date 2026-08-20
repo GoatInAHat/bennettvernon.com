@@ -386,6 +386,15 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     this.write({ nameZone: Array.from(zone) })
   }
 
+  /** The per-letter convex hulls the pocket mask was filled from, in world
+   * units. Debug geometry only: kept off `write()` so it is never uploaded
+   * to the GPU, since the shaders read the rasterized mask, not the
+   * polygons. */
+  private nameHulls: number[][][] = []
+  setNameHulls(hulls: number[][][]): void {
+    this.nameHulls = hulls
+  }
+
   /** Debug description decoded from the same packed arrays the shaders
    * consume, so the debug view always matches the live physics. */
   viz(): VizGroup[] {
@@ -489,9 +498,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       const concave = nameParams[1] ?? 1
       // The pocket boost is part of the name's force, not a body of its own,
       // so it rides along as a multiplier instead of a second primitive.
+      // Emitted whenever the mask exists, even at factor 1 where the boost is
+      // a no-op: the hulls are the geometry of the setting and are worth
+      // seeing before turning it up.
       const boost =
-        concave !== 1 && zone && zone.length >= cols * rows
-          ? { values: zone, factor: concave }
+        zone && zone.length >= cols * rows
+          ? { values: zone, factor: concave, hulls: this.nameHulls }
           : undefined
       add('effectors:name', false, {
         kind: 'field',

@@ -1279,6 +1279,9 @@ export function PartyBackground() {
       // component: monotone-chain hull of its cells, scanline-filled, minus
       // the glyph mask.
       const zone = new Float32Array(cols * rows)
+      // The hull polygons are kept as well as filled: the debug view outlines
+      // the real geometry rather than re-tracing the rasterized mask.
+      const hulls: number[][][] = []
       {
         const label = new Int32Array(cols * rows).fill(-1)
         const stack: number[] = []
@@ -1322,6 +1325,12 @@ export function PartyBackground() {
           }
           const hull = [...half(pts), ...half([...pts].reverse())]
           if (hull.length < 3) continue
+          hulls.push(
+            hull.map(([gx, gy]) => [
+              (minX + (gx + 0.5) * step) / zoom,
+              (minY + (gy + 0.5) * step) / zoom,
+            ]),
+          )
           let hy0 = rows
           let hy1 = 0
           for (const p of hull) {
@@ -1351,6 +1360,7 @@ export function PartyBackground() {
         }
       }
       effectors.setNameZone(zone)
+      effectors.setNameHulls(hulls)
 
       cellWeights = new Float32Array(target)
       cellWeightsShown = new Float32Array(target)

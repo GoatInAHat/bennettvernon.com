@@ -272,6 +272,27 @@ function strokeBodies(
   ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
   ctx.lineWidth = 1.25
   ctx.beginPath()
+  // Regions that scale a body's force rather than emit it -- the convex
+  // hulls the name's concavity boost is filled from -- are drawn dashed, so
+  // the solid contour always means "this is the body".
+  ctx.save()
+  ctx.setLineDash([4, 4])
+  ctx.lineWidth = 1
+  ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity * 0.7))
+  ctx.beginPath()
+  for (const p of g.primitives) {
+    if (p.kind !== 'field' || !p.boost?.hulls) continue
+    for (const poly of p.boost.hulls) {
+      if (poly.length < 3) continue
+      ctx.moveTo(poly[0][0] * zoom, poly[0][1] * zoom)
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0] * zoom, poly[i][1] * zoom)
+      ctx.closePath()
+    }
+  }
+  ctx.stroke()
+  ctx.restore()
+
+  ctx.beginPath()
   for (const p of g.primitives) {
     if (p.kind === 'rect') {
       ctx.rect((p.x - p.hw) * zoom, (p.y - p.hh) * zoom, p.hw * 2 * zoom, p.hh * 2 * zoom)

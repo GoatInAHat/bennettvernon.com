@@ -87,8 +87,15 @@ export type VizPrimitive =
        * inverse-square law, with no reach to configure. */
       push?: boolean;
       /** Per-cell multiplier on the same grid; magnitude is scaled by
-       * `1 + (factor - 1) * sample`. */
-      boost?: { values: ArrayLike<number>; factor: number };
+       * `1 + (factor - 1) * sample`. `hulls` are the closed world-space
+       * polygons that region was derived from, carried so a viewer can
+       * outline the actual geometry behind the mask instead of re-tracing a
+       * rasterized copy of it. */
+      boost?: {
+        values: ArrayLike<number>;
+        factor: number;
+        hulls?: number[][][];
+      };
     };
 
 export interface VizGroup {

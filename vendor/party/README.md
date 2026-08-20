@@ -47,7 +47,9 @@ Every divergence from upstream is listed here.
   optional `strengthEnd` so one segment can taper along its length instead
   of becoming a chain of primitives), the `soften` length of the
   inverse-square falloff, and for fields the surface
-  `offset`, the `push` direction, and an optional per-cell `boost` grid —
+  `offset`, the `push` direction, and an optional per-cell `boost` grid
+  (which can carry the polygons that region was derived from, so a viewer
+  outlines the real geometry instead of re-tracing the rasterized mask) —
   rather than a pre-baked picture of the falloff. That lets a viewer
   evaluate the true force at any point
   instead of approximating it with its own constants, which is what the
