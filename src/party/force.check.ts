@@ -215,17 +215,11 @@ function run() {
     // Sweep the interior: every sampled point must feel the push. A single
     // dead cell here is a particle trap in the simulation and a hole in the
     // debug glow.
-    // The exact centre of a four-way symmetric shape is skipped: there the
-    // nearest exit is a genuine tie in all four directions and no gradient can
-    // break it. Real glyph shapes have no such symmetry.
-    const midX = (cols - 1) / 2
-    const midY = (rows - 1) / 2
     let dead = 0
     let sampled = 0
     const deadAt: string[] = []
     for (let gy = 4; gy < rows - 4; gy++) {
       for (let gx = 4; gx < cols - 4; gx++) {
-        if (Math.abs(gx - midX) <= 0.5 && Math.abs(gy - midY) <= 0.5) continue
         sampled++
         if (forceAt(prim, (gx + 0.5) * cell, (gy + 0.5) * cell, out) <= 0) {
           dead++
@@ -236,6 +230,46 @@ function run() {
     checks++
     if (dead > 0) {
       throw new Error(`${dead}/${sampled} cells exert no force at ${JSON.stringify(deadAt)}`)
+    }
+  }
+
+  // Two bars with a gap: the medial axis down the middle is a ridge where the
+  // distance falls away equally on both sides. Every symmetric stencil ties
+  // there, so without a tie-break the force dies along the whole seam -- which
+  // is exactly the gap between two lines of a name.
+  {
+    const cols = 40
+    const rows = 40
+    const cell = 10
+    const distances = new Float32Array(cols * rows)
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        // Bars at rows 6..12 and 27..33; distance to the nearer one.
+        const dTop = r < 6 ? 6 - r : r > 12 ? r - 12 : 0
+        const dBot = r < 27 ? 27 - r : r > 33 ? r - 33 : 0
+        distances[r * cols + c] = Math.round(Math.min(dTop, dBot)) * cell
+      }
+    }
+    const bars = new Effectors()
+    bars.setSoften(30)
+    bars.setNameField({ originX: 0, originY: 0, cell, cols, rows, strength: 0, padding: 0, distances })
+    bars.setNameParams(9_000, 1)
+    const prim = bars.viz()[0].primitives[0]
+    let dead = 0
+    const deadAt: string[] = []
+    for (let gy = 3; gy < rows - 4; gy++) {
+      for (let gx = 3; gx < cols - 4; gx++) {
+        // Only outside the bars, where the pull is defined at all.
+        if (distances[gy * cols + gx] <= 0) continue
+        if (forceAt(prim, (gx + 0.5) * cell, (gy + 0.5) * cell, out) <= 0) {
+          dead++
+          if (deadAt.length < 6) deadAt.push(`${gx},${gy}`)
+        }
+      }
+    }
+    checks++
+    if (dead > 0) {
+      throw new Error(`${dead} dead cells on the ridge between two bars at ${JSON.stringify(deadAt)}`)
     }
   }
 

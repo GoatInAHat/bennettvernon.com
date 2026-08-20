@@ -58,9 +58,17 @@ export function vizFmax(groups: VizGroup[]): number {
  * This is a property of the pixel format, not of the physics — it is the
  * only constant in this file that shapes what gets drawn. */
 const ALPHA_QUANTUM = 0.5 / 255
-/** Cells evaluated per group per frame. Cells coarsen rather than the field
- * being clipped, so a glow never loses its outer reach to a budget. */
-const CELL_BUDGET = 600_000
+/**
+ * Force evaluations per group per frame. The budget is on EVALUATIONS, not
+ * cells: every cell is tested against every live primitive, so a hundred-span
+ * cursor trail costs a hundred times a single body at the same resolution.
+ * Budgeting cells alone let the trail reach ~7.7M evaluations a frame, which
+ * stalls the main thread hard enough that the simulation loses frames and
+ * looks like the forces switched off. Cells coarsen instead, so a glow never
+ * loses its outer reach to the budget — only its sharpness, and only while
+ * something is moving.
+ */
+const EVAL_BUDGET = 400_000
 const MIN_CELL_PX = 3
 
 /**
@@ -126,7 +134,7 @@ function drawGlow(
   const h = y1 - y0
   if (!(w > 0 && h > 0)) return
 
-  const cell = Math.max(MIN_CELL_PX, Math.sqrt((w * h) / CELL_BUDGET))
+  const cell = Math.max(MIN_CELL_PX, Math.sqrt((w * h * live.length) / EVAL_BUDGET))
   const cols = Math.max(1, Math.ceil(w / cell))
   const rows = Math.max(1, Math.ceil(h / cell))
   const img = new ImageData(cols, rows)

@@ -101,7 +101,10 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameAttraction: EFFECTOR_STRENGTH,
   concaveAvoidance: 1,
   boxAttraction: EFFECTOR_STRENGTH,
-  textStandoff: 44,
+  // The force body is the glyph shape barely dilated, matching the inner
+  // isoline the old renderer drew as the body. The reach past it is the
+  // inverse-square tail, not a padded shell.
+  textStandoff: 4,
   textSmoothing: 1.8,
   separatorAttraction: EFFECTOR_STRENGTH,
   cursorStrength: EFFECTOR_STRENGTH,

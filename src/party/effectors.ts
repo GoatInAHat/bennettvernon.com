@@ -114,13 +114,29 @@ function sampleField(
   let gx = (v10 - v00) * (1 - ty) + (v11 - v01) * ty
   let gy = (v01 - v00) * (1 - tx) + (v11 - v10) * tx
   if (gx === 0 && gy === 0) {
-    // The 2x2 stencil is flat. A discrete distance transform plateaus along
-    // the medial axis of any filled shape, so this is common inside a body,
-    // not a corner case -- and leaving the direction undefined there carves
-    // force-free pockets that trap particles. Widen the stencil by one cell
-    // (in bounds by the same margin the 2x2 fetch needs) to recover it.
+    // The 2x2 stencil is flat. A discrete distance transform quantizes to
+    // whole cells, so neighbours hold identical values across most of the
+    // field near a shape. Widen by one cell to recover the slope.
     gx = p.values[b + 2] + p.values[b + c + 2] - p.values[b - 1] - p.values[b + c - 1]
     gy = p.values[b + 2 * c] + p.values[b + 2 * c + 1] - p.values[b - c] - p.values[b - c + 1]
+  }
+  if (gx === 0 && gy === 0) {
+    // Still flat, so this is a ridge: the medial axis between two parts of
+    // the shape, where the distance falls away EQUALLY on both sides and no
+    // symmetric stencil can ever choose between them. Left at zero the force
+    // vanishes along the entire axis -- a seam of dead cells straight down
+    // the gap between two lines of text. Point at the lowest neighbour
+    // instead: arbitrary between the tied sides, but stable, nonzero, and it
+    // keeps the magnitude the law already decided on.
+    const vl = p.values[b - 1]
+    const vr = p.values[b + 2]
+    const vu = p.values[b - c]
+    const vd = p.values[b + 2 * c]
+    const lo = Math.min(vl, vr, vu, vd)
+    if (lo === vl) gx = 1
+    else if (lo === vr) gx = -1
+    else if (lo === vu) gy = 1
+    else if (lo === vd) gy = -1
   }
   return {
     v: (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty,
@@ -545,10 +561,22 @@ fn force_mag(s: f32, r: f32, L: f32) -> f32 {
 // no force at all in scattered cells -- particle traps in the simulation, and
 // holes in the debug glow that read as little rectangles.
 fn field_grad(v00: f32, v10: f32, v01: f32, v11: f32, tx: f32, ty: f32,
-              wx0: f32, wx1: f32, wy0: f32, wy1: f32) -> vec2<f32> {
+              wx0: f32, wx1: f32, wy0: f32, wy1: f32,
+              nl: f32, nr: f32, nu: f32, nd: f32) -> vec2<f32> {
   var g = vec2<f32>(mix(v10 - v00, v11 - v01, ty), mix(v01 - v00, v11 - v10, tx));
   if (g.x == 0.0 && g.y == 0.0) {
     g = vec2<f32>(wx1 - wx0, wy1 - wy0);
+  }
+  if (g.x == 0.0 && g.y == 0.0) {
+    // A ridge: distance falls away equally on both sides, so no symmetric
+    // stencil can choose. Point at the lowest neighbour -- arbitrary between
+    // the tied sides, but stable and nonzero, which keeps the force instead
+    // of leaving a dead seam along the whole medial axis.
+    let lo = min(min(nl, nr), min(nu, nd));
+    if (lo == nl) { g = vec2<f32>(1.0, 0.0); }
+    else if (lo == nr) { g = vec2<f32>(-1.0, 0.0); }
+    else if (lo == nu) { g = vec2<f32>(0.0, 1.0); }
+    else if (lo == nd) { g = vec2<f32>(0.0, -1.0); }
   }
   return g;
 }`
@@ -683,7 +711,9 @@ fn field_grad(v00: f32, v10: f32, v01: f32, v11: f32, tx: f32, ty: f32,
         ${getUniform('field', 'i00 - 1u')} + ${getUniform('field', 'i00 + cols - 1u')},
         ${getUniform('field', 'i00 + 2u')} + ${getUniform('field', 'i00 + cols + 2u')},
         ${getUniform('field', 'i00 - cols')} + ${getUniform('field', 'i00 - cols + 1u')},
-        ${getUniform('field', 'i00 + 2u * cols')} + ${getUniform('field', 'i00 + 2u * cols + 1u')});
+        ${getUniform('field', 'i00 + 2u * cols')} + ${getUniform('field', 'i00 + 2u * cols + 1u')},
+        ${getUniform('field', 'i00 - 1u')}, ${getUniform('field', 'i00 + 2u')},
+        ${getUniform('field', 'i00 - cols')}, ${getUniform('field', 'i00 + 2u * cols')});
       let gx = g.x;
       let gy = g.y;
       let gl = sqrt(gx * gx + gy * gy);
@@ -728,7 +758,9 @@ fn field_grad(v00: f32, v10: f32, v01: f32, v11: f32, tx: f32, ty: f32,
           ${getUniform('nameField', 'ni00 - 1u')} + ${getUniform('nameField', 'ni00 + ncols - 1u')},
           ${getUniform('nameField', 'ni00 + 2u')} + ${getUniform('nameField', 'ni00 + ncols + 2u')},
           ${getUniform('nameField', 'ni00 - ncols')} + ${getUniform('nameField', 'ni00 - ncols + 1u')},
-          ${getUniform('nameField', 'ni00 + 2u * ncols')} + ${getUniform('nameField', 'ni00 + 2u * ncols + 1u')});
+          ${getUniform('nameField', 'ni00 + 2u * ncols')} + ${getUniform('nameField', 'ni00 + 2u * ncols + 1u')},
+          ${getUniform('nameField', 'ni00 - 1u')}, ${getUniform('nameField', 'ni00 + 2u')},
+          ${getUniform('nameField', 'ni00 - ncols')}, ${getUniform('nameField', 'ni00 + 2u * ncols')});
         let ngx = ng.x;
         let ngy = ng.y;
         let ngl = sqrt(ngx * ngx + ngy * ngy);
@@ -890,6 +922,18 @@ ${namePart(args)}
                 field[i00 + 2 * cols] + field[i00 + 2 * cols + 1] -
                 field[i00 - cols] - field[i00 - cols + 1]
             }
+            if (gx === 0 && gy === 0) {
+              const lo = Math.min(
+                field[i00 - 1],
+                field[i00 + 2],
+                field[i00 - cols],
+                field[i00 + 2 * cols],
+              )
+              if (lo === field[i00 - 1]) gx = 1
+              else if (lo === field[i00 + 2]) gx = -1
+              else if (lo === field[i00 - cols]) gy = 1
+              else if (lo === field[i00 + 2 * cols]) gy = -1
+            }
             const gl = Math.hypot(gx, gy)
             if (gl > 0) {
               const m = forceMag(fstrength, Math.max(d - pad, 0), L)
@@ -926,6 +970,13 @@ ${namePart(args)}
               if (gx === 0 && gy === 0) {
                 gx = nf[i00 + 2] + nf[i00 + cols + 2] - nf[i00 - 1] - nf[i00 + cols - 1]
                 gy = nf[i00 + 2 * cols] + nf[i00 + 2 * cols + 1] - nf[i00 - cols] - nf[i00 - cols + 1]
+              }
+              if (gx === 0 && gy === 0) {
+                const lo = Math.min(nf[i00 - 1], nf[i00 + 2], nf[i00 - cols], nf[i00 + 2 * cols])
+                if (lo === nf[i00 - 1]) gx = 1
+                else if (lo === nf[i00 + 2]) gx = -1
+                else if (lo === nf[i00 - cols]) gy = 1
+                else if (lo === nf[i00 + 2 * cols]) gy = -1
               }
               const gl = Math.hypot(gx, gy)
               if (gl > 0) {
