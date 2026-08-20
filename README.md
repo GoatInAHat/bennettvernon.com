@@ -12,6 +12,3 @@ upstream playground (MIT).
 npm install
 npm run dev
 ```
-
-Pushes to `main` deploy to [bennettvernon.com](https://bennettvernon.com) via
-GitHub Pages.
