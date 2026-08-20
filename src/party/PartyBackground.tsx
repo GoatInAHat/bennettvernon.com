@@ -7,6 +7,7 @@ import {
   type VizGroup,
 } from '@cazala/party'
 import { drawViz, vizFmax, vizCss, vizRgb } from './viz'
+import { planDensity } from './density'
 import {
   bridge,
   NAME_FONTS,
@@ -124,6 +125,18 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   // cases that would otherwise overpack it -- a stronger pull, a denser
   // mode, a smaller name. Lower it to deliberately thin the letters out.
   maxNameDensity: 24_000,
+  // How far a cell may sit from its equal share before particles are moved,
+  // as a fraction of that share. Without it every rule in the enforcement
+  // path was an exact integer: a cell one particle light was corrected, and
+  // corrected back to the very count that re-triggers on the next particle
+  // of drift, so the field and the enforcement fought each frame forever.
+  // A band gives the two of them somewhere to meet -- any arrangement inside
+  // it satisfies the rule, so a settled name needs no teleports at all.
+  // Cost is uniformity: at the ~290 particles a cell holds by default, 0.1
+  // is +-29. Traffic scales as 1/variance, so halving this roughly doubles
+  // it. 0 still keeps one particle of margin, which is the least a discrete
+  // count can have.
+  densityVariance: 0.1,
   nameBaseOpacity: 0.05,
   nameDensityOpacity: 0.35,
   opacityDamping: 0.85,
@@ -395,6 +408,9 @@ export function PartyBackground() {
       fromOutside: 0,
       evicted: 0,
       lastTargets: [] as number[],
+      /** Per-cell band half-width. A cell within `lastTol` of its target is
+       * in spec and is left alone. */
+      lastTol: [] as number[],
       lastCellLetter: [] as number[],
       lastCellsPerLetter: [] as number[],
       lastCountsAfter: [] as number[],
@@ -410,19 +426,55 @@ export function PartyBackground() {
       /** Results retired because enforcement had been idle since they were
        * dispatched, so they no longer describe the live distribution. */
       gapDiscard: 0,
+      /** Rounds where every rule was already satisfied and nothing moved.
+       * The point of the bands: this should be most of them once the field
+       * stops churning the name's population. */
+      settled: 0,
       lastCounts: [] as number[],
     }
     let censusCells: Int32Array | null = null
     let censusVersion = 0
     let lastCensus: CellCensusResult | null = null
-    /** Set whenever a round returns before consuming a census. The result
-     * waiting after such a gap describes a distribution the field has since
-     * left, so acting on it means one round of large, wrong corrections. */
-    let censusGap = true
-    /** Net corrections issued since the in-flight census was dispatched. */
-    let densityRound = 0
-    /** Particle index → round it was relocated (stale in census samples). */
-    const recentlyMoved = new Map<number, number>()
+    /** Raised whenever enforcement pauses — a round that returned early, a
+     * repartition, a frame that never ran. Every census dispatched before the
+     * pause describes a distribution the field has since left, so acting on
+     * one means a round of large, wrong corrections.
+     *
+     * A watermark, not a flag: several dispatches are in flight at once, so a
+     * boolean would retire the first result after the gap and then act on the
+     * second, which is just as old. Results are discarded until one dispatched
+     * after the pause arrives. */
+    let censusGapUntil = 0
+    /** Dispatches the engine reports having issued, as of the last round.
+     * A pause is recorded against this, so the results already in flight when
+     * it happened are the ones discarded. */
+    let censusIssued = 0
+    /** Smoothed frame interval, so "a frame that never ran" is judged against
+     * how fast this machine actually runs rather than a fixed millisecond
+     * count. */
+    let frameEma = 0
+    /** Serial of the census this system last acted on. Reset with the engine:
+     * serials restart at zero on a new one, and comparing across the two
+     * namespaces would pin every ledger entry forever. */
+    let lastCensusSerial = -1
+    /** Particle index → the census `issued` value when it was relocated, i.e.
+     * the first dispatch that can see it at its new position. Until then the
+     * samples still list it where it was, and donating it again would drain
+     * the cell it was just placed into. The engine reports both serials, so
+     * this needs no guess at the readback latency — which differs between the
+     * runtimes and moves with GPU load. */
+    const movedAt = new Map<number, number>()
+    /** Per-cell corrections already applied that the census has not caught up
+     * to, keyed by the same first-visible dispatch. Added to the measured
+     * counts so a correction is not issued once per frame of readback lag.
+     *
+     * This is credit, which was a bug the last time it was tried — but there
+     * it was unconditional, so a cell the field had emptied again still read
+     * as full and the bookkeeping confirmed its own success. Here an entry
+     * survives only while the census provably cannot have seen it, and is
+     * dropped the moment a dispatch that could have lands. A move that did
+     * not stick shows up as measured reality one round later. */
+    const pending: { vis: number; delta: Int32Array }[] = []
     let teleportCount = 0
     let teleportWindowStart = 0
     let teleportRate = 0
@@ -941,14 +993,27 @@ export function PartyBackground() {
     const tick = () => {
       if (!engine) return
       const now = performance.now()
+      const dtMs = now - lastTickAt
       if (lastTickAt > 0) {
-        frameDts[frameDtIndex] = now - lastTickAt
+        frameDts[frameDtIndex] = dtMs
         frameDtIndex = (frameDtIndex + 1) % frameDts.length
         // Advance the oscillator clock by clamped frame time (matching the
         // engine's own 100ms dt clamp): after a hidden tab or a long frame
         // the phase moves one step, not the whole wall-clock gap — an
         // unclamped clock would snap every oscillated param on resume.
         oscClock += Math.min(now - lastTickAt, 100) / 1000
+        // A frame that never ran is a gap in enforcement exactly like a round
+        // that returned early: the field kept moving, the census did not,
+        // and on the first frame back the waiting result describes a
+        // distribution long gone. Resuming from one used to mean a single
+        // enormous burst of corrections against counts that were seconds old.
+        //
+        // Measured against the recent frame interval rather than a fixed
+        // millisecond count, so it means the same thing at 30 Hz and 240 Hz.
+        // A wall-clock threshold is a frame count in disguise: 100ms is three
+        // skipped frames on one machine and twenty-four on another.
+        frameEma = frameEma > 0 ? frameEma + (dtMs - frameEma) * 0.1 : dtMs
+        if (dtMs > 4 * frameEma) censusGapUntil = censusIssued
       }
       lastTickAt = now
       const oscSec = oscClock
@@ -1290,6 +1355,12 @@ export function PartyBackground() {
       glyphGrid = { minX, minY, cols, rows, step, cellOf }
       censusCells = Int32Array.from(cellOf)
       censusVersion++
+      // The ledgers below are keyed to the partition that just went away:
+      // a per-cell delta indexes cells that no longer mean the same thing,
+      // and could be a different length entirely.
+      pending.length = 0
+      movedAt.clear()
+      censusGapUntil = censusIssued
 
       // The name's signed distance field, derived from the same raster:
       // this IS the attraction physics — particles are pulled toward the
@@ -1548,17 +1619,24 @@ export function PartyBackground() {
       octx.globalCompositeOperation = 'source-over'
     }
 
-    // Keeps every Voronoi cell of the name at its minimum particle count by
-    // teleporting donors — first from name cells that sit above the minimum
-    // (densest first, so the distribution self-levels), then from particles
-    // outside the name. The counting and candidate collection run on the
-    // GPU as the engine's cell-census compute pass with an async readback,
-    // so enforcement is per-frame with no pipeline stalls and no teleport
-    // caps. Physics is untouched — only positions move.
+    // Holds every Voronoi cell of the name inside a band around its equal
+    // share of the population, by teleporting donors: fullest cell into
+    // emptiest first, and the pool outside the name only when the name as a
+    // whole is short. The counting and candidate collection run on the GPU
+    // as the engine's cell-census compute pass with an async readback, so
+    // enforcement is per-frame with no pipeline stalls and no teleport caps.
+    // Physics is untouched — only positions move.
+    //
+    // Every rule here is a band, not a point. That is the difference between
+    // a system that settles and one that does not: an exact target is met on
+    // a set of states with no thickness, so the field leaves it on the very
+    // next frame and enforcement chases it forever. With a band there is a
+    // whole region of arrangements that satisfy every rule at once, and a
+    // name sitting anywhere inside it costs nothing.
     const enforceDensity = () => {
       if (!engine || !name || !glyphGrid || !censusCells || voroSeeds.length === 0) {
         densityStatus = `guards e=${!!engine} n=${!!name} g=${!!glyphGrid} c=${!!censusCells} s=${voroSeeds.length}`
-        censusGap = true
+        censusGapUntil = censusIssued
         return
       }
       // `name density` means what it says. The only ceiling is the number of
@@ -1567,7 +1645,7 @@ export function PartyBackground() {
       const totalMin = Math.round(Math.min(globals.nameDensity, engine.getCount()))
       if (totalMin <= 0) {
         densityStatus = 'min<=0'
-        censusGap = true
+        censusGapUntil = censusIssued
         // With enforcement off, the density opacity eases back to baseline
         // instead of freezing at the last enforced snapshot.
         cellWeights.fill(0)
@@ -1587,12 +1665,15 @@ export function PartyBackground() {
       // owes an equal share of the total. No floor — flooring to one per
       // cell would let total demand exceed the population cap above when
       // there are more cells than the configured total.
+      //
+      // Kept only as the opacity reference below. It used to gate the whole
+      // system off when it rounded to zero, which was the last rule here with
+      // no margin at all: not a tolerance on a count but a cliff on whether
+      // to enforce anything, and it moved with the cell count — at 120 cells
+      // any `name density` under 60 silently switched enforcement off, and
+      // crossing back cost a discarded round on top. Nothing downstream needs
+      // it: the targets come from the measured total, not from this.
       const perCell = Math.round(totalMin / voroSeeds.length)
-      if (perCell <= 0) {
-        cellWeights.fill(0)
-        censusGap = true
-        return
-      }
       const w = name.width
       const h = name.bottom - name.topY
       const center = pageToWorld(NAME_MARGIN_PX + w / 2, name.topY + h / 2)
@@ -1611,15 +1692,15 @@ export function PartyBackground() {
         samplesPerCell: CENSUS_SAMPLES_PER_CELL,
         outsideSamples: CENSUS_OUTSIDE_SAMPLES,
       })
-      // Act only on fresh census data: the GPU result is a frame or two
-      // old, and re-applying the same deficits against stale counts would
-      // overshoot into oscillation.
+      // Act only on a census this system has not already acted on: applying
+      // the same deficits twice would double every correction.
       densityStats.calls++
+      if (res) censusIssued = res.issued
       if (!res) {
         densityStats.noRes++
         return
       }
-      if (res === lastCensus) {
+      if (res.serial === lastCensusSerial) {
         densityStats.stale++
         return
       }
@@ -1630,35 +1711,27 @@ export function PartyBackground() {
         densityStats.mismatch++
         return
       }
-      if (censusGap) {
-        censusGap = false
+      // Discard everything dispatched before the pause. The ledgers are NOT
+      // cleared here: they record which particles the census still shows at
+      // their old positions, and a pause does not make that untrue -- their
+      // own retire rule below is already exact. Clearing them released every
+      // just-moved particle as a donor while the next census still listed it
+      // where it used to be, so it was donated twice and the cell it had been
+      // placed into was silently drained again.
+      if (res.serial < censusGapUntil) {
         lastCensus = res
+        lastCensusSerial = res.serial
         densityStats.gapDiscard++
         return
       }
       lastCensus = res
+      lastCensusSerial = res.serial
       densityStats.rounds++
-      densityRound++
-      // Particles this system relocated in the last two rounds still appear
-      // at their OLD location in the (one-round-stale) census samples;
-      // re-donating one would silently drain the cell it was just placed
-      // into. Skip them as donor candidates until a census has seen them.
-      for (const [idx, r] of recentlyMoved) {
-        if (densityRound - r > 2) recentlyMoved.delete(idx)
-      }
-      const isFreshDonor = (idx: number) => !recentlyMoved.has(idx)
-      // Work from what the census MEASURED, never from what this code
-      // believes it achieved. Crediting the previous round's teleports made
-      // the bookkeeping self-confirming: a cell the field had emptied again
-      // still read as full, so no deficit was seen and no retry was made,
-      // and every internal metric reported success while the cell sat
-      // hundreds short. Acting on the measurement each round costs at worst
-      // a bounded overshoot when the readback lags, which the surplus path
-      // then redistributes away -- an error that corrects itself, rather than
-      // one that hides.
-      const counts = Array.from(res.counts)
-      densityStats.lastCounts = counts.slice()
-      densityStats.lastRawCounts = Array.from(res.counts)
+      // Retire every ledger entry this census could have seen. What is left
+      // is exactly the set of corrections still invisible to it.
+      for (const [idx, vis] of movedAt) if (res.serial >= vis) movedAt.delete(idx)
+      while (pending.length > 0 && res.serial >= pending[0].vis) pending.shift()
+      const isFreshDonor = (idx: number) => !movedAt.has(idx)
       // One rule sets every target, and the three knobs are its three cases.
       //
       //   how many the name holds = clamp(what it holds now, min, max)
@@ -1668,234 +1741,211 @@ export function PartyBackground() {
       // surplus is sent back out. In between, the population is whatever the
       // pulls delivered and the only work is redistribution. Both bounds are
       // TOTALS across the name, the same units `name density` has always
-      // used, so the pair reads as the two ends of one quantity.
+      // used, so the pair reads as the two ends of one quantity -- and that
+      // pair IS the total's margin: any population between them satisfies the
+      // rule and needs no teleport at all.
       //
       // That total is spread at EQUAL DENSITY. The Voronoi cells are built
       // equal-area, so equal density is simply an equal count in every cell,
       // and each letter ends up holding particles in proportion to its own
       // ink area -- a B more than a T, because a B is more letter.
-      //
-      // The alternative, an equal COUNT per letter, was measured and does not
-      // survive contact with the field: the smallest letter is a single cell
-      // of 124 glyph pixels, so an equal share works out at 13.9 particles
-      // per pixel against a median achieved density of 5.14. Those particles
-      // were teleported in and immediately bled back out, every frame, and
-      // the letter still sat 897 short.
       const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
       for (let i = 0; i < cellLetter.length; i++) {
         if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
       }
+      // Measured reality, plus only those corrections the census provably
+      // cannot have seen yet.
+      const n = res.counts.length
+      const counts = new Int32Array(n)
+      for (let i = 0; i < n; i++) counts[i] = res.counts[i]
+      for (const p of pending) {
+        for (let i = 0; i < n; i++) counts[i] += p.delta[i]
+      }
+      for (let i = 0; i < n; i++) if (counts[i] < 0) counts[i] = 0
+      densityStats.lastCounts = Array.from(counts)
+      densityStats.lastRawCounts = Array.from(res.counts)
       let inNameNow = 0
-      for (let i = 0; i < counts.length; i++) inNameNow += counts[i]
+      for (let i = 0; i < n; i++) inNameNow += counts[i]
       const capTotal =
         globals.maxNameDensity > 0 ? Math.max(totalMin, globals.maxNameDensity) : Infinity
-      const shareTotal = Math.min(Math.max(inNameNow, totalMin), capTotal)
-      const perCellShare = Math.round(shareTotal / Math.max(1, counts.length))
-      const cellTarget = new Int32Array(voroSeeds.length).fill(perCellShare)
-      densityStats.lastTargets = Array.from(cellTarget)
+      // Every decision lives in `planDensity`, which is pure arithmetic over
+      // the counts and gets asserted directly by `density.check.ts`. What is
+      // left here is plumbing: which particle to move, where to land it, and
+      // what the census can still tell us about either.
+      const plan = planDensity(counts, {
+        min: totalMin,
+        cap: capTotal,
+        variance: globals.densityVariance,
+      })
+      densityStats.lastTargets = Array.from(plan.target)
+      densityStats.lastTol = Array.from(plan.tol)
       densityStats.lastCellLetter = Array.from(cellLetter)
       densityStats.lastCellsPerLetter = Array.from(cellsPerLetter)
-      densityStats.lastShareTotal = Math.round(shareTotal)
+      densityStats.lastShareTotal = plan.total
       densityStats.lastInName = inNameNow
-      const used = new Uint32Array(counts.length) // sample cursor per cell
+      // Density-weighted name opacity targets: the densest cell pins the max,
+      // the rest interpolate by their surplus above the minimum; the tick
+      // loop eases the displayed opacity toward these (opacity damping) to
+      // eliminate flicker. Weighted from what the census MEASURED, never from
+      // the working array: `counts` carries corrections still in flight, so a
+      // cell the field keeps emptying would render at full density opacity
+      // while visibly sparse.
+      const weighOpacity = () => {
+        if (cellWeights.length !== res.counts.length) return
+        let maxCount = 0
+        for (let i = 0; i < res.counts.length; i++) maxCount = Math.max(maxCount, res.counts[i])
+        // ponytail: the zero point is `perCell` (name density / cells), not
+        // the enforcement target (measured total / cells), which at settle is
+        // ~20x higher — so this shows relative population, not how a cell sits
+        // in its band. Left alone here because it moves no particles and
+        // changing it would repaint the name in the same commit that changes
+        // the teleport rules. Upgrade when the visual is being tuned:
+        // (counts[i] - (target[i] - tol[i])) / (2 * tol[i]).
+        const span = maxCount - perCell
+        for (let i = 0; i < res.counts.length; i++) {
+          cellWeights[i] = span > 0 ? Math.min(1, Math.max(0, (res.counts[i] - perCell) / span)) : 0
+        }
+      }
+      if (plan.settled) {
+        densityStats.settled++
+        densityStats.lastCountsAfter = Array.from(counts)
+        weighOpacity()
+        return
+      }
+      const used = new Uint32Array(n) // sample cursor per cell
       let outsideUsed = 0
       const outsideAvail = Math.min(res.outsideCount, res.outside.length)
       const k = res.samplesPerCell
-      // Donors keep a margin above the minimum so continuous drift between
-      // neighboring cells doesn't ping-pong the same particles every round.
-      // A donor is any cell over its own target. Redistribution comes first
-      // and the outside pool second: moving one from an over-target cell to
-      // an under-target cell strictly reduces the total deviation and cannot
-      // ping-pong, whereas pulling from outside leaves the over-full cell
-      // over-full and grows the name instead of levelling it.
-      //
-      // The old rule demanded a donor sit 25% ABOVE target and only consulted
-      // over-target cells once the outside pool was spent. Against a loose
-      // minimum that was sensible hysteresis; against a real equalization
-      // target it blocks precisely the moves that level the letters, so the
-      // distribution stayed skewed however long it ran. One particle of
-      // hysteresis is enough to stop a cell trading with itself.
-      for (let ci = 0; ci < counts.length; ci++) {
-        const cellPx = voroCellPx[ci]
-        if (!cellPx || cellPx.length === 0) continue
-        let need = cellTarget[ci] - counts[ci]
-        while (need > 0) {
-          // The candidate cursor is bounded by the RAW census count — only
-          // min(res.counts[i], k) sample slots were written this dispatch;
-          // the credited count must never index into stale slots.
-          let densest = -1
-          let bestSurplus = 1
-          for (let i = 0; i < counts.length; i++) {
-            const surplus = counts[i] - cellTarget[i]
-            if (surplus > bestSurplus && used[i] < Math.min(res.counts[i], k)) {
-              bestSurplus = surplus
-              densest = i
-            }
-          }
-          let donor = -1
-          if (densest >= 0) {
-            const avail = Math.min(res.counts[densest], k)
-            while (used[densest] < avail) {
-              const cand = res.samples[densest * k + used[densest]++]
-              if (isFreshDonor(cand)) {
-                donor = cand
-                break
-              }
-            }
-            if (donor < 0) continue // cursor exhausted; rescan donors
-            counts[densest]--
-            densityStats.fromCells++
-          } else if (outsideUsed < outsideAvail) {
-            while (outsideUsed < outsideAvail) {
-              const cand = res.outside[outsideUsed++]
-              if (isFreshDonor(cand)) {
-                donor = cand
-                break
-              }
-            }
-            if (donor < 0) continue // pool exhausted; the last tier scans next
-            densityStats.fromOutside++
-          } else {
-            break
-          }
-          recentlyMoved.set(donor, densityRound)
-          // Land on a particle already in the deficient cell, so arrivals
-          // join the crowd instead of scattering over the glyph: a random
-          // glyph pixel is uniform over the letter's area, which reads as a
-          // fine even dust, while landing on a neighbour inherits whatever
-          // clumping the field has already produced there. Only a cell the
-          // census found empty has no neighbour to copy, and that falls back
-          // to a random glyph pixel.
-          const occupied = Math.min(res.counts[ci], k)
-          let dest: { x: number; y: number } | null = null
-          // Land on a particle the census saw in this cell. Its recorded
-          // position cannot be re-validated here: any check would classify
-          // that position with the same partition the census used, so it
-          // would agree by construction. The position is one or two frames
-          // old and is accepted as such.
-          if (occupied > 0) {
-            const si = ci * k + Math.floor(Math.random() * occupied)
-            dest = { x: res.samplePos[si * 2], y: res.samplePos[si * 2 + 1] }
-          }
-          if (!dest) {
-            // Jitter stays within one glyph pixel so the next census still
-            // counts the arrival in this cell.
-            const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
-            const g = glyphGrid
-            const tx = g.minX + ((gi % g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
-            const ty = g.minY + (Math.floor(gi / g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
-            dest = pageToWorld(tx, ty)
-          }
-          engine.setParticle(donor, {
-            position: dest,
-            velocity: { x: 0, y: 0 },
-            size: 3,
-            mass: 1,
-            color: { r: 1, g: 1, b: 1, a: 1 },
-          })
-          teleportCount++
-          counts[ci]++
-          need--
+      // Corrections this round, tagged with the first dispatch that can see
+      // them, so the next rounds do not re-issue what is already on its way.
+      // Appended, never keyed: `issued` only advances when a dispatch
+      // actually goes out, so two rounds can share a value, and a keyed store
+      // would drop the earlier round's in-flight corrections and re-issue
+      // them as duplicate teleports. Serials only rise, so the list stays
+      // sorted and drains from the front.
+      const delta = new Int32Array(n)
+      pending.push({ vis: res.issued, delta })
+
+      /** Next census candidate in `ci` that this system has not just moved. */
+      const takeDonor = (ci: number): number => {
+        const avail = Math.min(res.counts[ci], k)
+        while (used[ci] < avail) {
+          const cand = res.samples[ci * k + used[ci]++]
+          if (isFreshDonor(cand)) return cand
         }
-        if (need > 0) densityStats.unmet += need
+        return -1
+      }
+      /** A position inside cell `ci`: on a particle the census saw there, so
+       * arrivals join the crowd instead of scattering over the glyph. A
+       * random glyph pixel is uniform over the letter's area, which reads as
+       * fine even dust; landing on a neighbour inherits whatever clumping the
+       * field has already produced there. Only a cell the census found empty
+       * has no neighbour to copy, and that falls back to a random glyph
+       * pixel. */
+      const placeIn = (ci: number): { x: number; y: number } | null => {
+        const occupied = Math.min(res.counts[ci], k)
+        if (occupied > 0) {
+          const si = ci * k + Math.floor(Math.random() * occupied)
+          return { x: res.samplePos[si * 2], y: res.samplePos[si * 2 + 1] }
+        }
+        // Jitter stays within one glyph pixel so the next census still counts
+        // the arrival in this cell.
+        const cellPx = voroCellPx[ci]
+        if (!cellPx || cellPx.length === 0) return null
+        const gi = cellPx[Math.floor(Math.random() * cellPx.length)]
+        const g = glyphGrid!
+        const tx = g.minX + ((gi % g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
+        const ty = g.minY + (Math.floor(gi / g.cols) + 0.5 + (Math.random() - 0.5) * 0.8) * g.step
+        return pageToWorld(tx, ty)
+      }
+      const move = (donor: number, to: { x: number; y: number }) => {
+        movedAt.set(donor, res.issued)
+        engine!.setParticle(donor, {
+          position: to,
+          velocity: { x: 0, y: 0 },
+          size: 3,
+          mass: 1,
+          color: { r: 1, g: 1, b: 1, a: 1 },
+        })
+        teleportCount++
+      }
+      /** Move `count` particles out of `from`, handing each to `land`, and
+       * report how many actually went: a cell only has as many candidates as
+       * the census collected for it. */
+      const drain = (from: number, count: number, land: (donor: number) => boolean): number => {
+        let moved = 0
+        while (moved < count) {
+          const donor = takeDonor(from)
+          if (donor < 0) break
+          if (!land(donor)) break
+          moved++
+        }
+        if (moved > 0) {
+          counts[from] -= moved
+          delta[from] -= moved
+        }
+        if (moved < count) densityStats.unmet += count - moved
+        return moved
       }
 
-      // Cap the name's mean occupancy. Once the average cell holds more than
-      // maxNameDensity, the surplus is evicted densest-cell-first (recomputed
-      // each step, so the name self-levels on the way down) and each evicted
-      // particle lands exactly on some particle that is not in the name, so
-      // it rejoins the field where the field already is rather than appearing
-      // in empty space. Those positions ride along in the census readback;
-      // asking the engine for a position instead would sync the whole
-      // particle buffer back off the GPU every frame.
-      // Whatever the cap trimmed off the target has to leave the name
-      // entirely -- the refill above can only shuffle between cells, and when
-      // every cell is over target there is nowhere inside to shuffle to.
-      // Most-over-target first, so the name levels on the way down, and each
-      // one lands on a particle that is already outside so it rejoins the
-      // field where the field is rather than in empty space.
-      {
-        // Re-total AFTER the refill: that loop may have imported particles
-        // from outside, and sizing the eviction from the pre-refill total
-        // under-evicts by exactly that many, so the name settles above the
-        // cap and never reaches it.
-        let inNameAfterRefill = 0
-        for (let i = 0; i < counts.length; i++) inNameAfterRefill += counts[i]
-        let excess = inNameAfterRefill - Math.round(shareTotal)
-        const posAvail = Math.min(res.outsideCount, res.outside.length, res.outsidePos.length >> 1)
-        while (excess > 0 && posAvail > 0) {
-          // Densest cell first, by population -- cells are equal-area, so the
-          // fullest cell is the densest one. Restricted to cells at or over
-          // their target so evicting never opens a deficit the refill would
-          // just have to close again.
-          let densest = -1
-          let bestCount = 0
-          for (let i = 0; i < counts.length; i++) {
-            if (
-              counts[i] > cellTarget[i] &&
-              counts[i] > bestCount &&
-              used[i] < Math.min(res.counts[i], k)
-            ) {
-              bestCount = counts[i]
-              densest = i
-            }
-          }
-          if (densest < 0) break
+      // Evictions: each lands exactly on a particle that is already outside,
+      // so it rejoins the field where the field is rather than in empty
+      // space. Those positions ride along in the census readback; asking the
+      // engine for one instead would sync the whole particle buffer off the
+      // GPU every frame.
+      const posAvail = Math.min(res.outsideCount, res.outside.length, res.outsidePos.length >> 1)
+      for (let ci = 0; ci < n; ci++) {
+        if (plan.evictions[ci] <= 0) continue
+        const out = drain(ci, plan.evictions[ci], (donor) => {
+          // Only reservoir entries this round has not already spent as import
+          // donors: those were just teleported INTO the name, so evicting onto
+          // one would put this particle straight back where it came from.
+          const pool = posAvail - outsideUsed
+          if (pool <= 0) return false
+          const j = outsideUsed + Math.floor(Math.random() * pool)
+          move(donor, { x: res.outsidePos[j * 2], y: res.outsidePos[j * 2 + 1] })
+          return true
+        })
+        densityStats.evicted += out
+      }
+      // Imports: only ever to reach the floor, never to patch a single cell.
+      for (let ci = 0; ci < n; ci++) {
+        let want = plan.imports[ci]
+        while (want > 0) {
+          const to = placeIn(ci)
+          if (!to) break
           let donor = -1
-          const avail = Math.min(res.counts[densest], k)
-          while (used[densest] < avail) {
-            const cand = res.samples[densest * k + used[densest]++]
+          while (outsideUsed < outsideAvail) {
+            const cand = res.outside[outsideUsed++]
             if (isFreshDonor(cand)) {
               donor = cand
               break
             }
           }
-          if (donor < 0) continue
-          // Only draw from reservoir entries this round has not already
-          // consumed as refill donors: those particles were just teleported
-          // INTO the name, so evicting onto them would put this one straight
-          // back where it came from.
-          const pool = posAvail - outsideUsed
-          if (pool <= 0) break
-          const j = outsideUsed + Math.floor(Math.random() * pool)
-          const ex = res.outsidePos[j * 2]
-          const ey = res.outsidePos[j * 2 + 1]
-          recentlyMoved.set(donor, densityRound)
-          engine.setParticle(donor, {
-            position: { x: ex, y: ey },
-            velocity: { x: 0, y: 0 },
-            size: 3,
-            mass: 1,
-            color: { r: 1, g: 1, b: 1, a: 1 },
-          })
-          teleportCount++
-          densityStats.evicted++
-          counts[densest]--
-          excess--
+          if (donor < 0) break
+          move(donor, to)
+          counts[ci]++
+          delta[ci]++
+          densityStats.fromOutside++
+          want--
         }
-        if (excess > 0) densityStats.unmet += excess
+        if (want > 0) densityStats.unmet += want
+      }
+      // Redistribution.
+      for (const t of plan.transfers) {
+        const out = drain(t.from, t.count, (donor) => {
+          const to = placeIn(t.to)
+          if (!to) return false
+          move(donor, to)
+          return true
+        })
+        counts[t.to] += out
+        delta[t.to] += out
+        densityStats.fromCells += out
       }
 
-      densityStats.lastCountsAfter = counts.slice()
-
-      // Density-weighted name opacity targets: the densest cell pins the
-      // max, the rest interpolate by their surplus above the minimum.
-      // Derived from the post-refill counts so the weights match the
-      // enforced state; the tick loop eases the displayed opacity toward
-      // these targets (opacity damping) to eliminate flicker.
-      // Weighted from what the census MEASURED, not from the working array:
-      // `counts` carries this round's intended moves, so a cell that is
-      // chronically starved would still render at full density opacity while
-      // visibly sparse.
-      if (cellWeights.length === res.counts.length) {
-        let maxCount = 0
-        for (let i = 0; i < res.counts.length; i++) maxCount = Math.max(maxCount, res.counts[i])
-        const span = maxCount - perCell
-        for (let i = 0; i < res.counts.length; i++) {
-          cellWeights[i] =
-            span > 0 ? Math.min(1, Math.max(0, (res.counts[i] - perCell) / span)) : 0
-        }
-      }
+      densityStats.lastCountsAfter = Array.from(counts)
+      weighOpacity()
     }
 
     const measureName = () => {
@@ -1941,6 +1991,11 @@ export function PartyBackground() {
       const particles: IParticle[] = []
       for (let i = 0; i < count; i++) particles.push(spawnOne(i, anchors))
       engine.setParticles(particles)
+      // Every index now refers to a different particle, so both ledgers are
+      // about particles that no longer exist.
+      pending.length = 0
+      movedAt.clear()
+      censusGapUntil = censusIssued
     }
 
     const setMaxParticlesAnimated = (target: number, durationMs: number) => {
@@ -2232,6 +2287,15 @@ export function PartyBackground() {
       pointers.clear()
       dynamicDirty = false
       lastCensus = null
+      // A new engine restarts census serials at zero. Carrying the old high
+      // watermarks over would make every "has a census seen this yet?" test
+      // compare across two numbering schemes and answer no forever, pinning
+      // both ledgers and blocking every donor.
+      lastCensusSerial = -1
+      censusIssued = 0
+      censusGapUntil = 0
+      pending.length = 0
+      movedAt.clear()
       // Fresh modules carry default discrete state; the instant applyDemo in
       // boot re-seeds these from the active preset.
       discreteNow = null

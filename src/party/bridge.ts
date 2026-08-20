@@ -55,6 +55,7 @@ export const GLOBAL_SETTING_KEYS = [
   'nameDensity',
   'nameDensityRes',
   'maxNameDensity',
+  'densityVariance',
   'nameBaseOpacity',
   'nameDensityOpacity',
   'opacityDamping',
