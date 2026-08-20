@@ -70,6 +70,27 @@ const SOFTEN_PX = 30
  * passing clump does not flicker the force, short enough to feel like a
  * response. */
 const SEPARATOR_EASE_SECONDS = 0.4
+/** How fast the gravity centre chases its target. Long enough that the swap
+ * from one open pocket to another is a drift rather than a jump, short
+ * enough that the clump keeps up with a scroll. */
+const GRAVITY_CENTER_EASE_SECONDS = 0.5
+/**
+ * The share of wall-clock time the debug overlay may spend redrawing itself.
+ *
+ * The physics updates every frame; the PICTURE of it costs a full-page
+ * compositing pass, so it is redrawn on a budget rather than whenever a
+ * number moves. The budget is a SHARE rather than a rate because the cost is
+ * proportional to page area and device pixel ratio -- there is no one rate
+ * that is right for a phone and for a long page on a Retina display. After a
+ * repaint costing `t` the next one waits `t * (1/share - 1)`, so a cheap
+ * overlay repaints often and an expensive one backs off on its own, and
+ * either way the simulation keeps the rest.
+ *
+ * Everything the overlay shows is eased over hundreds of milliseconds -- the
+ * divider falloff, the gravity centre -- so even a slow repaint rate reads as
+ * motion rather than as steps.
+ */
+const DEBUG_REPAINT_SHARE = 0.2
 const SPAWN_SPREAD_PX = 60
 const SPAWN_SPEED = 100
 const TRAIL_BASE_TTL_MS = 900
@@ -519,10 +540,20 @@ export function PartyBackground() {
     let separatorFactor: number[] = []
     /** Scratch for the segment-load pass: x1,y1,x2,y2 per separator. */
     let separatorSegments = new Float32Array(0)
+    /** Where inward gravity should pull, and where it currently pulls, both
+     * in page px. Recomputed on scroll/resize, eased toward per frame. */
+    let gravityTarget: { x: number; y: number } | null = null
+    let gravityCenter: { x: number; y: number } | null = null
     let dynamicDirty = false
     const frameDts = new Float32Array(120)
     let frameDtIndex = 0
     let lastTickAt = 0
+    /** Repaint budget for the debug overlay: when it last drew, and whether
+     * anything has changed since. The flag has to persist across skipped
+     * frames -- a value that settles on a frame the budget skipped would
+     * otherwise never reach the picture. */
+    let debugNextAt = 0
+    let debugPending = false
     /** Accumulated clamped frame time driving host oscillators. */
     let oscClock = 0
     /** Trail points remember the speed/pressure boosts and the attract/
@@ -876,12 +907,17 @@ export function PartyBackground() {
         }
       }
       staticEffectors = list
+      // Same trigger as the effectors themselves: the open spot moves when
+      // the page scrolls, when it resizes, and when a target appears.
+      updateGravityTarget()
       // Rebuilt on scroll and resize, which is often; keep whatever falloff
       // has been eased in rather than snapping every divider back to full.
       if (separatorFactor.length !== list.length) separatorFactor = list.map(() => 1)
       pushEffectors()
+      // Marked dirty, not repainted here: the overlay is redrawn from the
+      // frame loop, which is what holds its cost to a share of the frame.
+      // Scroll fires far faster than a full-page repaint completes.
       staticVizDirty = true
-      drawDebug()
     }
 
     /** The only writer of the static effector array: geometry from the DOM,
@@ -894,6 +930,113 @@ export function PartyBackground() {
           return f === 1 ? e : { ...e, strength: e.strength * f }
         }),
       )
+    }
+
+    /**
+     * The open point of the current viewport: how far a point sits from the
+     * nearest content and from the window edges, whichever is closer.
+     * Rectangles rather than the text distance field because the field
+     * covers only the body copy -- the name, the dividers and the settings
+     * panel are all things a clump should not form on top of, and all of
+     * them are already rectangles somewhere.
+     */
+    const clearanceAt = (
+      rects: { x: number; y: number; w: number; h: number }[],
+      x: number,
+      y: number,
+      view: { x0: number; y0: number; x1: number; y1: number },
+    ): number => {
+      let best = Math.min(x - view.x0, view.x1 - x, y - view.y0, view.y1 - y)
+      for (const r of rects) {
+        if (best <= 0) return best
+        const dx = Math.max(r.x - x, 0, x - (r.x + r.w))
+        const dy = Math.max(r.y - y, 0, y - (r.y + r.h))
+        const d = Math.hypot(dx, dy)
+        if (d < best) best = d
+      }
+      return best
+    }
+
+    /**
+     * Aim the inward-gravity centre at the emptiest spot on screen.
+     *
+     * Left to itself the centre is the middle of the simulation grid, which
+     * is the middle of the whole PAGE -- so on anything taller than the
+     * viewport the clump forms somewhere nobody is looking, and it forms on
+     * top of whatever content happens to be there. What it should do is sit
+     * in the open, inside the part of the page actually on screen.
+     *
+     * ponytail: grid then refine, not an exact largest-empty-circle. The
+     * exact answer is a vertex of the medial axis of the obstacle set and
+     * needs a Voronoi diagram of segments to find; three halving passes land
+     * within a couple of px of it, for a point that is then eased anyway.
+     */
+    const updateGravityTarget = () => {
+      const view = {
+        x0: window.scrollX,
+        y0: window.scrollY,
+        x1: window.scrollX + window.innerWidth,
+        y1: window.scrollY + window.innerHeight,
+      }
+      const rects: { x: number; y: number; w: number; h: number }[] = []
+      for (const el of document.querySelectorAll<HTMLElement>('main .pblock, main .section-sep')) {
+        rects.push(toPageRect(el.getBoundingClientRect()))
+      }
+      for (const t of getTargets()) rects.push(toPageRect(t.el.getBoundingClientRect()))
+      if (name && name.bottom > name.topY) {
+        rects.push({
+          x: NAME_MARGIN_PX,
+          y: name.topY,
+          w: name.width,
+          h: name.bottom - name.topY,
+        })
+      }
+      const live = rects.filter((r) => r.w > 0 && r.h > 0)
+
+      let bx = (view.x0 + view.x1) / 2
+      let by = (view.y0 + view.y1) / 2
+      let best = -Infinity
+      let stepX = (view.x1 - view.x0) / 24
+      let stepY = (view.y1 - view.y0) / 24
+      let box = { ...view }
+      for (let pass = 0; pass < 3; pass++) {
+        if (!(stepX > 0) || !(stepY > 0)) break
+        for (let y = box.y0; y <= box.y1; y += stepY) {
+          for (let x = box.x0; x <= box.x1; x += stepX) {
+            const c = clearanceAt(live, x, y, view)
+            if (c > best) {
+              best = c
+              bx = x
+              by = y
+            }
+          }
+        }
+        box = { x0: bx - stepX, y0: by - stepY, x1: bx + stepX, y1: by + stepY }
+        stepX /= 6
+        stepY /= 6
+      }
+      gravityTarget = { x: bx, y: by }
+    }
+
+    /** Ease the applied centre toward the target and hand it to the engine.
+     * Returns whether it moved, so the debug overlay knows to repaint.
+     * Writing only while it moves is what lets an idle page stop writing. */
+    const updateGravityCenter = (dtSec: number): boolean => {
+      if (!gravityTarget) return false
+      if (!gravityCenter) {
+        gravityCenter = { ...gravityTarget }
+      } else {
+        const dx = gravityTarget.x - gravityCenter.x
+        const dy = gravityTarget.y - gravityCenter.y
+        // Sub-pixel is settled: a centre this pull is uniform around cannot
+        // be moved half a pixel to any visible effect.
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return false
+        const move = 1 - Math.exp(-dtSec / GRAVITY_CENTER_EASE_SECONDS)
+        gravityCenter.x += dx * move
+        gravityCenter.y += dy * move
+      }
+      mods.environment.setGravityCenter(gravityCenter.x / zoom, gravityCenter.y / zoom)
+      return true
     }
 
     /**
@@ -1220,12 +1363,34 @@ export function PartyBackground() {
       }
       // Only the small dynamic array is written per frame; the static list
       // stays untouched. Skip entirely when every pointer field is idle.
-      if (anyLive || dynamicDirty) {
+      let changed = anyLive || dynamicDirty
+      if (changed) {
         effectors.setDynamic(trailNodes(now))
         dynamicDirty = anyLive
-        if (bridge.debugOn) drawDebug()
       }
-      updateSeparatorLoad(Math.min(dtMs, 100) / 1000)
+      const dtSec = Math.min(dtMs, 100) / 1000
+      updateSeparatorLoad(dtSec)
+      if (updateGravityCenter(dtSec)) changed = true
+      if (changed) debugPending = true
+      // Redrawn AFTER both easing passes and outside the pointer branch.
+      // Each of them changes what the physics is doing while the pointer sits
+      // still -- a divider shedding its pull to the crowd on it, the gravity
+      // centre following the scroll -- so gating the redraw on pointer
+      // activity froze the overlay on a stale picture. Measured with the
+      // pointer parked: the divider's packed strength swung 1277 -> 61 -> 155
+      // across four seconds while the debug canvas hashed identically on
+      // every one of those frames.
+      if (
+        bridge.debugOn &&
+        (debugPending || staticVizDirty || voroCacheDirty) &&
+        now >= debugNextAt
+      ) {
+        debugPending = false
+        const t0 = performance.now()
+        drawDebug()
+        const cost = performance.now() - t0
+        debugNextAt = performance.now() + cost * (1 / DEBUG_REPAINT_SHARE - 1)
+      }
       if (now - teleportWindowStart > 1000) {
         teleportRate = teleportCount
         teleportCount = 0
@@ -1282,6 +1447,10 @@ export function PartyBackground() {
       zoom = engine.getZoom() / scale // effective page-px zoom
       engine.setCamera(w / (2 * zoom), h / (2 * zoom))
       effectors.setSoften(SOFTEN_PX / zoom)
+      // The engine holds the centre in world units, so a new zoom makes the
+      // one it holds wrong even if the page-space target has not moved.
+      // Dropping it re-seeds and rewrites on the next tick.
+      gravityCenter = null
     }
 
     // Equal-area Voronoi partition of the letter shapes themselves: the
@@ -2383,6 +2552,11 @@ export function PartyBackground() {
     bridge.setDebug = (on) => {
       bridge.debugOn = on
       window.dispatchEvent(new CustomEvent('party:debug', { detail: on }))
+      // Painting is the frame loop's job, but ERASING is not: with the
+      // overlay off the loop never calls drawDebug again, so the last
+      // picture would stay on the canvas forever. Called here it clears and
+      // returns.
+      if (!on) drawDebug()
       scheduleSync()
     }
     bridge.getTelemetry = () => {
@@ -2432,6 +2606,10 @@ export function PartyBackground() {
       pointers.clear()
       dynamicDirty = false
       lastCensus = null
+      // A fresh environment module is back on the grid centre until the
+      // first tick writes to it; dropping the eased value makes that tick
+      // seed it rather than skip the write as already-settled.
+      gravityCenter = null
       // A new engine restarts census serials at zero. Carrying the old high
       // watermarks over would make every "has a census seen this yet?" test
       // compare across two numbering schemes and answer no forever, pinning

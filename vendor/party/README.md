@@ -113,6 +113,20 @@ Every divergence from upstream is listed here.
   with a single GPU buffer upload (per-index `setParticle` costs one
   `writeBuffer` each; the host respawns hundreds of revealed particles per
   frame while a rising particle budget animates).
+- `modules/forces/environment.ts` — inwards/outwards gravity takes an
+  explicit centre (`setGravityCenter(x, y)` / `clearGravityCenter()`, backed
+  by `centerX`/`centerY`/`useCenter` uniforms in both runtimes). Upstream's
+  centre is the middle of the grid (the camera position on the CPU path),
+  which is the middle of the whole simulated world; on a page taller than
+  the viewport the clump therefore forms wherever that happens to be, which
+  is usually off-screen and on top of whatever content is there. The site
+  aims it at the emptiest spot of the part of the page actually on screen.
+  Also `viz()`: the centre, as a `nodes` entry, and nothing else. This pull
+  is the same magnitude at every distance, so it has no falloff for a glow
+  to draw -- rendered as a body it is one flat wash over the whole page,
+  a true picture carrying no information and hiding every glow that does.
+  Only an explicit centre can be reported, since the implicit one belongs to
+  the runtime's grid and the module never sees it.
 - `modules/forces/environment.ts` — inertia and damping are frame-rate
   independent, and both are now rates in 1/s. Upstream damped velocity once
   per frame (`v *= 1 - damping * 0.2`), so a 120 Hz display damped twice as

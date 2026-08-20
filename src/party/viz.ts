@@ -155,20 +155,124 @@ function extent(p: VizPrimitive, floor: number): [number, number, number, number
   return [p.x - p.hw - reach, p.y - p.hh - reach, p.x + p.hw + reach, p.y + p.hh + reach]
 }
 
-function drawGlow(
-  ctx: CanvasRenderingContext2D,
+/** A group's glow, rasterized at cell resolution and where to put it. */
+type GlowTile = { canvas: HTMLCanvasElement; x: number; y: number; w: number; h: number }
+
+/** Everything drawing one group produces: the glow raster and the vector
+ * outlines over it, all rebuilt together when its inputs change. */
+type Rendered = {
+  sig: string
+  tile: GlowTile | null
+  /** Boost regions, dashed. */
+  hulls: Path2D | null
+  /** The bodies themselves, solid. */
+  bodies: Path2D
+  /** Control points, filled. */
+  nodes: Path2D | null
+}
+
+/**
+ * The last rendering of each group key, with the inputs it came from. A group
+ * whose inputs have not changed is blitted and re-stroked instead of
+ * re-evaluated and re-traced.
+ *
+ * This is what makes a live force cheap to WATCH. Every static group is drawn
+ * in one pass, so one divider easing its pull as a crowd gathers on it used
+ * to re-evaluate the name's distance field and the text exclusion field along
+ * with it, and re-march the isolines of both -- hundreds of milliseconds of
+ * work per repaint, none of which had changed. Scrolling paid the same bill,
+ * since page-space geometry does not move when the window does.
+ *
+ * Keyed by group key, so it is bounded by the number of distinct groups.
+ */
+const vizCache = new Map<string, Rendered>()
+
+/** Identity token for the packed arrays a field primitive points at.
+ *
+ * Their contents are replaced wholesale -- a module packs a NEW array on
+ * every write -- so identity is an exact test of whether the data changed,
+ * where hashing a million distances every frame would cost more than the
+ * re-render it was meant to avoid. */
+let nextArrayId = 0
+const arrayIds = new WeakMap<object, number>()
+const arrayId = (a: ArrayLike<number>): number => {
+  let id = arrayIds.get(a as object)
+  if (id === undefined) {
+    id = nextArrayId++
+    arrayIds.set(a as object, id)
+  }
+  return id
+}
+
+/** Everything the drawing depends on, as a string. Two groups with equal
+ * signatures produce byte-identical output. */
+function vizSignature(
   g: VizGroup,
   zoom: number,
   reference: number,
   maxOpacity: number,
   viewW: number,
   viewH: number,
-) {
+): string {
+  const parts: (string | number)[] = [
+    zoom,
+    reference,
+    maxOpacity,
+    viewW,
+    viewH,
+    g.dynamic ? 1 : 0,
+    g.blend ?? '',
+  ]
+  for (const p of g.primitives) {
+    if (p.kind === 'segment') {
+      parts.push('s', p.x1, p.y1, p.x2, p.y2, p.strength, p.strengthEnd ?? p.strength, p.soften)
+    } else if (p.kind === 'rect') {
+      parts.push('r', p.x, p.y, p.hw, p.hh, p.strength, p.soften, p.interiorPush ? 1 : 0)
+    } else {
+      parts.push(
+        'f',
+        p.originX,
+        p.originY,
+        p.cell,
+        p.cols,
+        p.rows,
+        p.strength,
+        p.soften,
+        p.offset ?? 0,
+        p.push ? 1 : 0,
+        arrayId(p.values),
+        p.valuesStart,
+        p.boost ? arrayId(p.boost.values) : -1,
+        p.boost?.factor ?? 1,
+        // The hulls are drawn but not rasterized, and they are replaced
+        // wholesale like the grids, so identity settles them too.
+        p.boost?.hulls ? arrayId(p.boost.hulls as unknown as ArrayLike<number>) : -1,
+      )
+    }
+  }
+  // Nodes are the WHOLE of some groups -- a centre of gravity emits no
+  // primitive at all -- so leaving them out would freeze such a group at
+  // wherever it was first drawn.
+  if (g.nodes) {
+    parts.push('n')
+    for (const [x, y] of g.nodes) parts.push(x, y)
+  }
+  return parts.join(',')
+}
+
+function glowTile(
+  g: VizGroup,
+  zoom: number,
+  reference: number,
+  maxOpacity: number,
+  viewW: number,
+  viewH: number,
+): GlowTile | null {
   // A primitive whose own peak cannot reach one alpha quantum is invisible;
   // skipping it is exact, not an approximation.
   const floor = faintest(maxOpacity, reference)
   const live = g.primitives.filter((p) => peakForce(p) >= floor)
-  if (live.length === 0) return
+  if (live.length === 0) return null
 
   let x0 = Infinity
   let y0 = Infinity
@@ -188,7 +292,7 @@ function drawGlow(
   y1 = Math.min(viewH, y1 * zoom)
   const w = x1 - x0
   const h = y1 - y0
-  if (!(w > 0 && h > 0)) return
+  if (!(w > 0 && h > 0)) return null
 
   const isMax = g.blend === 'max'
   const [cr, cg, cb] = vizRgb(g.key)
@@ -256,15 +360,14 @@ function drawGlow(
     }
   }
 
-  // Blit at cell resolution and let the canvas smooth it up to page px.
-  const tile = document.createElement('canvas')
-  tile.width = cols
-  tile.height = rows
-  const tctx = tile.getContext('2d')
-  if (!tctx) return
+  // Kept at cell resolution; the canvas smooths it up to page px on blit.
+  const canvas = document.createElement('canvas')
+  canvas.width = cols
+  canvas.height = rows
+  const tctx = canvas.getContext('2d')
+  if (!tctx) return null
   tctx.putImageData(img, 0, 0)
-  ctx.imageSmoothingEnabled = true
-  ctx.drawImage(tile, gx0, gy0, cols * cell, rows * cell)
+  return { canvas, x: gx0, y: gy0, w: cols * cell, h: rows * cell }
 }
 
 /**
@@ -275,7 +378,7 @@ function drawGlow(
  * the contour and draws a dotted ghost of it.
  */
 function isoPath(
-  ctx: CanvasRenderingContext2D,
+  path: Path2D,
   p: Extract<VizPrimitive, { kind: 'field' }>,
   iso: number,
   zoom: number,
@@ -303,8 +406,8 @@ function isoPath(
       const bottom = (): [number, number] => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(d, c), cy(gy + 1)]
       const left = (): [number, number] => [cx(gx), cy(gy) + (cy(gy + 1) - cy(gy)) * t(a, d)]
       const seg = (e1: [number, number], e2: [number, number]) => {
-        ctx.moveTo(e1[0], e1[1])
-        ctx.lineTo(e2[0], e2[1])
+        path.moveTo(e1[0], e1[1])
+        path.lineTo(e2[0], e2[1])
       }
       switch (idx) {
         case 1:
@@ -344,65 +447,6 @@ function isoPath(
   }
 }
 
-/**
- * Outline the body each primitive's force is measured from: the segment a
- * pill pulls toward, the rect's edge, and for a field the isoline that is its
- * surface — the text shape dilated by its standoff, the letter surface of the
- * name. Drawn from the same geometry the physics uses, on top of the glow.
- *
- * A max-blend group is a curve rather than a set of separate bodies -- its
- * primitives are consecutive samples of one stroke -- so it gets the curve
- * itself plus the points the curve was fitted through, which are two
- * different things worth telling apart: the samples are what the physics
- * measures to, the points are what the smoothing started from.
- */
-function strokeBodies(
-  ctx: CanvasRenderingContext2D,
-  g: VizGroup,
-  zoom: number,
-  maxOpacity: number,
-) {
-  if (g.blend === 'max') {
-    strokeCurve(ctx, g, zoom, maxOpacity)
-    return
-  }
-  ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
-  ctx.lineWidth = 1.25
-  ctx.beginPath()
-  // Regions that scale a body's force rather than emit it -- the convex
-  // hulls the name's concavity boost is filled from -- are drawn dashed, so
-  // the solid contour always means "this is the body".
-  ctx.save()
-  ctx.setLineDash([4, 4])
-  ctx.lineWidth = 1
-  ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity * 0.7))
-  ctx.beginPath()
-  for (const p of g.primitives) {
-    if (p.kind !== 'field' || !p.boost?.hulls) continue
-    for (const poly of p.boost.hulls) {
-      if (poly.length < 3) continue
-      ctx.moveTo(poly[0][0] * zoom, poly[0][1] * zoom)
-      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0] * zoom, poly[i][1] * zoom)
-      ctx.closePath()
-    }
-  }
-  ctx.stroke()
-  ctx.restore()
-
-  ctx.beginPath()
-  for (const p of g.primitives) {
-    if (p.kind === 'rect') {
-      ctx.rect((p.x - p.hw) * zoom, (p.y - p.hh) * zoom, p.hw * 2 * zoom, p.hh * 2 * zoom)
-    } else if (p.kind === 'segment') {
-      ctx.moveTo(p.x1 * zoom, p.y1 * zoom)
-      ctx.lineTo(p.x2 * zoom, p.y2 * zoom)
-    } else {
-      isoPath(ctx, p, p.offset ?? 0, zoom)
-    }
-  }
-  ctx.stroke()
-}
-
 /** Width of a curve's line, in page px. The dots that mark its control
  * points are drawn at `NODE_RADIUS`, deliberately wider than half the line,
  * so a point reads as a bead on the curve rather than as part of it. */
@@ -410,38 +454,95 @@ const CURVE_WIDTH = 1.25
 const NODE_RADIUS = 2.4
 
 /**
- * The stroke a max-blend group samples, and the points it was fitted
- * through. Consecutive primitives share endpoints, so stroking each in turn
- * traces the curve; the points come from the group's `nodes`, which the
- * module carries alongside because the sampled spans no longer say where the
- * cursor actually was.
+ * Trace the body each primitive's force is measured from: the segment a pill
+ * pulls toward, the rect's edge, and for a field the isoline that is its
+ * surface — the text shape dilated by its standoff, the letter surface of the
+ * name. Built from the same geometry the physics uses.
+ *
+ * A max-blend group is a curve rather than a set of separate bodies -- its
+ * primitives are consecutive samples of one stroke -- so it gets the curve
+ * itself rather than each sample outlined separately.
+ *
+ * Either way the group's `nodes` are traced too: geometry the physics came
+ * FROM rather than geometry it acts on. For the cursor that is the points its
+ * curve was fitted through; for a body of no extent -- a centre of gravity --
+ * the nodes are the whole of what there is to draw.
+ *
+ * Paths rather than direct canvas calls so the result can be cached with the
+ * glow. Marching the isolines of the name and text grids is the same order of
+ * work as rasterizing them, and it was being redone on every repaint.
  */
-function strokeCurve(
+function buildPaths(g: VizGroup, zoom: number): Omit<Rendered, 'sig' | 'tile'> {
+  const bodies = new Path2D()
+  let hulls: Path2D | null = null
+  if (g.blend === 'max') {
+    for (const p of g.primitives) {
+      if (p.kind !== 'segment') continue
+      bodies.moveTo(p.x1 * zoom, p.y1 * zoom)
+      bodies.lineTo(p.x2 * zoom, p.y2 * zoom)
+    }
+  } else {
+    for (const p of g.primitives) {
+      if (p.kind === 'rect') {
+        bodies.rect((p.x - p.hw) * zoom, (p.y - p.hh) * zoom, p.hw * 2 * zoom, p.hh * 2 * zoom)
+      } else if (p.kind === 'segment') {
+        bodies.moveTo(p.x1 * zoom, p.y1 * zoom)
+        bodies.lineTo(p.x2 * zoom, p.y2 * zoom)
+      } else {
+        isoPath(bodies, p, p.offset ?? 0, zoom)
+        // Regions that scale a body's force rather than emit it -- the
+        // convex hulls the name's concavity boost is filled from -- are
+        // dashed, so a solid contour always means "this is the body".
+        if (!p.boost?.hulls) continue
+        for (const poly of p.boost.hulls) {
+          if (poly.length < 3) continue
+          if (!hulls) hulls = new Path2D()
+          hulls.moveTo(poly[0][0] * zoom, poly[0][1] * zoom)
+          for (let i = 1; i < poly.length; i++) hulls.lineTo(poly[i][0] * zoom, poly[i][1] * zoom)
+          hulls.closePath()
+        }
+      }
+    }
+  }
+
+  let nodes: Path2D | null = null
+  if (g.nodes && g.nodes.length > 0) {
+    nodes = new Path2D()
+    for (const [nx, ny] of g.nodes) {
+      nodes.moveTo(nx * zoom + NODE_RADIUS, ny * zoom)
+      nodes.arc(nx * zoom, ny * zoom, NODE_RADIUS, 0, Math.PI * 2)
+    }
+  }
+  return { hulls, bodies, nodes }
+}
+
+/** Stroke a group's cached outlines in its own colour, over its glow. */
+function paintPaths(
   ctx: CanvasRenderingContext2D,
   g: VizGroup,
-  zoom: number,
+  r: Rendered,
   maxOpacity: number,
 ) {
-  ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
-  ctx.lineWidth = CURVE_WIDTH
-  ctx.lineJoin = 'round'
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  for (const p of g.primitives) {
-    if (p.kind !== 'segment') continue
-    ctx.moveTo(p.x1 * zoom, p.y1 * zoom)
-    ctx.lineTo(p.x2 * zoom, p.y2 * zoom)
+  const ink = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
+  if (r.hulls) {
+    ctx.save()
+    ctx.setLineDash([4, 4])
+    ctx.lineWidth = 1
+    ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity * 0.7))
+    ctx.stroke(r.hulls)
+    ctx.restore()
   }
-  ctx.stroke()
-
-  if (!g.nodes || g.nodes.length === 0) return
-  ctx.fillStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
-  ctx.beginPath()
-  for (const [nx, ny] of g.nodes) {
-    ctx.moveTo(nx * zoom + NODE_RADIUS, ny * zoom)
-    ctx.arc(nx * zoom, ny * zoom, NODE_RADIUS, 0, Math.PI * 2)
+  ctx.strokeStyle = ink
+  ctx.lineWidth = g.blend === 'max' ? CURVE_WIDTH : 1.25
+  if (g.blend === 'max') {
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
   }
-  ctx.fill()
+  ctx.stroke(r.bodies)
+  if (r.nodes) {
+    ctx.fillStyle = ink
+    ctx.fill(r.nodes)
+  }
 }
 
 /**
@@ -469,7 +570,16 @@ export function drawViz(
   const viewW = ctx.canvas.width / dpr
   const viewH = ctx.canvas.height / dpr
   for (const g of groups) {
-    drawGlow(ctx, g, zoom, reference, maxOpacity, viewW, viewH)
-    strokeBodies(ctx, g, zoom, maxOpacity)
+    const sig = vizSignature(g, zoom, reference, maxOpacity, viewW, viewH)
+    let r = vizCache.get(g.key)
+    if (!r || r.sig !== sig) {
+      r = { sig, tile: glowTile(g, zoom, reference, maxOpacity, viewW, viewH), ...buildPaths(g, zoom) }
+      vizCache.set(g.key, r)
+    }
+    if (r.tile) {
+      ctx.imageSmoothingEnabled = true
+      ctx.drawImage(r.tile.canvas, r.tile.x, r.tile.y, r.tile.w, r.tile.h)
+    }
+    paintPaths(ctx, g, r, maxOpacity)
   }
 }

@@ -12,6 +12,7 @@ import {
   ModuleRole,
   CPUDescriptor,
   DataType,
+  type VizGroup,
 } from "../../module";
 
 export const DEFAULT_ENVIRONMENT_GRAVITY_STRENGTH = 0;
@@ -38,6 +39,13 @@ type EnvironmentInputs = {
   friction: number;
   damping: number;
   mode: number;
+  /** Explicit centre for inwards/outwards gravity, in world units. Used
+   * only when `useCenter` is set; otherwise the centre is the middle of the
+   * grid, which is the middle of the whole world and not necessarily
+   * anywhere the viewer is looking. */
+  centerX: number;
+  centerY: number;
+  useCenter: number;
 };
 
 export class Environment extends Module<"environment", EnvironmentInputs> {
@@ -51,6 +59,9 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
     friction: DataType.NUMBER,
     damping: DataType.NUMBER,
     mode: DataType.NUMBER,
+    centerX: DataType.NUMBER,
+    centerY: DataType.NUMBER,
+    useCenter: DataType.NUMBER,
   } as const;
 
   private gravityDirection: GravityDirection = "down";
@@ -95,6 +106,9 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
           : this.gravityDirection === "outwards"
           ? 2
           : 0,
+      centerX: 0,
+      centerY: 0,
+      useCenter: 0,
     });
     if (opts?.enabled !== undefined) {
       this.setEnabled(!!opts.enabled);
@@ -137,6 +151,23 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
 
   setGravityStrength(value: number): void {
     this.write({ gravityStrength: value });
+  }
+
+  /**
+   * Pin the centre inwards/outwards gravity acts about, in world units.
+   *
+   * Without one the centre is the middle of the grid, which is the middle of
+   * the whole simulated world. That is only where a viewer is looking when
+   * the world is one screen; on a page taller than the viewport it is
+   * usually off-screen, so the clump forms somewhere nobody can see.
+   */
+  setGravityCenter(x: number, y: number): void {
+    this.write({ centerX: x, centerY: y, useCenter: 1 });
+  }
+
+  /** Back to the grid centre. */
+  clearGravityCenter(): void {
+    this.write({ useCenter: 0 });
   }
   setDirection(x: number, y: number): void {
     this.write({ dirX: x, dirY: y });
@@ -191,20 +222,56 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
     return this.readValue("mode");
   }
 
+  /**
+   * Where inwards/outwards gravity acts about -- and nothing else.
+   *
+   * This pull is the same magnitude at every distance (`dir/|dir| *
+   * strength`), so there is no falloff for a glow to draw: rendered as a
+   * body it would be one flat wash over the entire page, which is a true
+   * picture carrying no information and covering every glow that does. The
+   * centre is the one thing about it that has a place on the page, so the
+   * centre is what is reported, as a node.
+   *
+   * Only an EXPLICIT centre can be reported. The implicit one is the middle
+   * of the runtime's grid, which the module never sees.
+   */
+  viz(): VizGroup[] {
+    const mode = this.readValue("mode");
+    if (mode !== 1 && mode !== 2) return [];
+    if (!this.isEnabled()) return [];
+    if (!this.readValue("useCenter")) return [];
+    if (this.readValue("gravityStrength") === 0) return [];
+    return [
+      {
+        key: "environment:gravity",
+        // The host moves it as the page scrolls, so it must not be baked
+        // into a viewer's static cache.
+        dynamic: true,
+        nodes: [[this.readValue("centerX"), this.readValue("centerY")]],
+        primitives: [],
+      },
+    ];
+  }
+
   webgpu(): WebGPUDescriptor<EnvironmentInputs> {
     return {
       apply: ({ particleVar, dtVar, getUniform }) => `
   // Gravity as force: acceleration += dir * strength
   let mode = ${getUniform("mode")};
   var gdir = vec2<f32>(${getUniform("dirX")}, ${getUniform("dirY")});
-  if (mode == 1.0) {
-    let cx = (GRID_MINX() + GRID_MAXX()) * 0.5;
-    let cy = (GRID_MINY() + GRID_MAXY()) * 0.5;
-    gdir = vec2<f32>(cx, cy) - ${particleVar}.position;
-  } else if (mode == 2.0) {
-    let cx = (GRID_MINX() + GRID_MAXX()) * 0.5;
-    let cy = (GRID_MINY() + GRID_MAXY()) * 0.5;
-    gdir = ${particleVar}.position - vec2<f32>(cx, cy);
+  if (mode == 1.0 || mode == 2.0) {
+    var c = vec2<f32>(
+      (GRID_MINX() + GRID_MAXX()) * 0.5,
+      (GRID_MINY() + GRID_MAXY()) * 0.5
+    );
+    if (${getUniform("useCenter")} != 0.0) {
+      c = vec2<f32>(${getUniform("centerX")}, ${getUniform("centerY")});
+    }
+    if (mode == 1.0) {
+      gdir = c - ${particleVar}.position;
+    } else {
+      gdir = ${particleVar}.position - c;
+    }
   }
   let glen = length(gdir);
   if (glen > 0.0) {
@@ -235,17 +302,20 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
       apply: ({ particle, dt, input, view }) => {
         const gdir = new Vector(input.dirX, input.dirY);
 
-        if (input.mode === 1) {
-          // Inwards gravity: center is camera position (matches WebGPU grid center)
-          const camera = view.getCamera();
-          gdir.set(camera.x, camera.y).subtract(particle.position);
-        } else if (input.mode === 2) {
-          // Outwards gravity: center is camera position (matches WebGPU grid center)
-          const camera = view.getCamera();
-          gdir.set(
-            particle.position.x - camera.x,
-            particle.position.y - camera.y
-          );
+        if (input.mode === 1 || input.mode === 2) {
+          // Centre is the explicit one when set, else the camera position
+          // (which matches the WebGPU grid centre).
+          const camera = input.useCenter
+            ? { x: input.centerX, y: input.centerY }
+            : view.getCamera();
+          if (input.mode === 1) {
+            gdir.set(camera.x, camera.y).subtract(particle.position);
+          } else {
+            gdir.set(
+              particle.position.x - camera.x,
+              particle.position.y - camera.y
+            );
+          }
         }
         const glen = gdir.magnitude();
         if (glen > 0) {
