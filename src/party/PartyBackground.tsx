@@ -407,11 +407,18 @@ export function PartyBackground() {
        * uncollected census candidate left. Non-zero means the sample budget
        * is binding and enforcement is falling behind the field. */
       unmet: 0,
+      /** Results retired because enforcement had been idle since they were
+       * dispatched, so they no longer describe the live distribution. */
+      gapDiscard: 0,
       lastCounts: [] as number[],
     }
     let censusCells: Int32Array | null = null
     let censusVersion = 0
     let lastCensus: CellCensusResult | null = null
+    /** Set whenever a round returns before consuming a census. The result
+     * waiting after such a gap describes a distribution the field has since
+     * left, so acting on it means one round of large, wrong corrections. */
+    let censusGap = true
     /** Net corrections issued since the in-flight census was dispatched. */
     let densityRound = 0
     /** Particle index → round it was relocated (stale in census samples). */
@@ -1551,6 +1558,7 @@ export function PartyBackground() {
     const enforceDensity = () => {
       if (!engine || !name || !glyphGrid || !censusCells || voroSeeds.length === 0) {
         densityStatus = `guards e=${!!engine} n=${!!name} g=${!!glyphGrid} c=${!!censusCells} s=${voroSeeds.length}`
+        censusGap = true
         return
       }
       // `name density` means what it says. The only ceiling is the number of
@@ -1559,6 +1567,7 @@ export function PartyBackground() {
       const totalMin = Math.round(Math.min(globals.nameDensity, engine.getCount()))
       if (totalMin <= 0) {
         densityStatus = 'min<=0'
+        censusGap = true
         // With enforcement off, the density opacity eases back to baseline
         // instead of freezing at the last enforced snapshot.
         cellWeights.fill(0)
@@ -1581,6 +1590,7 @@ export function PartyBackground() {
       const perCell = Math.round(totalMin / voroSeeds.length)
       if (perCell <= 0) {
         cellWeights.fill(0)
+        censusGap = true
         return
       }
       const w = name.width
@@ -1618,6 +1628,12 @@ export function PartyBackground() {
       // its counts are keyed to the old cell geometry.
       if (res.version !== censusVersion || res.counts.length !== voroSeeds.length) {
         densityStats.mismatch++
+        return
+      }
+      if (censusGap) {
+        censusGap = false
+        lastCensus = res
+        densityStats.gapDiscard++
         return
       }
       lastCensus = res
