@@ -117,14 +117,25 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameWeight: 700,
   nameDensity: 1000,
   nameDensityRes: 72,
-  // The other end of `nameDensity`: that is the fewest particles the name is
-  // allowed to hold, this is the most. Same units -- a total across the whole
-  // name -- so the pair reads as one quantity's two bounds. 0 lifts the cap.
-  // Set above the ~21k the pulls settle at on their own, so the name keeps
-  // the density it has always had and this stays a real ceiling for the
-  // cases that would otherwise overpack it -- a stronger pull, a denser
-  // mode, a smaller name. Lower it to deliberately thin the letters out.
-  maxNameDensity: 24_000,
+  // The most any ONE LETTER may hold. Per letter, not per name and not per
+  // Voronoi cell: a cell is an arbitrary subdivision of the glyphs that
+  // nobody looking at the page can see, and a name-wide total says nothing
+  // about how thick any individual letter got -- half the name could pile
+  // into one glyph and the total would be none the wiser. A letter is the
+  // thing that reads as too dense, so a letter is what the cap counts.
+  //
+  // Different units from `nameDensity`, which stays a whole-name floor: this
+  // one bounds a part, that one bounds the whole, and there is no arithmetic
+  // between them. When the caps cannot deliver the floor the cap wins and the
+  // plan simply targets less, so the two never fight.
+  //
+  // 2400 is where the old whole-name 24,000 landed for the widest letter
+  // (24,000 spread over 72 equal-area cells is 333 a cell, and the widest
+  // letter owns 7 of them), so the name keeps the thickness it has always
+  // had and this stays a ceiling for the cases that would otherwise overpack
+  // it -- a stronger pull, a denser mode, a smaller name. Lower it to thin
+  // the letters out; 0 lifts it entirely.
+  maxNameDensity: 2_400,
   // How far a cell may sit from its equal share before particles are moved,
   // as a fraction of that share. Without it every rule in the enforcement
   // path was an exact integer: a cell one particle light was corrected, and
@@ -132,8 +143,8 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   // of drift, so the field and the enforcement fought each frame forever.
   // A band gives the two of them somewhere to meet -- any arrangement inside
   // it satisfies the rule, so a settled name needs no teleports at all.
-  // Cost is uniformity: at the ~290 particles a cell holds by default, 0.1
-  // is +-29. Traffic scales as 1/variance, so halving this roughly doubles
+  // Cost is uniformity: at the ~330 particles a cell holds by default, 0.1
+  // is +-33. Traffic scales as 1/variance, so halving this roughly doubles
   // it. 0 still keeps one particle of margin, which is the least a discrete
   // count can have.
   densityVariance: 0.1,
@@ -376,9 +387,17 @@ export function PartyBackground() {
     /** Fine-grid indices of the glyph pixels owned by each Voronoi cell. */
     let voroCellPx: number[][] = []
     /** Which letter of the name each Voronoi cell belongs to, and how many
-     * letters there are. Enforcement targets equal totals per letter rather
-     * than per cell, so every letter carries the same number of particles
-     * however much area it covers. */
+     * letters there are. Enforcement spreads the name at equal DENSITY, so a
+     * letter's share comes out proportional to its own ink area -- a B holds
+     * more than a T, because a B is more letter. (An equal COUNT per letter
+     * was measured and does not survive contact with the field: the smallest
+     * letter is one cell of 124 glyph pixels, so an equal share worked out at
+     * 13.9 particles per pixel against a median achieved 5.14, and they were
+     * teleported in and bled straight back out every frame.)
+     *
+     * The grouping is load-bearing rather than cosmetic: `max name density`
+     * is a ceiling on a LETTER, so the cells of one letter share one
+     * allowance. */
     let cellLetter = new Int32Array(0)
     let letterCount = 0
     let glyphGrid: {
@@ -1732,23 +1751,32 @@ export function PartyBackground() {
       for (const [idx, vis] of movedAt) if (res.serial >= vis) movedAt.delete(idx)
       while (pending.length > 0 && res.serial >= pending[0].vis) pending.shift()
       const isFreshDonor = (idx: number) => !movedAt.has(idx)
-      // One rule sets every target, and the three knobs are its three cases.
+      // One rule sets every target:
       //
-      //   how many the name holds = clamp(what it holds now, min, max)
+      //   what the name holds = sum over letters of
+      //                           min(density x cells(letter), max name density)
+      //   where density = max(what it holds now, name density) / cells
       //
-      // Below `name density` the name is topped up from outside, which is
-      // what that setting has always meant. Above `max name density` the
-      // surplus is sent back out. In between, the population is whatever the
-      // pulls delivered and the only work is redistribution. Both bounds are
-      // TOTALS across the name, the same units `name density` has always
-      // used, so the pair reads as the two ends of one quantity -- and that
-      // pair IS the total's margin: any population between them satisfies the
-      // rule and needs no teleport at all.
+      // The two knobs are NOT the two arms of one clamp, and writing them as
+      // one was the bug this rule replaced. `name density` is a floor on the
+      // WHOLE NAME; `max name density` is a ceiling on ONE LETTER. Different
+      // units, no arithmetic between them.
       //
-      // That total is spread at EQUAL DENSITY. The Voronoi cells are built
-      // equal-area, so equal density is simply an equal count in every cell,
-      // and each letter ends up holding particles in proportion to its own
-      // ink area -- a B more than a T, because a B is more letter.
+      // Below the floor the name is topped up from outside, which is what that
+      // setting has always meant. Above the ceiling, that letter's surplus is
+      // sent back out -- and only that letter's, which is the point: a cell is
+      // an arbitrary subdivision nobody sees, and a name-wide total says
+      // nothing about how thick any individual letter got.
+      //
+      // In between, the population is whatever the pulls delivered and the
+      // only work is redistribution. That is the total's margin, and at the
+      // defaults it runs from `name density` up to the total at which the
+      // widest letter first reaches its cap.
+      //
+      // Whatever the name holds is spread at EQUAL DENSITY. The Voronoi cells
+      // are built equal-area, so equal density is simply an equal count in
+      // every cell, and each letter ends up holding particles in proportion to
+      // its own ink area -- a B more than a T, because a B is more letter.
       const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
       for (let i = 0; i < cellLetter.length; i++) {
         if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
@@ -1766,16 +1794,23 @@ export function PartyBackground() {
       densityStats.lastRawCounts = Array.from(res.counts)
       let inNameNow = 0
       for (let i = 0; i < n; i++) inNameNow += counts[i]
-      const capTotal =
-        globals.maxNameDensity > 0 ? Math.max(totalMin, globals.maxNameDensity) : Infinity
+      // Per LETTER, not per name and not per cell: the cap bounds how thick
+      // any one letter gets. It is deliberately not floored at `totalMin` --
+      // that is a name-wide floor and this is a per-letter ceiling, so the two
+      // are in different units and clamping one by the other would be
+      // arithmetic on unrelated quantities. When the caps cannot deliver the
+      // floor, the cap wins and the plan simply targets less; the import loop
+      // stops at that target, so the two never fight.
+      const letterCap = globals.maxNameDensity > 0 ? globals.maxNameDensity : Infinity
       // Every decision lives in `planDensity`, which is pure arithmetic over
       // the counts and gets asserted directly by `density.check.ts`. What is
       // left here is plumbing: which particle to move, where to land it, and
       // what the census can still tell us about either.
       const plan = planDensity(counts, {
         min: totalMin,
-        cap: capTotal,
+        letterCap,
         variance: globals.densityVariance,
+        letter: cellLetter,
       })
       densityStats.lastTargets = Array.from(plan.target)
       densityStats.lastTol = Array.from(plan.tol)
