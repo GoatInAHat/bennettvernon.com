@@ -457,7 +457,13 @@ export function PartyBackground() {
       const cell = FIELD_CELL_PX
       const cols = Math.ceil((maxX - minX) / cell)
       const rows = Math.ceil((maxY - minY) / cell)
-      if (cols < 4 || rows < 4 || cols * rows > 2_000_000) return
+      // Bailing here leaves textField null, so the previously uploaded field
+      // has to be retired too — otherwise a stale grid keeps driving physics
+      // against a layout that no longer exists.
+      if (cols < 4 || rows < 4 || cols * rows > 2_000_000) {
+        effectors.setField(null)
+        return
+      }
 
       const raster = document.createElement('canvas')
       raster.width = cols
@@ -638,7 +644,7 @@ export function PartyBackground() {
     }
 
     /** Static module physics drawn by the generic viz renderer. */
-    const renderStaticViz = () => {
+    const renderStaticViz = (statics: VizGroup[]) => {
       staticVizDirty = false
       if (!staticVizCache) staticVizCache = document.createElement('canvas')
       staticVizCache.width = debugCanvas.width
@@ -646,7 +652,7 @@ export function PartyBackground() {
       const ctx = staticVizCache.getContext('2d')
       if (!ctx) return
       ctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
-      drawViz(ctx, collectViz().filter((g) => !g.dynamic), zoom)
+      drawViz(ctx, statics, zoom)
     }
 
     const drawDebug = () => {
@@ -656,11 +662,15 @@ export function PartyBackground() {
       dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
       if (!bridge.debugOn || !name) return
       if (voroCacheDirty) renderVoroCache()
-      if (staticVizDirty) renderStaticViz()
+      // Collect once and partition: every module's viz() runs on this call,
+      // so collecting again for the static cache rebuilds and discards the
+      // same groups a second time on the frames that need it least.
+      const groups = collectViz()
+      if (staticVizDirty) renderStaticViz(groups.filter((g) => !g.dynamic))
       if (voroCache) dctx.drawImage(voroCache, 0, 0)
       if (staticVizCache) dctx.drawImage(staticVizCache, 0, 0)
       dctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
-      drawViz(dctx, collectViz().filter((g) => g.dynamic), zoom)
+      drawViz(dctx, groups.filter((g) => g.dynamic), zoom)
     }
 
     const syncEffectors = () => {
@@ -1002,12 +1012,15 @@ export function PartyBackground() {
       const step = FIELD_CELL_PX
       // Margin wide enough for the attraction field's reach.
       const margin = globals.nameRange + step * 4
-      builtNameRange = globals.nameRange
       const minX = NAME_MARGIN_PX - margin
       const minY = name.topY - margin
       const cols = Math.ceil((name.width + margin * 2) / step)
       const rows = Math.ceil((name.bottom - name.topY + margin * 2) / step)
       if (cols < 4 || rows < 4 || cols * rows > 1_000_000) return
+      // Only claim the built range once the grid is actually built: recording
+      // it above the guard would convince the widen-rebuild check that this
+      // margin already exists, and the debounced retry would never fire again.
+      builtNameRange = globals.nameRange
       const raster = document.createElement('canvas')
       raster.width = cols
       raster.height = rows
