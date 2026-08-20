@@ -82,14 +82,29 @@ const ALPHA_QUANTUM = 0.5 / 255
 const EVAL_BUDGET = 400_000
 const MIN_CELL_PX = 3
 /**
- * Opacity at which a glow is treated as finished. Four steps out of 255 --
- * about 1.6% -- so the edge is a step of one and a half percent of the
- * darkest the glow ever gets, against a white page. Set at the single
- * representable step instead, the tail reaches nearly three times further for
- * nothing anyone can see, and the cost of that reach is what pushed the
- * sample grid coarse enough to show its own interpolation.
+ * Finest cell for a group the viewer can cache. A static group is rasterized
+ * when it changes and then blitted, so its cost is paid once per change
+ * rather than once per frame, and it can resolve detail a per-frame budget
+ * cannot afford. The name's concavity pockets are the case that needs it:
+ * the boosted band between a letter and its hull is a few pixels across, so
+ * at a three-pixel grid the interpolation averages the boost away against
+ * its unboosted neighbours and the pocket comes out barely darker than the
+ * rest -- the force is ten times higher and the picture showed almost none
+ * of it.
  */
-const EDGE_ALPHA = 4 / 255
+const STATIC_MIN_CELL_PX = 1.5
+/**
+ * Opacity at which a glow is treated as finished. It has to be the smallest
+ * step the format can hold: a box is a rectangle, so cutting a glow anywhere
+ * it is still visible leaves a visible RECTANGLE around it. Four steps out of
+ * 255 sounds like nothing and is not -- an edge of 1.6% against white is a
+ * faint but perfectly legible box, which is exactly what it drew.
+ *
+ * The reach this buys is expensive, since it goes as sqrt(peak / floor) and
+ * the last few steps are most of the radius. That cost is real and is paid
+ * in raster resolution. It is still the wrong thing to save on.
+ */
+const EDGE_ALPHA = ALPHA_QUANTUM
 
 /** Opacity of a force magnitude. See the header: saturating, so `maxOpacity`
  * multiplies rather than anchors, and nothing ever clips. */
@@ -193,7 +208,8 @@ function drawGlow(
   // from 8ms to 124ms. What the trail needs is a rasterizer that is not a
   // scalar loop over cells; that is the GPU, and it is a bigger change than
   // this file.
-  const cell = Math.max(MIN_CELL_PX, Math.sqrt((w * h * live.length) / EVAL_BUDGET))
+  const floorPx = g.dynamic ? MIN_CELL_PX : STATIC_MIN_CELL_PX
+  const cell = Math.max(floorPx, Math.sqrt((w * h * live.length) / EVAL_BUDGET))
   // The sample grid is snapped to a multiple of the cell size in page space.
   // The box tracks the cursor, so an unsnapped origin dragged the sample
   // points along with it, and the interpolation pattern between samples slid

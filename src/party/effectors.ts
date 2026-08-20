@@ -158,6 +158,32 @@ function sampleField(
  * function reproduces what `cpu()` writes — a law change that misses one of
  * them fails that check instead of silently drifting the debug view.
  */
+/**
+ * How a span's strength runs from one end to the other, as a function of the
+ * clamped projection along it.
+ *
+ * Smoothstep rather than linear, and that is the whole point: the projection
+ * is CLAMPED, so past either end of a span the strength stops changing. With
+ * a linear taper the rate of change jumps at that boundary -- from
+ * (s2 - s1)/length on the inside to zero on the outside -- and a jump in the
+ * first derivative of a smooth gradient is exactly what the eye picks out as
+ * a line. At the head of the cursor trail that boundary is the plane through
+ * the cursor perpendicular to the direction it is moving, which is where the
+ * strongest span ends, so it drew the sharpest possible crease right through
+ * the pointer.
+ *
+ * Smoothstep is flat at both ends, so the rate of change is zero on both
+ * sides of every clamp -- the caps at the two ends of the stroke, and every
+ * junction in between, where two spans meet and both are now flat. The
+ * endpoints themselves are unchanged, so a span still carries exactly the
+ * strengths it was given.
+ *
+ * The distance term needs no such treatment: distance to a segment is
+ * already smooth across the cap plane, where the closest point passes
+ * continuously from the side of the segment to its end. Only the taper broke.
+ */
+export const taper = (t: number): number => t * t * (3 - 2 * t)
+
 export function forceAt(
   p: VizPrimitive,
   x: number,
@@ -196,7 +222,7 @@ function segmentForce(
     const d2 = dx * dx + dy * dy
     if (d2 <= 0) return 0
     const end = p.strengthEnd ?? p.strength
-    const s = p.strength + (end - p.strength) * t
+    const s = p.strength + (end - p.strength) * taper(t)
     if (s === 0) return 0
     const d = Math.sqrt(d2)
     const m = forceMag(s, d, p.soften)
@@ -708,7 +734,7 @@ fn field_grad(v00: f32, v10: f32, v01: f32, v11: f32, tx: f32, ty: f32,
     if (len2 > 0.0) {
       t = clamp(((${particleVar}.position.x - ax) * ex + (${particleVar}.position.y - ay) * ey) / len2, 0.0, 1.0);
     }
-    let ns = mix(s1, s2, t);
+    let ns = mix(s1, s2, t * t * (3.0 - 2.0 * t));
     let dx = (ax + ex * t) - ${particleVar}.position.x;
     let dy = (ay + ey * t) - ${particleVar}.position.y;
     let dist2 = dx * dx + dy * dy;
@@ -916,7 +942,7 @@ ${namePart(args)}
               const len2 = ex * ex + ey * ey
               const t =
                 len2 > 0 ? Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / len2)) : 0
-              const ns = s1 + (s2 - s1) * t
+              const ns = s1 + (s2 - s1) * taper(t)
               if (ns === 0) continue
               const dx = ax + ex * t - px
               const dy = ay + ey * t - py
