@@ -55,6 +55,23 @@ Every divergence from upstream is listed here.
   runtimes and moves with GPU load. Publication is forward-only on `serial`:
   nothing orders `mapAsync` callbacks across separate buffers, so an older
   dispatch may land after a newer one.
+- `runtimes/webgpu/segment-load.ts` (new) + `interfaces.ts`, `engine.ts`,
+  both runtime engines — `updateSegmentLoad()`: how crowded each of a few
+  line segments is, as the sum over live particles of `L^2 / (d^2 + L^2)`
+  with `d` the particle's distance to the segment. That is the same falloff
+  an inverse-square force uses, so "load" comes out in the same currency as
+  the pull a segment would exert, and it is a smooth measure rather than a
+  headcount inside an arbitrary radius with an edge to jitter across.
+  Exists so a force can depend on how much it has already gathered — the
+  site's section dividers lose their pull as particles collect on them,
+  which is real gravity run backwards. WGSL has no float atomics, so the
+  weight accumulates in fixed point (scaled to u32, divided out on the
+  host); the headroom is `u32 max / scale` particles per segment, ~1.0M
+  against a pool of 80k. One readback in flight rather than the census's
+  ring: this drives a continuous scalar the caller eases anyway, so a
+  two-frame-old value is indistinguishable from a fresh one, whereas the
+  census drives discrete corrections that would arrive in bursts.
+  CPU runtime mirrors it synchronously.
 - `EngineOptions.onFrame` — host per-frame hook called by both runtimes
   before the simulation step, so host writes (uniform lerps, particle
   edits) land in the same frame instead of racing a second rAF loop.

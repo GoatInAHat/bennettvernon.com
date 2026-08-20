@@ -50,6 +50,7 @@ export const GLOBAL_SETTING_KEYS = [
   'textStandoff',
   'textSmoothing',
   'separatorAttraction',
+  'separatorZeroPoint',
   'cursorStrength',
   'trailIntensity',
   'cursorFalloff',

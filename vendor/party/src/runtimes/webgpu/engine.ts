@@ -21,6 +21,8 @@ import {
   AbstractEngine,
   CellCensusConfig,
   CellCensusResult,
+  SegmentLoadConfig,
+  SegmentLoadResult,
   IParticle,
 } from "../../interfaces";
 import { ModuleRegistry } from "./module-registry";
@@ -28,6 +30,7 @@ import { SpacialGrid } from "./spacial-grid";
 import { SimulationPipeline } from "./simulation-pipeline";
 import { RenderPipeline } from "./render-pipeline";
 import { CellCensus } from "./cell-census";
+import { SegmentLoad } from "./segment-load";
 
 export class WebGPUEngine extends AbstractEngine {
   private resources: GPUResources;
@@ -45,6 +48,7 @@ export class WebGPUEngine extends AbstractEngine {
   private destroyed: boolean = false;
 
   private cellCensus: CellCensus;
+  private segmentLoad: SegmentLoad;
 
   constructor(options: {
     canvas: HTMLCanvasElement;
@@ -74,6 +78,7 @@ export class WebGPUEngine extends AbstractEngine {
     this.render = new RenderPipeline();
     this.grid = new SpacialGrid(this.cellSize);
     this.cellCensus = new CellCensus();
+    this.segmentLoad = new SegmentLoad();
   }
 
   async initialize(): Promise<void> {
@@ -147,6 +152,7 @@ export class WebGPUEngine extends AbstractEngine {
       this.animationId = null;
     }
     this.cellCensus.dispose();
+    this.segmentLoad.dispose();
     await this.resources.dispose();
   }
 
@@ -233,6 +239,10 @@ export class WebGPUEngine extends AbstractEngine {
 
   updateCellCensus(config: CellCensusConfig): CellCensusResult | null {
     return this.cellCensus.update(this.resources, config, this.getCount());
+  }
+
+  updateSegmentLoad(config: SegmentLoadConfig): SegmentLoadResult | null {
+    return this.segmentLoad.update(this.resources, config, this.getCount());
   }
 
   clear(): void {

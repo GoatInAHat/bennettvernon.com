@@ -79,6 +79,7 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'textStandoff', label: 'text standoff', min: 2, max: 150, step: 1 },
   { key: 'textSmoothing', label: 'blob smoothing', min: 1.05, max: 3, step: 0.05 },
   { key: 'separatorAttraction', label: 'separator pull', min: 0, max: 100000, step: 1000 },
+  { key: 'separatorZeroPoint', label: 'separator zero point', min: 0, max: 10000, step: 100 },
   { key: 'cursorStrength', label: 'cursor pull', min: 0, max: 100000, step: 1000 },
   { key: 'trailIntensity', label: 'trail intensity', min: 0, max: 1, step: 0.01 },
   { key: 'cursorFalloff', label: 'trail falloff', min: 0, max: 1, step: 0.01 },

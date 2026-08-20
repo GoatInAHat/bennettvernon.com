@@ -73,6 +73,27 @@ export type CellCensusResult = {
   outsideCount: number;
 };
 
+/**
+ * Configuration for the segment load pass: how crowded each of a few line
+ * segments is, as a smooth inverse-square-weighted particle count.
+ */
+export interface SegmentLoadConfig {
+  /** x1, y1, x2, y2 per segment, in world units. */
+  segments: Float32Array;
+  count: number;
+  /** Softening length of the weight, in world units: the distance at which a
+   * particle counts as half of one. Pass the same length the force law uses
+   * and "load" comes out in the same currency as the pull itself. */
+  soften: number;
+}
+
+export type SegmentLoadResult = {
+  /** The dispatch that produced this result; monotonic per engine. */
+  serial: number;
+  /** Per segment, the sum over live particles of L^2 / (d^2 + L^2). */
+  loads: Float32Array;
+};
+
 export interface IEngine {
   initialize(): Promise<void>;
   play(): void;
@@ -109,6 +130,13 @@ export interface IEngine {
    * synchronously. Returns null until the first result is available.
    */
   updateCellCensus(config: CellCensusConfig): CellCensusResult | null;
+  /**
+   * Per-segment crowding, for physics that has to know how many particles it
+   * has already gathered. Same non-stalling contract as the census: a compute
+   * pass with an asynchronous readback on WebGPU, computed synchronously on
+   * CPU, and null until the first result lands.
+   */
+  updateSegmentLoad(config: SegmentLoadConfig): SegmentLoadResult | null;
   clear(): void;
   getCount(): number;
   getFPS(): number;
@@ -178,6 +206,7 @@ export abstract class AbstractEngine implements IEngine {
   abstract getParticles(): Promise<IParticle[]>;
   abstract getParticle(index: number): Promise<IParticle>;
   abstract updateCellCensus(config: CellCensusConfig): CellCensusResult | null;
+  abstract updateSegmentLoad(config: SegmentLoadConfig): SegmentLoadResult | null;
   abstract clear(): void;
   abstract getCount(): number;
 

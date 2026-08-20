@@ -2,6 +2,8 @@ import {
   AbstractEngine,
   CellCensusConfig,
   CellCensusResult,
+  SegmentLoadConfig,
+  SegmentLoadResult,
   IParticle,
 } from "../../interfaces";
 import {
@@ -23,6 +25,7 @@ export class CPUEngine extends AbstractEngine {
   private destroyed: boolean = false;
   private particleIdToIndex: Map<number, number> = new Map();
   private censusSerial: number = 0;
+  private segmentSerial: number = 0;
 
   constructor(options: {
     canvas: HTMLCanvasElement;
@@ -223,6 +226,37 @@ export class CPUEngine extends AbstractEngine {
       outsidePos,
       outsideCount,
     };
+  }
+
+  updateSegmentLoad(config: SegmentLoadConfig): SegmentLoadResult | null {
+    if (config.count <= 0) return null;
+    const loads = new Float32Array(config.count);
+    const LL = config.soften * config.soften;
+    const n = this.getEffectiveCount();
+    for (let s = 0; s < config.count; s++) {
+      const x1 = config.segments[s * 4];
+      const y1 = config.segments[s * 4 + 1];
+      const vx = config.segments[s * 4 + 2] - x1;
+      const vy = config.segments[s * 4 + 3] - y1;
+      const len2 = vx * vx + vy * vy;
+      let sum = 0;
+      for (let i = 0; i < n; i++) {
+        const p = this.particles[i];
+        if (p.mass <= 0) continue;
+        const t =
+          len2 > 0
+            ? Math.max(
+                0,
+                Math.min(1, ((p.position.x - x1) * vx + (p.position.y - y1) * vy) / len2)
+              )
+            : 0;
+        const dx = p.position.x - (x1 + vx * t);
+        const dy = p.position.y - (y1 + vy * t);
+        sum += LL / (dx * dx + dy * dy + LL);
+      }
+      loads[s] = sum;
+    }
+    return { serial: this.segmentSerial++, loads };
   }
 
   destroy(): Promise<void> {

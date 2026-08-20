@@ -3,6 +3,8 @@ import {
   IParticle,
   CellCensusConfig,
   CellCensusResult,
+  SegmentLoadConfig,
+  SegmentLoadResult,
 } from "./interfaces";
 import { Module } from "./module";
 import { WebGPUEngine } from "./runtimes/webgpu/engine";
@@ -159,6 +161,9 @@ export class Engine implements IEngine {
   }
   updateCellCensus(config: CellCensusConfig): CellCensusResult | null {
     return this.engine.updateCellCensus(config);
+  }
+  updateSegmentLoad(config: SegmentLoadConfig): SegmentLoadResult | null {
+    return this.engine.updateSegmentLoad(config);
   }
   // Helpers for pinning/unpinning
   async pinParticles(indexes: number[]): Promise<void> {
