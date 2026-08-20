@@ -33,6 +33,11 @@ export const MODE_SETTING_KEYS = [
   'colorSimilarity',
   'fleeAngle',
   'trailDecay',
+  // Not a physics parameter: which of the two placements the name's density
+  // enforcement uses when it teleports a particle into a cell. Per-mode
+  // because the right answer depends on what the mode's field does to the
+  // particles (see nameTpMethod in presets.ts).
+  'nameTpMethod',
 ] as const
 
 /** Site-wide settings, independent of the active mode. */

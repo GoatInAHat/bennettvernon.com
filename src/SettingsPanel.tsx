@@ -311,6 +311,21 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           </Fragment>
         )
       })}
+      <div className="settings-group">name</div>
+      <label className="settings-row">
+        <span>name particle tp method</span>
+        <select
+          value={values.nameTpMethod >= 0.5 ? 1 : 0}
+          onChange={(e) => {
+            const v = Number(e.target.value)
+            bridge.applySetting('nameTpMethod', v)
+            setValues((prev) => (prev ? { ...prev, nameTpMethod: v } : prev))
+          }}
+        >
+          <option value={1}>onto a neighbour</option>
+          <option value={0}>random in cell</option>
+        </select>
+      </label>
       <label className="settings-row settings-toggle">
         <span>enabled modes</span>
         <span className="mode-checks">

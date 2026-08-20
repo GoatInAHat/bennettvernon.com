@@ -216,6 +216,29 @@ export const PARAM_DEFS: ParamDef[] = [
         : p.session.modules.trails.trailDecay,
     set: (m, v) => m.trails.setTrailDecay(v),
   },
+  {
+    // Where the name's density enforcement puts a particle it teleports into
+    // a cell. 1 lands it on a particle the census already found there, so
+    // arrivals join the crowd instead of dusting the letter evenly; 0 lands
+    // it on a random pixel of the cell's own glyph area.
+    //
+    // Per-mode because it depends on what the field is doing. Landing on a
+    // neighbour normally looks better -- it inherits whatever clumping the
+    // mode has produced rather than reading as fine even dust. But a mode
+    // that packs everything into one point makes every arrival land on that
+    // same point, and a cell whose whole population sits at one position can
+    // be pulled out of the cell in a single frame, all of it, which is the
+    // one way an entire cell still empties at once.
+    //
+    // It is here rather than in DiscreteState because it is not something a
+    // preset's session JSON configures, and riding the ordinary interpolation
+    // gives it the flip the discrete state gets for free: a 0/1 value crosses
+    // 0.5 exactly at the transition midpoint. Nothing to `set` -- the host
+    // reads it off currentParams when it places a particle.
+    key: 'nameTpMethod',
+    from: () => 1,
+    set: () => {},
+  },
 ]
 
 /**

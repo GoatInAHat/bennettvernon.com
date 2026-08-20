@@ -1835,15 +1835,24 @@ export function PartyBackground() {
         }
         return -1
       }
-      /** A position inside cell `ci`: on a particle the census saw there, so
-       * arrivals join the crowd instead of scattering over the glyph. A
-       * random glyph pixel is uniform over the letter's area, which reads as
-       * fine even dust; landing on a neighbour inherits whatever clumping the
-       * field has already produced there. Only a cell the census found empty
-       * has no neighbour to copy, and that falls back to a random glyph
-       * pixel. */
+      // `name particle tp method` for this mode: land on a neighbour, or on a
+      // random pixel of the cell's glyph area. A neighbour inherits whatever
+      // clumping the field has produced, which usually reads better than the
+      // fine even dust a uniform pixel gives -- but in a mode that packs the
+      // particles into a single point it puts every arrival at that one
+      // position, and a cell whose whole population sits at one position can
+      // be dragged out of the cell in one frame, entirely. Random placement
+      // spreads them, so no single pull reaches all of them at once.
+      //
+      // Mid-transition the value is between the two modes' settings; 0.5 is
+      // the midpoint, the same instant every other discrete preset change
+      // flips at.
+      const ontoNeighbour = (currentParams.nameTpMethod ?? 1) >= 0.5
+      /** A position inside cell `ci`. Only a cell the census found empty has
+       * no neighbour to copy, so that falls back to the glyph pixel either
+       * way. */
       const placeIn = (ci: number): { x: number; y: number } | null => {
-        const occupied = Math.min(res.counts[ci], k)
+        const occupied = ontoNeighbour ? Math.min(res.counts[ci], k) : 0
         if (occupied > 0) {
           const si = ci * k + Math.floor(Math.random() * occupied)
           return { x: res.samplePos[si * 2], y: res.samplePos[si * 2 + 1] }
