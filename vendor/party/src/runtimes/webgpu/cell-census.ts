@@ -11,47 +11,93 @@ import type { GPUResources } from "./gpu-resources";
  *
  * Unlike LocalQuery this never stalls the pipeline: each update kicks a
  * dispatch and copies the packed result into a staging buffer whose map is
- * resolved asynchronously; callers always receive the latest completed
- * census (typically one or two frames old), which is fine for steering
- * decisions made every frame.
+ * resolved asynchronously.
+ *
+ * The readback is PIPELINED over a ring of buffer pairs, so one dispatch is
+ * issued and one result completes per frame. A single pair would serialize
+ * them: nothing may be dispatched while the one staging buffer is mapped, so
+ * a fresh census would only appear once per round trip and every frame in
+ * between would hand back the identical object. Callers that act on new data
+ * would then act in bursts, one frame in every three or four, with each burst
+ * carrying the drift of all the frames it skipped.
+ *
+ * A result is still the same age either way -- a round trip is a round trip.
+ * The ring changes the RATE, not the latency.
+ *
+ * Every result carries `serial`, the dispatch that produced it, and `issued`,
+ * the number of dispatches made as of the call that returned it. A caller
+ * that mutates particles can tell exactly when its change becomes visible:
+ * the dispatch for this frame has already been submitted by the time `update`
+ * returns, so a write made now first appears in the result whose `serial`
+ * reaches `issued`.
  *
  * Result buffer layout (u32): [outsideCount, counts[cellCount],
  * samples[cellCount * samplesPerCell], outside[outsideSamples],
  * outsidePos[outsideSamples * 2], samplePos[cellCount * samplesPerCell * 2]]. Positions are f32 bit-cast into the same
  * u32 storage so one readback carries both.
  */
+
+/** Buffer pairs in the readback ring. A dispatch occupies its pair until the
+ * map resolves; measured on this site that is two to four frames, and five
+ * once the ring itself is the constraint. Six pairs leave headroom above the
+ * observed worst case, which is what keeps a fresh census landing on EVERY
+ * frame rather than on most of them -- at four, one frame in eleven found no
+ * free pair and had to reuse the census it had already acted on.
+ *
+ * A frame that finds every pair busy simply skips its dispatch, which is what
+ * the single-pair version did on every frame of every round trip, so the ring
+ * degrades into the old behaviour rather than into an error. Cost is linear:
+ * each pair is two buffers of the full result, ~1.9 MB at this site's cell
+ * and sample counts. */
+const RING = 6;
+
+type Slot = {
+  result: GPUBuffer;
+  staging: GPUBuffer;
+  busy: boolean;
+};
+
 export class CellCensus {
   private pipeline: GPUComputePipeline | null = null;
   private uniform: GPUBuffer | null = null;
   private cellsBuf: GPUBuffer | null = null;
-  private result: GPUBuffer | null = null;
-  private staging: GPUBuffer | null = null;
+  private slots: Slot[] | null = null;
   private zeroes: Uint32Array<ArrayBuffer> | null = null;
   private device: GPUDevice | null = null;
   private cellsVersion = -1;
   private cellsCapacity = 0;
   private resultLen = 0;
   private shape = "";
-  private inFlight = false;
+  /** Monotonic dispatch id. Survives a reshape -- results from before it are
+   * still in flight, and a serial that restarted would let one of them
+   * overwrite a newer census. Reset only in dispose(), where `latest` is
+   * dropped along with it. */
+  private nextSerial = 0;
   private latest: CellCensusResult | null = null;
+
+  private freeSlots(): void {
+    if (!this.slots) return;
+    for (const s of this.slots) {
+      s.result.destroy();
+      s.staging.destroy();
+    }
+    this.slots = null;
+  }
 
   dispose(): void {
     this.pipeline = null;
     this.uniform?.destroy();
     this.cellsBuf?.destroy();
-    this.result?.destroy();
-    this.staging?.destroy();
+    this.freeSlots();
     this.uniform = null;
     this.cellsBuf = null;
-    this.result = null;
-    this.staging = null;
     this.zeroes = null;
     this.device = null;
     this.cellsVersion = -1;
     this.cellsCapacity = 0;
     this.resultLen = 0;
     this.shape = "";
-    this.inFlight = false;
+    this.nextSerial = 0;
     this.latest = null;
   }
 
@@ -70,8 +116,10 @@ export class CellCensus {
     const shape = `${config.cellCount}:${config.samplesPerCell}:${config.outsideSamples}`;
     if (shape !== this.shape) {
       this.shape = shape;
-      this.result?.destroy();
-      this.staging?.destroy();
+      // Replaced wholesale rather than mutated: the async completion closes
+      // over the array it was dispatched against, so one identity check
+      // covers both a reshape and a dispose.
+      this.freeSlots();
       this.resultLen =
         1 +
         config.cellCount +
@@ -79,19 +127,27 @@ export class CellCensus {
         config.outsideSamples +
         config.outsideSamples * 2 +
         config.cellCount * config.samplesPerCell * 2;
-      this.result = device.createBuffer({
-        size: this.resultLen * 4,
-        usage:
-          GPUBufferUsage.STORAGE |
-          GPUBufferUsage.COPY_DST |
-          GPUBufferUsage.COPY_SRC,
-      });
-      this.staging = device.createBuffer({
-        size: this.resultLen * 4,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-      });
+      const slots: Slot[] = [];
+      for (let i = 0; i < RING; i++) {
+        slots.push({
+          result: device.createBuffer({
+            size: this.resultLen * 4,
+            usage:
+              GPUBufferUsage.STORAGE |
+              GPUBufferUsage.COPY_DST |
+              GPUBufferUsage.COPY_SRC,
+          }),
+          staging: device.createBuffer({
+            size: this.resultLen * 4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          }),
+          busy: false,
+        });
+      }
+      this.slots = slots;
       this.zeroes = new Uint32Array(1 + config.cellCount);
-      this.inFlight = false;
+      // An old-shape census counts a partition that no longer exists.
+      this.latest = null;
     }
 
     if (!this.uniform) {
@@ -160,9 +216,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot = atomicAdd(&res[0], 1u);
     if (slot < m) {
       atomicStore(&res[1u + cellCount + cellCount * k + slot], i);
-      // Record where it is as well as which it is: callers that relocate a
-      // particle to an existing one need the position, and fetching it any
-      // other way would sync the whole particle buffer back off the GPU.
       let pbase = 1u + cellCount + cellCount * k + m + slot * 2u;
       atomicStore(&res[pbase], bitcast<u32>(p.position.x));
       atomicStore(&res[pbase + 1u], bitcast<u32>(p.position.y));
@@ -186,7 +239,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   ): CellCensusResult | null {
     const device = resources.getDevice();
     const particleBuffer = resources.getParticleBuffer();
-    if (!particleBuffer || config.cellCount <= 0) return this.latest;
+    // Same shape as the tail return: `issued` must always mean "as of this
+    // call", never the value frozen when the readback resolved.
+    if (!particleBuffer || config.cellCount <= 0) {
+      return this.latest && { ...this.latest, issued: this.nextSerial };
+    }
     if (this.device && this.device !== device) {
       this.dispose();
     }
@@ -204,11 +261,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       );
     }
 
-    // One census in flight at a time: kick the next dispatch only once the
-    // previous readback resolved, so the CPU never waits on the GPU.
-    if (!this.inFlight && particleCount > 0) {
-      this.inFlight = true;
-      device.queue.writeBuffer(this.result!, 0, this.zeroes!);
+    const slots = this.slots!;
+    const slot = particleCount > 0 ? slots.find((s) => !s.busy) : undefined;
+    if (slot) {
+      slot.busy = true;
+      const serial = this.nextSerial++;
+      // Only the counters accumulate (atomicAdd); every other word is
+      // atomicStore, and the caller reads none of them past the count. So
+      // zeroing the header is enough, per slot as it was for the single pair.
+      device.queue.writeBuffer(slot.result, 0, this.zeroes!);
       const u = new Float32Array(12);
       u[0] = config.centerX;
       u[1] = config.centerY;
@@ -230,7 +291,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           { binding: 0, resource: { buffer: particleBuffer } },
           { binding: 1, resource: { buffer: this.uniform! } },
           { binding: 2, resource: { buffer: this.cellsBuf! } },
-          { binding: 3, resource: { buffer: this.result! } },
+          { binding: 3, resource: { buffer: slot.result } },
         ],
       });
       const encoder = device.createCommandEncoder();
@@ -239,47 +300,64 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(particleCount / 256));
       pass.end();
-      encoder.copyBufferToBuffer(this.result!, 0, this.staging!, 0, this.resultLen * 4);
+      encoder.copyBufferToBuffer(slot.result, 0, slot.staging, 0, this.resultLen * 4);
       device.queue.submit([encoder.finish()]);
 
-      const staging = this.staging!;
       const c = config.cellCount;
       const k = config.samplesPerCell;
       const m = config.outsideSamples;
       const version = config.version;
-      staging
+      slot.staging
         .mapAsync(GPUMapMode.READ)
         .then(() => {
-          if (staging !== this.staging) return; // disposed/reshaped meanwhile
-          const view = new Uint32Array(staging.getMappedRange());
-          this.latest = {
-            version,
-            counts: view.slice(1, 1 + c),
-            samples: view.slice(1 + c, 1 + c + c * k),
-            samplesPerCell: k,
-            outside: view.slice(1 + c + c * k, 1 + c + c * k + m),
-            outsidePos: new Float32Array(
-              view.buffer.slice(
-                view.byteOffset + (1 + c + c * k + m) * 4,
-                view.byteOffset + (1 + c + c * k + m + m * 2) * 4
-              )
-            ),
-            samplePos: new Float32Array(
-              view.buffer.slice(
-                view.byteOffset + (1 + c + c * k + m + m * 2) * 4,
-                view.byteOffset + (1 + c + c * k + m + m * 2 + c * k * 2) * 4
-              )
-            ),
-            outsideCount: view[0],
-          };
-          staging.unmap();
+          if (this.slots !== slots) return; // disposed/reshaped meanwhile
+          try {
+            const view = new Uint32Array(slot.staging.getMappedRange());
+            // Nothing orders map callbacks across separate buffers, and the
+            // promise chains add microtask hops of their own, so an older
+            // dispatch may land after a newer one. Publish forward only.
+            if (serial > (this.latest?.serial ?? -1)) {
+              this.latest = {
+                serial,
+                issued: this.nextSerial,
+                version,
+                counts: view.slice(1, 1 + c),
+                samples: view.slice(1 + c, 1 + c + c * k),
+                samplesPerCell: k,
+                outside: view.slice(1 + c + c * k, 1 + c + c * k + m),
+                outsidePos: new Float32Array(
+                  view.buffer.slice(
+                    view.byteOffset + (1 + c + c * k + m) * 4,
+                    view.byteOffset + (1 + c + c * k + m + m * 2) * 4
+                  )
+                ),
+                samplePos: new Float32Array(
+                  view.buffer.slice(
+                    view.byteOffset + (1 + c + c * k + m + m * 2) * 4,
+                    view.byteOffset + (1 + c + c * k + m + m * 2 + c * k * 2) * 4
+                  )
+                ),
+                outsideCount: view[0],
+              };
+            }
+          } finally {
+            // Unconditional: a slot left mapped can never be copied into
+            // again, so skipping this on the discard path would retire a
+            // ring position for the lifetime of the shape.
+            slot.staging.unmap();
+          }
         })
         .catch(() => {})
         .then(() => {
-          if (staging === this.staging) this.inFlight = false;
+          // After the unmap, never before it: a mapped buffer is not a legal
+          // copy destination, so a slot freed early fails validation.
+          if (this.slots === slots) slot.busy = false;
         });
     }
 
-    return this.latest;
+    // `issued` moves every dispatch while the rest of the result does not, so
+    // the caller gets it as of THIS call rather than as of the readback. The
+    // arrays are shared, not copied; this is seven fields.
+    return this.latest && { ...this.latest, issued: this.nextSerial };
   }
 }

@@ -22,6 +22,7 @@ export class CPUEngine extends AbstractEngine {
   private animationId: number | null = null;
   private destroyed: boolean = false;
   private particleIdToIndex: Map<number, number> = new Map();
+  private censusSerial: number = 0;
 
   constructor(options: {
     canvas: HTMLCanvasElement;
@@ -206,7 +207,13 @@ export class CPUEngine extends AbstractEngine {
         }
       }
     }
+    // Synchronous, so this census already contains every edit made before the
+    // call and an edit made after it first shows up in the next one. Same
+    // contract the WebGPU ring states, with a lag of zero.
+    const serial = this.censusSerial++;
     return {
+      serial,
+      issued: this.censusSerial,
       version: config.version,
       counts,
       samples,

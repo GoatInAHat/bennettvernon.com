@@ -36,6 +36,25 @@ Every divergence from upstream is listed here.
   The readback is asynchronous and double-checked against disposal; callers
   get the latest completed result without ever stalling the pipeline. CPU
   runtime mirrors it synchronously.
+  The readback is PIPELINED over a ring of four buffer pairs. A single pair
+  serializes dispatch against readback — nothing may be dispatched while the
+  one staging buffer is mapped — so a fresh census appeared only once per
+  round trip (two to four frames) and every frame in between handed back the
+  identical object. A caller acting on new data therefore acted in bursts,
+  one frame in every three or four, each burst carrying the drift of all the
+  frames it skipped. The ring changes the RATE, not the latency: a result is
+  the same age either way, there is just one per frame. A frame that finds
+  every pair busy skips its dispatch, which is what the single pair did on
+  every frame of every round trip.
+  Results carry `serial` (the dispatch that produced them) and `issued` (the
+  dispatches made as of the call that returned them), so a caller that
+  mutates particles knows exactly when its change becomes visible — the
+  current frame's dispatch is already submitted when `update` returns, so a
+  write made now first appears in the result whose `serial` reaches `issued`.
+  That replaces guessing at the readback latency, which differs between the
+  runtimes and moves with GPU load. Publication is forward-only on `serial`:
+  nothing orders `mapAsync` callbacks across separate buffers, so an older
+  dispatch may land after a newer one.
 - `EngineOptions.onFrame` — host per-frame hook called by both runtimes
   before the simulation step, so host writes (uniform lerps, particle
   edits) land in the same frame instead of racing a second rAF loop.

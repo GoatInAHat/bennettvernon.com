@@ -41,6 +41,16 @@ export interface CellCensusConfig {
 }
 
 export type CellCensusResult = {
+  /** The dispatch that produced this census. Monotonic per engine, so a
+   * caller knows whether it has already acted on this data without relying
+   * on object identity. */
+  serial: number;
+  /** Dispatches issued as of the call that returned this result. The census
+   * for the current frame is already submitted by then, so a particle write
+   * made after this call first appears in the result whose `serial` reaches
+   * `issued` -- which is how a caller knows when its own edits stop being
+   * invisible, without guessing at the readback latency. */
+  issued: number;
   /** The config `version` this census was dispatched against; callers that
    * rebuilt their cells since should discard mismatching results. */
   version: number;
