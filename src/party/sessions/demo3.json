@@ -16,7 +16,7 @@
       "dirY": 0,
       "inertia": 0,
       "friction": 0,
-      "damping": 0,
+      "damping": 0.2,
       "mode": "inwards"
     },
     "boundary": {
