@@ -26,41 +26,37 @@ export enum DataType {
 
 /**
  * Debug-visualization contract. A module can describe its live spatial
- * influence as geometric primitives in world units; a generic debug viewer
- * renders every module that implements `viz()` — the body geometry, the
- * range limit, and the falloff gradient between them — so new physics never
- * requires viewer changes. `intensity` values are relative within a group
- * (the viewer normalizes); group `key`s drive deterministic coloring.
+ * influence as primitives in world units, carrying the actual parameters its
+ * force law uses — not a pre-baked picture — so a viewer can evaluate the
+ * true force at any point rather than approximating it with authored
+ * constants. Group `key`s drive deterministic coloring.
+ *
+ * `strength` is signed and in the module's own force units: positive pulls
+ * toward the body, negative pushes away from it.
  */
 export type VizPrimitive =
   | {
-      kind: "ring";
-      x: number;
-      y: number;
-      /** Body radius (0 for a point source) and range-limit radius. */
-      r0: number;
-      r1: number;
-      intensity: number;
-    }
-  | {
-      kind: "capsule";
+      kind: "segment";
+      /** Body is the segment (x1,y1)-(x2,y2); a point when the ends meet. */
       x1: number;
       y1: number;
       x2: number;
       y2: number;
+      strength: number;
+      /** Reach from the body surface; the force is zero at and beyond it. */
       range: number;
-      /** Intensity at each endpoint (interpolated along the segment). */
-      i1: number;
-      i2: number;
     }
   | {
-      kind: "rectRing";
+      kind: "rect";
       x: number;
       y: number;
       hw: number;
       hh: number;
+      strength: number;
       range: number;
-      intensity: number;
+      /** Repelling rects push out along the nearest edge at full strength
+       * everywhere inside; attracting rects exert nothing there. */
+      interiorPush?: boolean;
     }
   | {
       kind: "field";
@@ -69,19 +65,25 @@ export type VizPrimitive =
       cell: number;
       cols: number;
       rows: number;
-      /** Scalar samples (row-major) starting at `valuesStart`. */
+      /** Signed distances (row-major), negative inside the shape. */
       values: ArrayLike<number>;
       valuesStart: number;
-      /** Body isoline (full force inside) and range-limit isoline values. */
-      inner: number;
-      outer: number;
-      intensity: number;
-      /** Falloff exponent of the normalized force between inner and outer
-       * (default 1: linear ramp). Viewers shape the gradient with it. */
+      strength: number;
+      /** Reach measured from `offset`. */
+      range: number;
+      /** Isoline treated as the body surface (default 0). */
+      offset?: number;
+      /** true: acts where the sample is inside `offset` and pushes down the
+       * gradient. false: acts within `range` outside `offset` and pulls up
+       * it. */
+      push?: boolean;
+      /** Falloff exponent from the surface outward (default 1, linear). */
       exponent?: number;
-      /** Force inside the body relative to the ramp's value at `inner`
-       * (default 1: full). Viewers scale the body's fill with it. */
-      innerScale?: number;
+      /** Magnitude ceiling as a multiple of `strength` (default 1). */
+      cap?: number;
+      /** Per-cell multiplier on the same grid; magnitude is scaled by
+       * `1 + (factor - 1) * sample`. */
+      boost?: { values: ArrayLike<number>; factor: number };
     };
 
 export interface VizGroup {

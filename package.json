@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:force": "esbuild src/party/force.check.ts --bundle --platform=node --format=esm --alias:@cazala/party=./vendor/party/src/index.ts --outfile=node_modules/.cache/force.check.mjs --log-level=error && node node_modules/.cache/force.check.mjs"
   },
   "dependencies": {
     "pressure": "^2.2.0",

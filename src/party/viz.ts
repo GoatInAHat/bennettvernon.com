@@ -1,11 +1,17 @@
 import type { VizGroup, VizPrimitive } from '@cazala/party'
+import { forceAt, peakForce } from './effectors'
 
 /**
- * Generic debug renderer for the engine's viz contract: draws every module's
- * self-described force geometry — the body outline, the range-limit outline,
- * and the falloff gradient between them — with colors derived
- * deterministically from group keys. New physics renders here without any
- * changes to this file, as long as it describes itself via Module.viz().
+ * Generic debug renderer for the engine's viz contract. Every body is drawn
+ * as a glow whose opacity at each point is the actual force a particle there
+ * would feel from it, evaluated with `forceAt` — the same function the check
+ * asserts the physics against — so the picture cannot be tuned independently
+ * of the simulation. Colors are derived deterministically from group keys.
+ *
+ * The scale is anchored globally: the strongest force present anywhere in the
+ * system renders at `maxOpacity`, and everything else is shown relative to
+ * it. A source an order of magnitude weaker looks an order of magnitude
+ * fainter, because it is.
  */
 
 /** Deterministic hue from a group key (FNV-1a). */
@@ -35,416 +41,156 @@ export function vizRgb(key: string): [number, number, number] {
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
 }
 
-/** Absolute force magnitude -> gradient alpha. Log-mapped so the system's
- * wildly different strengths (hundreds to hundreds of thousands) all stay
- * legible while still ordering by strength; the strongest point of every
- * gradient carries its force's true mapped opacity, and weak sources render
- * genuinely fainter (no more per-group normalization that promoted every
- * group's strongest primitive to the same peak). */
-const ALPHA_REF = 200_000
-const ALPHA_PEAK = 0.35
-export function vizAlpha(intensity: number): number {
-  if (!intensity) return 0
-  const a = Math.log10(1 + Math.abs(intensity)) / Math.log10(1 + ALPHA_REF)
-  return ALPHA_PEAK * Math.min(1, a)
-}
-
-function drawRing(
-  ctx: CanvasRenderingContext2D,
-  key: string,
-  p: Extract<VizPrimitive, { kind: 'ring' }>,
-  zoom: number,
-  gradientOnly = false,
-) {
-  const x = p.x * zoom
-  const y = p.y * zoom
-  const r0 = p.r0 * zoom
-  const r1 = p.r1 * zoom
-  if (r1 <= 0) return
-  const grad = ctx.createRadialGradient(x, y, Math.max(r0, 0), x, y, r1)
-  // Multi-stop so the alpha tracks vizAlpha of the true local force
-  // strength * (1 - d/range) instead of a linear fade.
-  for (let t = 0; t <= 1; t += 0.25) {
-    grad.addColorStop(t, vizCss(key, vizAlpha(p.intensity * (1 - t))))
-  }
-  ctx.fillStyle = grad
-  ctx.beginPath()
-  ctx.arc(x, y, r1, 0, Math.PI * 2)
-  ctx.fill()
-  // In max-composited groups the primitives are dense curve samples; their
-  // union gradient IS the geometry, so per-sample outlines are just noise.
-  if (gradientOnly) return
-  // Body geometry (a dot for point sources) and the range limit.
-  ctx.fillStyle = vizCss(key, Math.min(1, 0.55 + vizAlpha(p.intensity)))
-  ctx.strokeStyle = ctx.fillStyle
-  ctx.lineWidth = 1
-  if (r0 >= 1) {
-    ctx.beginPath()
-    ctx.arc(x, y, r0, 0, Math.PI * 2)
-    ctx.stroke()
-  } else {
-    ctx.beginPath()
-    ctx.arc(x, y, 1.4, 0, Math.PI * 2)
-    ctx.fill()
-  }
-  ctx.strokeStyle = vizCss(key, 0.22)
-  ctx.beginPath()
-  ctx.arc(x, y, r1, 0, Math.PI * 2)
-  ctx.stroke()
-}
-
-function drawCapsule(
-  ctx: CanvasRenderingContext2D,
-  key: string,
-  p: Extract<VizPrimitive, { kind: 'capsule' }>,
-  zoom: number,
-) {
-  const x1 = p.x1 * zoom
-  const y1 = p.y1 * zoom
-  const x2 = p.x2 * zoom
-  const y2 = p.y2 * zoom
-  const r = p.range * zoom
-  const i1 = Math.abs(p.i1)
-  const i2 = Math.abs(p.i2)
-  const len = Math.hypot(x2 - x1, y2 - y1)
-  if (len < 0.5) {
-    drawRing(ctx, key, { kind: 'ring', x: p.x1, y: p.y1, r0: 0, r1: p.range, intensity: Math.max(i1, i2) }, zoom)
-    return
-  }
-  const mid = (i1 + i2) / 2
-  const ang0 = Math.atan2(y2 - y1, x2 - x1)
-  // Exact capsule falloff: the distance field of a segment is a
-  // perpendicular linear ramp along the middle slab plus radial ramps
-  // around the end caps — alpha tracks vizAlpha of the shader's true
-  // strength * (1 - dist / range).
-  ctx.save()
-  ctx.translate(x1, y1)
-  ctx.rotate(ang0)
-  const slab = ctx.createLinearGradient(0, -r, 0, r)
-  for (let t = 0; t <= 1; t += 0.125) {
-    slab.addColorStop(t, vizCss(key, vizAlpha(mid * (1 - Math.abs(2 * t - 1)))))
-  }
-  ctx.fillStyle = slab
-  ctx.fillRect(0, -r, len, r * 2)
-  const cap = (cxo: number, intensity: number, side: -1 | 1) => {
-    ctx.save()
-    ctx.beginPath()
-    ctx.rect(side < 0 ? cxo - r : cxo, -r, r, r * 2)
-    ctx.clip()
-    const g = ctx.createRadialGradient(cxo, 0, 0, cxo, 0, r)
-    for (let t = 0; t <= 1; t += 0.25) {
-      g.addColorStop(t, vizCss(key, vizAlpha(intensity * (1 - t))))
-    }
-    ctx.fillStyle = g
-    ctx.fillRect(cxo - r, -r, r * 2, r * 2)
-    ctx.restore()
-  }
-  cap(0, i1, -1)
-  cap(len, i2, 1)
-  ctx.restore()
-  // Range limit: the capsule outline. (The body segment itself is not
-  // stroked — across the round caps it reads as a diameter line.) The cap
-  // arcs run from the +normal side around the tip to the −normal side, so
-  // the path never jumps across the circle.
-  const nx = -(y2 - y1) / len
-  const ny = (x2 - x1) / len
-  const ang = Math.atan2(y2 - y1, x2 - x1)
-  ctx.strokeStyle = vizCss(key, 0.22)
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(x1 + nx * r, y1 + ny * r)
-  ctx.lineTo(x2 + nx * r, y2 + ny * r)
-  ctx.arc(x2, y2, r, ang + Math.PI / 2, ang - Math.PI / 2, true)
-  ctx.lineTo(x1 - nx * r, y1 - ny * r)
-  ctx.arc(x1, y1, r, ang - Math.PI / 2, ang + Math.PI / 2, true)
-  ctx.closePath()
-  ctx.stroke()
-}
-
-function drawRectRing(
-  ctx: CanvasRenderingContext2D,
-  key: string,
-  p: Extract<VizPrimitive, { kind: 'rectRing' }>,
-  zoom: number,
-) {
-  const x = p.x * zoom
-  const y = p.y * zoom
-  const hw = p.hw * zoom
-  const hh = p.hh * zoom
-  const r = p.range * zoom
-  // Falloff gradient: expanding outlines with falling alpha. The offset
-  // surface of a rectangle is a rounded rectangle whose corner radius is
-  // the offset distance.
-  const steps = 6
-  for (let k = 1; k < steps; k++) {
-    const o = (k / steps) * r
-    ctx.strokeStyle = vizCss(key, vizAlpha(p.intensity * (1 - k / steps)))
-    ctx.lineWidth = Math.max(1, r / steps)
-    ctx.beginPath()
-    ctx.roundRect(x - hw - o, y - hh - o, (hw + o) * 2, (hh + o) * 2, o)
-    ctx.stroke()
-  }
-  // Body geometry and range limit.
-  ctx.lineWidth = 1
-  ctx.strokeStyle = vizCss(key, Math.min(1, 0.55 + vizAlpha(p.intensity)))
-  ctx.strokeRect(x - hw, y - hh, hw * 2, hh * 2)
-  ctx.strokeStyle = vizCss(key, 0.22)
-  ctx.beginPath()
-  ctx.roundRect(x - hw - r, y - hh - r, (hw + r) * 2, (hh + r) * 2, r)
-  ctx.stroke()
-}
-
-/** Strokes one isoline of a sampled scalar field as smooth vector contours
- * (marching squares with linear interpolation between cell centers), so the
- * curve renders at native resolution instead of the field's raster grid. */
-function strokeIso(
-  ctx: CanvasRenderingContext2D,
-  key: string,
-  p: Extract<VizPrimitive, { kind: 'field' }>,
-  iso: number,
-  alpha: number,
-  width: number,
-  zoom: number,
-) {
-  const { cols, rows } = p
-  const v = (gx: number, gy: number) => Number(p.values[p.valuesStart + gy * cols + gx])
-  const cx = (g: number) => (p.originX + (g + 0.5) * p.cell) * zoom
-  const cy = (g: number) => (p.originY + (g + 0.5) * p.cell) * zoom
-  ctx.strokeStyle = vizCss(key, alpha)
-  ctx.lineWidth = width
-  ctx.beginPath()
-  for (let gy = 0; gy < rows - 1; gy++) {
-    for (let gx = 0; gx < cols - 1; gx++) {
-      const a = v(gx, gy)
-      const b = v(gx + 1, gy)
-      const c = v(gx + 1, gy + 1)
-      const d = v(gx, gy + 1)
-      let idx = 0
-      if (a >= iso) idx |= 1
-      if (b >= iso) idx |= 2
-      if (c >= iso) idx |= 4
-      if (d >= iso) idx |= 8
-      if (idx === 0 || idx === 15) continue
-      const t = (v1: number, v2: number) => (iso - v1) / (v2 - v1)
-      const top = () => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(a, b), cy(gy)]
-      const right = () => [cx(gx + 1), cy(gy) + (cy(gy + 1) - cy(gy)) * t(b, c)]
-      const bottom = () => [cx(gx) + (cx(gx + 1) - cx(gx)) * t(d, c), cy(gy + 1)]
-      const left = () => [cx(gx), cy(gy) + (cy(gy + 1) - cy(gy)) * t(a, d)]
-      const seg = (e1: number[], e2: number[]) => {
-        ctx.moveTo(e1[0], e1[1])
-        ctx.lineTo(e2[0], e2[1])
-      }
-      switch (idx) {
-        case 1:
-        case 14:
-          seg(left(), top())
-          break
-        case 2:
-        case 13:
-          seg(top(), right())
-          break
-        case 3:
-        case 12:
-          seg(left(), right())
-          break
-        case 4:
-        case 11:
-          seg(right(), bottom())
-          break
-        case 6:
-        case 9:
-          seg(top(), bottom())
-          break
-        case 7:
-        case 8:
-          seg(left(), bottom())
-          break
-        case 5:
-          seg(left(), top())
-          seg(right(), bottom())
-          break
-        case 10:
-          seg(top(), right())
-          seg(left(), bottom())
-          break
-      }
+/** The strongest force any live primitive can exert. Anchors the opacity
+ * scale, so it is a scan of peaks rather than a search over space. */
+export function vizFmax(groups: VizGroup[]): number {
+  let max = 0
+  for (const g of groups) {
+    for (const p of g.primitives) {
+      const peak = peakForce(p)
+      if (peak > max) max = peak
     }
   }
-  ctx.stroke()
+  return max
 }
 
-function drawField(
+/** Below half an 8-bit quantum the glow is indistinguishable from nothing.
+ * This is a property of the pixel format, not of the physics — it is the
+ * only constant in this file that shapes what gets drawn. */
+const ALPHA_QUANTUM = 0.5 / 255
+/** Cells evaluated per group per frame. Cells coarsen rather than the field
+ * being clipped, so a glow never loses its outer reach to a budget. */
+const CELL_BUDGET = 600_000
+const MIN_CELL_PX = 3
+
+/** World-space box outside which this primitive exerts nothing. Derived from
+ * the force law's own reach, never authored. */
+function extent(p: VizPrimitive): [number, number, number, number] {
+  if (p.kind === 'segment') {
+    return [
+      Math.min(p.x1, p.x2) - p.range,
+      Math.min(p.y1, p.y2) - p.range,
+      Math.max(p.x1, p.x2) + p.range,
+      Math.max(p.y1, p.y2) + p.range,
+    ]
+  }
+  if (p.kind === 'rect') {
+    return [p.x - p.hw - p.range, p.y - p.hh - p.range, p.x + p.hw + p.range, p.y + p.hh + p.range]
+  }
+  return [
+    p.originX,
+    p.originY,
+    p.originX + p.cols * p.cell,
+    p.originY + p.rows * p.cell,
+  ]
+}
+
+function drawGlow(
   ctx: CanvasRenderingContext2D,
-  key: string,
-  p: Extract<VizPrimitive, { kind: 'field' }>,
+  g: VizGroup,
   zoom: number,
+  fmax: number,
+  maxOpacity: number,
+  viewW: number,
+  viewH: number,
 ) {
-  const { cols, rows } = p
-  if (cols < 2 || rows < 2) return
-  const [cr, cg, cb] = vizRgb(key)
+  // A primitive whose own peak cannot reach one alpha quantum is invisible
+  // at this anchor; skipping it is exact, not an approximation.
+  const live = g.primitives.filter((p) => (maxOpacity * peakForce(p)) / fmax >= ALPHA_QUANTUM)
+  if (live.length === 0) return
+
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  for (const p of live) {
+    const e = extent(p)
+    if (e[0] < x0) x0 = e[0]
+    if (e[1] < y0) y0 = e[1]
+    if (e[2] > x1) x1 = e[2]
+    if (e[3] > y1) y1 = e[3]
+  }
+  // Clip to the viewport in page px.
+  x0 = Math.max(0, x0 * zoom)
+  y0 = Math.max(0, y0 * zoom)
+  x1 = Math.min(viewW, x1 * zoom)
+  y1 = Math.min(viewH, y1 * zoom)
+  const w = x1 - x0
+  const h = y1 - y0
+  if (!(w > 0 && h > 0)) return
+
+  const cell = Math.max(MIN_CELL_PX, Math.sqrt((w * h) / CELL_BUDGET))
+  const cols = Math.max(1, Math.ceil(w / cell))
+  const rows = Math.max(1, Math.ceil(h / cell))
   const img = new ImageData(cols, rows)
-  const band = Math.max(p.outer - p.inner, 1e-6)
-  const exponent = p.exponent ?? 1
-  const innerScale = p.innerScale ?? 1
-  for (let i = 0; i < cols * rows; i++) {
-    const d = Number(p.values[p.valuesStart + i])
-    let a = 0
-    if (d < p.inner) a = vizAlpha(p.intensity * innerScale)
-    else if (d < p.outer) a = vizAlpha(p.intensity * Math.pow(1 - (d - p.inner) / band, exponent))
-    if (a > 0) {
-      img.data[i * 4] = cr
-      img.data[i * 4 + 1] = cg
-      img.data[i * 4 + 2] = cb
-      img.data[i * 4 + 3] = Math.round(a * 255)
+  const px = img.data
+  const [cr, cg, cb] = vizRgb(g.key)
+  const isMax = g.blend === 'max'
+  const k = maxOpacity / fmax
+  const out: [number, number] = [0, 0]
+
+  for (let r = 0; r < rows; r++) {
+    const wy = (y0 + (r + 0.5) * cell) / zoom
+    for (let c = 0; c < cols; c++) {
+      const wx = (x0 + (c + 0.5) * cell) / zoom
+      let sx = 0
+      let sy = 0
+      let best = 0
+      for (const p of live) {
+        const m = forceAt(p, wx, wy, out)
+        if (m === 0) continue
+        if (isMax) {
+          // The physics takes the single strongest sample, so the picture does.
+          if (m > best) best = m
+        } else {
+          sx += out[0]
+          sy += out[1]
+        }
+      }
+      const mag = isMax ? best : Math.hypot(sx, sy)
+      if (mag <= 0) continue
+      const a = Math.min(maxOpacity, k * mag)
+      if (a < ALPHA_QUANTUM) continue
+      const o = (r * cols + c) * 4
+      px[o] = cr
+      px[o + 1] = cg
+      px[o + 2] = cb
+      px[o + 3] = Math.round(a * 255)
     }
   }
-  const small = document.createElement('canvas')
-  small.width = cols
-  small.height = rows
-  small.getContext('2d')?.putImageData(img, 0, 0)
-  ctx.imageSmoothingEnabled = true
-  ctx.drawImage(
-    small,
-    p.originX * zoom,
-    p.originY * zoom,
-    cols * p.cell * zoom,
-    rows * p.cell * zoom,
-  )
-  // Body and range-limit isolines as smooth vector contours.
-  strokeIso(ctx, key, p, p.inner, 0.8, 1.2, zoom)
-  strokeIso(ctx, key, p, p.outer, 0.4, 1, zoom)
-}
 
-let maxScratch: HTMLCanvasElement | null = null
+  // Blit at cell resolution and let the canvas smooth it up to page px.
+  const tile = document.createElement('canvas')
+  tile.width = cols
+  tile.height = rows
+  const tctx = tile.getContext('2d')
+  if (!tctx) return
+  tctx.putImageData(img, 0, 0)
+  ctx.imageSmoothingEnabled = true
+  ctx.drawImage(tile, x0, y0, w, h)
+}
 
 /**
- * Renders a strongest-wins group of ring sources as the actual max-field:
- * canvas compositing cannot take a per-pixel max of alphas (blend modes max
- * color but still accumulate alpha, which over-brightens overlaps), so the
- * field is rasterized exactly — each sample fills only its own radius box,
- * keeping the per-frame cost tiny.
+ * Paint every group's glow. `fmax` anchors opacity globally (see `vizFmax`)
+ * and `maxOpacity` is the ceiling the strongest force renders at.
+ *
+ * Groups composite source-over, so overlapping bodies show as overlapping
+ * glows rather than as their net field: this answers "which bodies act here,
+ * and how hard", not "what is the resultant force". Within a group the
+ * combination does match the physics — summed, or strongest-wins for
+ * `blend: 'max'`.
  */
-function rasterMaxRings(
+export function drawViz(
   ctx: CanvasRenderingContext2D,
-  key: string,
-  rings: Extract<VizPrimitive, { kind: 'ring' }>[],
+  groups: VizGroup[],
   zoom: number,
-) {
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const p of rings) {
-    const r = p.r1 * zoom
-    minX = Math.min(minX, p.x * zoom - r)
-    minY = Math.min(minY, p.y * zoom - r)
-    maxX = Math.max(maxX, p.x * zoom + r)
-    maxY = Math.max(maxY, p.y * zoom + r)
-  }
-  const cell = 3
-  const cols = Math.ceil((maxX - minX) / cell) + 2
-  const rows = Math.ceil((maxY - minY) / cell) + 2
-  if (cols < 2 || rows < 2 || cols * rows > 600_000) return
-  const field = new Float32Array(cols * rows)
-  for (const p of rings) {
-    const r = p.r1 * zoom
-    const cx = p.x * zoom - minX
-    const cy = p.y * zoom - minY
-    const s = Math.abs(p.intensity)
-    const gx0 = Math.max(0, Math.floor((cx - r) / cell))
-    const gx1 = Math.min(cols - 1, Math.ceil((cx + r) / cell))
-    const gy0 = Math.max(0, Math.floor((cy - r) / cell))
-    const gy1 = Math.min(rows - 1, Math.ceil((cy + r) / cell))
-    for (let gy = gy0; gy <= gy1; gy++) {
-      const dy = (gy + 0.5) * cell - cy
-      for (let gx = gx0; gx <= gx1; gx++) {
-        const dx = (gx + 0.5) * cell - cx
-        const d = Math.hypot(dx, dy)
-        if (d >= r) continue
-        const v = s * (1 - d / r)
-        const i = gy * cols + gx
-        if (v > field[i]) field[i] = v
-      }
-    }
-  }
-  const [cr, cg, cb] = vizRgb(key)
-  const img = new ImageData(cols, rows)
-  for (let i = 0; i < field.length; i++) {
-    if (field[i] > 0) {
-      img.data[i * 4] = cr
-      img.data[i * 4 + 1] = cg
-      img.data[i * 4 + 2] = cb
-      img.data[i * 4 + 3] = Math.round(vizAlpha(field[i]) * 255)
-    }
-  }
-  const small = document.createElement('canvas')
-  small.width = cols
-  small.height = rows
-  small.getContext('2d')?.putImageData(img, 0, 0)
-  ctx.imageSmoothingEnabled = true
-  ctx.drawImage(small, minX, minY, cols * cell, rows * cell)
-}
-
-function drawGroup(ctx: CanvasRenderingContext2D, g: VizGroup, zoom: number, gradientOnly: boolean) {
-  for (const p of g.primitives) {
-    if (p.kind === 'ring') drawRing(ctx, g.key, p, zoom, gradientOnly)
-    else if (p.kind === 'capsule') drawCapsule(ctx, g.key, p, zoom)
-    else if (p.kind === 'rectRing') drawRectRing(ctx, g.key, p, zoom)
-    else drawField(ctx, g.key, p, zoom)
-  }
-}
-
-/** Renders viz groups onto a page-space canvas (world units × zoom). */
-export function drawViz(ctx: CanvasRenderingContext2D, groups: VizGroup[], zoom: number): void {
-  for (const g of groups) {
-    if (g.blend === 'max') {
-      const rings = g.primitives.filter(
-        (p): p is Extract<VizPrimitive, { kind: 'ring' }> => p.kind === 'ring' && p.r1 > 0,
-      )
-      // The strongest sample wins at each point, so the gradient is the
-      // exact per-pixel max-field of the sources.
-      if (rings.length > 0) rasterMaxRings(ctx, g.key, rings, zoom)
-      // Range-limit outline: the silhouette of the union of the sample
-      // ranges — the field's zero-force boundary — drawn as one blob
-      // (enlarged union minus shrunk union), never per-sample circles.
-      if (rings.length > 0) {
-        const w = ctx.canvas.width
-        const h = ctx.canvas.height
-        if (!maxScratch) maxScratch = document.createElement('canvas')
-        if (maxScratch.width !== w || maxScratch.height !== h) {
-          maxScratch.width = w
-          maxScratch.height = h
-        }
-        const sctx = maxScratch.getContext('2d')
-        if (!sctx) continue
-        const t = ctx.getTransform()
-        sctx.setTransform(1, 0, 0, 1, 0, 0)
-        sctx.clearRect(0, 0, w, h)
-        sctx.setTransform(ctx.getTransform())
-        const grow = new Path2D()
-        const shrink = new Path2D()
-        for (const p of rings) {
-          const x = p.x * zoom
-          const y = p.y * zoom
-          const r = p.r1 * zoom
-          grow.moveTo(x + r + 0.75, y)
-          grow.arc(x, y, r + 0.75, 0, Math.PI * 2)
-          const ri = Math.max(0, r - 0.75)
-          shrink.moveTo(x + ri, y)
-          shrink.arc(x, y, ri, 0, Math.PI * 2)
-        }
-        sctx.fillStyle = vizCss(g.key, 0.4)
-        sctx.fill(grow)
-        sctx.globalCompositeOperation = 'destination-out'
-        sctx.fillStyle = '#000'
-        sctx.fill(shrink)
-        sctx.globalCompositeOperation = 'source-over'
-        ctx.setTransform(1, 0, 0, 1, 0, 0)
-        ctx.drawImage(maxScratch, 0, 0)
-        ctx.setTransform(t)
-      }
-    } else {
-      drawGroup(ctx, g, zoom, false)
-    }
-  }
+  fmax: number,
+  maxOpacity: number,
+): void {
+  if (!(fmax > 0) || !(maxOpacity > 0)) return
+  const t = ctx.getTransform()
+  const dpr = t.a || 1
+  const viewW = ctx.canvas.width / dpr
+  const viewH = ctx.canvas.height / dpr
+  for (const g of groups) drawGlow(ctx, g, zoom, fmax, maxOpacity, viewW, viewH)
 }

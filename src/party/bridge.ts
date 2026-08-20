@@ -62,6 +62,7 @@ export const GLOBAL_SETTING_KEYS = [
   'nameBaseOpacity',
   'nameDensityOpacity',
   'opacityDamping',
+  'debugOpacity',
 ] as const
 
 export type ModeSettingKey = (typeof MODE_SETTING_KEYS)[number]

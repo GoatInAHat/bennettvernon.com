@@ -94,6 +94,7 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'nameBaseOpacity', label: 'name opacity', min: 0, max: 1, step: 0.01 },
   { key: 'nameDensityOpacity', label: 'density opacity', min: 0, max: 1, step: 0.01 },
   { key: 'opacityDamping', label: 'opacity damping', min: 0, max: 0.98, step: 0.01 },
+  { key: 'debugOpacity', label: 'debug opacity', min: 0, max: 1, step: 0.01 },
 ]
 
 export function SettingsPanel({ onClose }: { onClose: () => void }) {

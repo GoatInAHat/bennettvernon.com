@@ -63,6 +63,138 @@ export interface TrailNode {
   s: number
 }
 
+/** Bilinear sample of a field primitive and its analytic gradient, or null
+ * where the 2x2 fetch and its +/-1 gradient stencil are not both in bounds.
+ * Mirrors the shaders' sampling exactly, including the cell-centre offset. */
+function sampleField(
+  p: Extract<VizPrimitive, { kind: 'field' }>,
+  x: number,
+  y: number,
+): { v: number; gx: number; gy: number; tx: number; ty: number; i: number } | null {
+  const fx = (x - p.originX) / p.cell
+  const fy = (y - p.originY) / p.cell
+  if (!(fx >= 1.5 && fy >= 1.5 && fx < p.cols - 2.5 && fy < p.rows - 2.5)) return null
+  const ux = fx - 0.5
+  const uy = fy - 0.5
+  const tx = ux - Math.floor(ux)
+  const ty = uy - Math.floor(uy)
+  const i = Math.floor(uy) * p.cols + Math.floor(ux)
+  const b = p.valuesStart + i
+  const v00 = p.values[b]
+  const v10 = p.values[b + 1]
+  const v01 = p.values[b + p.cols]
+  const v11 = p.values[b + p.cols + 1]
+  return {
+    v: (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty,
+    gx: (v10 - v00) * (1 - ty) + (v11 - v01) * ty,
+    gy: (v01 - v00) * (1 - tx) + (v11 - v10) * tx,
+    tx,
+    ty,
+    i,
+  }
+}
+
+/**
+ * The force primitive `p` exerts on a particle at world (x, y): the vector
+ * goes into `out`, and the magnitude is returned.
+ *
+ * This is the single evaluation the debug renderer paints with, so the glow
+ * is the physics rather than a picture of it. The shaders and `cpu()` keep
+ * their own inlined copies for speed, and `force.check.ts` asserts this
+ * function reproduces what `cpu()` writes — a law change that misses one of
+ * them fails that check instead of silently drifting the debug view.
+ */
+export function forceAt(
+  p: VizPrimitive,
+  x: number,
+  y: number,
+  out: [number, number],
+): number {
+  out[0] = 0
+  out[1] = 0
+  if (p.kind === 'segment') {
+    // Closest point on the body segment; a point source when the ends meet.
+    const vx = p.x2 - p.x1
+    const vy = p.y2 - p.y1
+    const len2 = vx * vx + vy * vy
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - p.x1) * vx + (y - p.y1) * vy) / len2)) : 0
+    const dx = p.x1 + vx * t - x
+    const dy = p.y1 + vy * t - y
+    const d2 = dx * dx + dy * dy
+    if (d2 <= 0 || d2 > p.range * p.range) return 0
+    const d = Math.sqrt(d2)
+    const m = p.strength * (1 - d / p.range)
+    out[0] = (dx / d) * m
+    out[1] = (dy / d) * m
+    return Math.abs(m)
+  }
+  if (p.kind === 'rect') {
+    const lx = x - p.x
+    const ly = y - p.y
+    if (Math.abs(lx) < p.hw && Math.abs(ly) < p.hh) {
+      // Inside: repelling rects eject along the nearest edge at full
+      // strength, attracting rects exert nothing.
+      if (!p.interiorPush) return 0
+      const exitX = lx < 0 ? -(p.hw + lx) : p.hw - lx
+      const exitY = ly < 0 ? -(p.hh + ly) : p.hh - ly
+      const m = Math.abs(p.strength)
+      if (Math.abs(exitY) < Math.abs(exitX)) out[1] = Math.sign(exitY) * m
+      else out[0] = Math.sign(exitX) * m
+      return m
+    }
+    const cx = Math.max(-p.hw, Math.min(p.hw, lx))
+    const cy = Math.max(-p.hh, Math.min(p.hh, ly))
+    const dx = cx - lx
+    const dy = cy - ly
+    const d2 = dx * dx + dy * dy
+    if (d2 <= 0 || d2 > p.range * p.range) return 0
+    const d = Math.sqrt(d2)
+    const m = p.strength * (1 - d / p.range)
+    out[0] = (dx / d) * m
+    out[1] = (dy / d) * m
+    return Math.abs(m)
+  }
+  const s = sampleField(p, x, y)
+  if (!s) return 0
+  const gl = Math.hypot(s.gx, s.gy)
+  if (gl <= 0) return 0
+  const offset = p.offset ?? 0
+  let m: number
+  if (p.push) {
+    // Acts only inside the offset surface, growing with penetration depth.
+    if (!(s.v < offset)) return 0
+    const cap = p.cap ?? 1
+    m = p.strength * Math.min(Math.max((offset - s.v) / p.range, 0), cap)
+  } else {
+    // Acts outside the surface, fading to zero at `range`.
+    const r = s.v - offset
+    if (!(r > 0 && r < p.range)) return 0
+    m = p.strength * Math.pow(1 - r / p.range, p.exponent ?? 1)
+    if (p.boost && p.boost.factor !== 1) {
+      const bv = p.boost.values
+      const zf =
+        (bv[s.i] * (1 - s.tx) + bv[s.i + 1] * s.tx) * (1 - s.ty) +
+        (bv[s.i + p.cols] * (1 - s.tx) + bv[s.i + p.cols + 1] * s.tx) * s.ty
+      m *= 1 + (p.boost.factor - 1) * zf
+    }
+  }
+  // Push runs down the gradient (away from the shape), pull runs up it.
+  const sgn = p.push ? 1 : -1
+  out[0] = (sgn * s.gx * m) / gl
+  out[1] = (sgn * s.gy * m) / gl
+  return Math.abs(m)
+}
+
+/** Peak magnitude this primitive can reach anywhere, used to anchor the
+ * debug view's opacity scale. Every law here peaks at the body surface. */
+export function peakForce(p: VizPrimitive): number {
+  if (p.kind === 'field') {
+    const boost = p.boost && p.boost.factor > 1 ? p.boost.factor : 1
+    return Math.abs(p.strength) * (p.push ? (p.cap ?? 1) : boost)
+  }
+  return Math.abs(p.strength)
+}
+
 const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 }
 const STRIDE = 8
 const NODE_STRIDE = 4
@@ -206,21 +338,39 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       const [kind, mode, x, y, range, hw, hh, strength] = data.slice(base, base + STRIDE)
       if (strength === 0) continue
       const dir = mode === 1 ? 'repel' : 'attract'
+      // Signed for the viewer: positive pulls toward the body, negative pushes.
+      const signed = mode === 1 ? -strength : strength
       if (kind < 0.5) {
-        add(`effectors:${dir}-circle`, false, { kind: 'ring', x, y, r0: 0, r1: range, intensity: strength })
+        add(`effectors:${dir}-circle`, false, {
+          kind: 'segment',
+          x1: x,
+          y1: y,
+          x2: x,
+          y2: y,
+          strength: signed,
+          range,
+        })
       } else if (kind > 1.5) {
         add(`effectors:${dir}-pill`, false, {
-          kind: 'capsule',
+          kind: 'segment',
           x1: x - hw,
           y1: y,
           x2: x + hw,
           y2: y,
+          strength: signed,
           range,
-          i1: strength,
-          i2: strength,
         })
       } else {
-        add(`effectors:${dir}-rect`, false, { kind: 'rectRing', x, y, hw, hh, range, intensity: strength })
+        add(`effectors:${dir}-rect`, false, {
+          kind: 'rect',
+          x,
+          y,
+          hw,
+          hh,
+          strength: signed,
+          range,
+          interiorPush: mode === 1,
+        })
       }
     }
 
@@ -228,19 +378,18 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
       const [x, y, r, s] = dyn.slice(base, base + NODE_STRIDE)
       if (r <= 0 || s === 0) continue
-      // Pull and push samples get their own deterministic colors.
-      const key = s > 0 ? 'effectors:trail' : 'effectors:trail-push'
-      add(key, true, { kind: 'ring', x, y, r0: 0, r1: r, intensity: Math.abs(s) })
+      // One group, not one per sign: the physics takes a single strongest
+      // sample across the whole curve, so a pull node and a push node never
+      // both act. Splitting them by color would make the viewer sum two
+      // winners and show a force that is not there.
+      add('effectors:trail', true, { kind: 'segment', x1: x, y1: y, x2: x, y2: y, strength: s, range: r })
     }
-    for (const key of ['effectors:trail', 'effectors:trail-push']) {
-      const g = groups.get(key)
-      if (g) g.blend = 'max'
-    }
+    const trail = groups.get('effectors:trail')
+    if (trail) trail.blend = 'max'
 
     const field = state.field
     if (field && field.length > FIELD_HEADER) {
-      // The push is zero at d = padding and reaches full strength at
-      // d = padding - falloff, so those are the range limit and the body.
+      // Acts inside the padding surface, ramping over `falloff` to the cap.
       add('effectors:exclusion', false, {
         kind: 'field',
         originX: field[0],
@@ -250,57 +399,42 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
         rows: field[4],
         values: field,
         valuesStart: FIELD_HEADER,
-        inner: field[6] - field[7],
-        outer: field[6],
-        intensity: field[5],
+        strength: field[5],
+        range: field[7],
+        offset: field[6],
+        push: true,
+        cap: 1.5,
       })
     }
 
     const nameField = state.nameField
     const nameParams = state.nameParams
     if (nameField && nameField.length > FIELD_HEADER && nameParams && nameParams.length >= 3) {
-      // The gradient profile mirrors the force exactly: falloff exponent =
-      // sharpness, zero fill inside the letters (no force applies there).
+      const cols = nameField[3]
+      const rows = nameField[4]
+      const zone = state.nameZone
+      const concave = nameParams[3] ?? 1
+      // The pocket boost is part of the name's force, not a body of its own,
+      // so it rides along as a multiplier instead of a second primitive.
+      const boost =
+        concave !== 1 && zone && zone.length >= cols * rows
+          ? { values: zone, factor: concave }
+          : undefined
       add('effectors:name', false, {
         kind: 'field',
         originX: nameField[0],
         originY: nameField[1],
         cell: nameField[2],
-        cols: nameField[3],
-        rows: nameField[4],
+        cols,
+        rows,
         values: nameField,
         valuesStart: FIELD_HEADER,
-        inner: 0, // the letter surface itself
-        outer: nameParams[1],
-        intensity: nameParams[0],
+        strength: nameParams[0],
+        range: nameParams[1],
+        offset: 0,
         exponent: nameParams[2],
-        innerScale: 0,
+        boost,
       })
-      // Concave pockets (per-letter convex hull minus the letter), shown
-      // only while the multiplier actually boosts the pull there. Values
-      // are inverted so the field convention (smaller = stronger) fills
-      // the pockets.
-      const zone = state.nameZone
-      const concave = nameParams[3] ?? 1
-      const cols = nameField[3]
-      const rows = nameField[4]
-      if (zone && zone.length >= cols * rows && concave !== 1) {
-        const inverted = new Float32Array(cols * rows)
-        for (let i = 0; i < inverted.length; i++) inverted[i] = 1 - zone[i]
-        add('effectors:concave', false, {
-          kind: 'field',
-          originX: nameField[0],
-          originY: nameField[1],
-          cell: nameField[2],
-          cols,
-          rows,
-          values: inverted,
-          valuesStart: 0,
-          inner: 0,
-          outer: 1,
-          intensity: concave,
-        })
-      }
     }
     return [...groups.values()]
   }

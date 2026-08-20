@@ -6,7 +6,7 @@ import {
   type CellCensusResult,
   type VizGroup,
 } from '@cazala/party'
-import { drawViz, vizCss, vizRgb } from './viz'
+import { drawViz, vizFmax, vizCss, vizRgb } from './viz'
 import {
   bridge,
   NAME_FONTS,
@@ -106,6 +106,7 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameBaseOpacity: 0.05,
   nameDensityOpacity: 0.35,
   opacityDamping: 0.85,
+  debugOpacity: 0.85,
 }
 // Name-density enforcement runs off the engine's cell census: a per-frame
 // GPU compute pass with an asynchronous readback, so it never stalls the
@@ -409,6 +410,9 @@ export function PartyBackground() {
     let voroCacheDirty = true
     let staticVizCache: HTMLCanvasElement | null = null
     let staticVizDirty = true
+    /** Anchor the static cache was rendered against, so a changed anchor
+     * rescales it instead of forcing a re-render. */
+    let staticVizFmax = 0
     const cleanups: (() => void)[] = []
 
     // Rebuilt on every engine boot: a destroyed runtime leaves stale uniform
@@ -644,15 +648,16 @@ export function PartyBackground() {
     }
 
     /** Static module physics drawn by the generic viz renderer. */
-    const renderStaticViz = (statics: VizGroup[]) => {
+    const renderStaticViz = (statics: VizGroup[], fmax: number) => {
       staticVizDirty = false
+      staticVizFmax = fmax
       if (!staticVizCache) staticVizCache = document.createElement('canvas')
       staticVizCache.width = debugCanvas.width
       staticVizCache.height = debugCanvas.height
       const ctx = staticVizCache.getContext('2d')
       if (!ctx) return
       ctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
-      drawViz(ctx, statics, zoom)
+      drawViz(ctx, statics, zoom, fmax, globals.debugOpacity)
     }
 
     const drawDebug = () => {
@@ -666,11 +671,22 @@ export function PartyBackground() {
       // so collecting again for the static cache rebuilds and discards the
       // same groups a second time on the frames that need it least.
       const groups = collectViz()
-      if (staticVizDirty) renderStaticViz(groups.filter((g) => !g.dynamic))
+      // One anchor across statics and dynamics: the strongest force anywhere
+      // in the system is what maxOpacity means, so a drag that outweighs the
+      // name has to dim the name, not rescale itself.
+      const fmax = vizFmax(groups)
+      if (staticVizDirty) renderStaticViz(groups.filter((g) => !g.dynamic), fmax)
       if (voroCache) dctx.drawImage(voroCache, 0, 0)
-      if (staticVizCache) dctx.drawImage(staticVizCache, 0, 0)
+      if (staticVizCache) {
+        // Opacity is linear in 1/fmax, so a cache drawn against an older
+        // anchor is exact after one multiply — no re-render on every frame
+        // of a drag.
+        dctx.globalAlpha = staticVizFmax > 0 && fmax > 0 ? Math.min(1, staticVizFmax / fmax) : 1
+        dctx.drawImage(staticVizCache, 0, 0)
+        dctx.globalAlpha = 1
+      }
       dctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
-      drawViz(dctx, groups.filter((g) => g.dynamic), zoom)
+      drawViz(dctx, groups.filter((g) => g.dynamic), zoom, fmax, globals.debugOpacity)
     }
 
     const syncEffectors = () => {
@@ -1851,6 +1867,10 @@ export function PartyBackground() {
         }
       } else if (key === 'nameBaseOpacity' || key === 'nameDensityOpacity') {
         renderNameOpacity()
+      } else if (key === 'debugOpacity') {
+        // Debug-only: rescales the glow, touches no physics.
+        staticVizDirty = true
+        if (bridge.debugOn) drawDebug()
       } else if (key === 'particleCount') {
         particleCountTouched = true
         setMaxParticlesAnimated(

@@ -35,13 +35,17 @@ Every divergence from upstream is listed here.
   edits) land in the same frame instead of racing a second rAF loop.
 - `module.ts` — debug-visualization contract (`VizPrimitive`,
   `VizGroup`, optional `Module.viz()`): modules describe their own live
-  spatial influence so a generic viewer can render body geometry, range
-  limits, and falloff gradients for any physics without viewer changes.
-  Groups can declare `blend: 'max'` when their primitives combine by
-  strongest-wins rather than summing (viewers render the exact max-field).
-  Field primitives can carry a falloff `exponent` and an `innerScale`
-  (force inside the body relative to the ramp) so viewers draw the true
-  force profile, not an assumed linear one.
+  spatial influence so a generic viewer renders any physics without viewer
+  changes. Primitives are `segment`, `rect`, and `field`, and each carries
+  the parameters its force law actually uses — signed `strength`, `range`,
+  and for fields the surface `offset`, `push` direction, `exponent`, `cap`,
+  and an optional per-cell `boost` grid — rather than a pre-baked picture
+  of the falloff. That lets a viewer evaluate the true force at any point
+  instead of approximating it with its own constants, which is what the
+  site's glow renderer does. Groups can declare `blend: 'max'` when their
+  primitives combine by strongest-wins rather than summing, and a group is
+  the unit that blend applies to: primitives whose physics share one winner
+  must share one group, or a viewer will sum two winners.
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
 - `modules/forces/fluids.ts`, `collisions.ts`, `sensors.ts` — each gains a
