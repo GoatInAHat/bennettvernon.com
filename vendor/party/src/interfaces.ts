@@ -51,6 +51,11 @@ export type CellCensusResult = {
   samplesPerCell: number;
   /** Indices of unclassified in-disc particles. */
   outside: Uint32Array;
+  /** World positions of those same particles, x,y interleaved, valid up to
+   * min(outsideCount, outsideSamples). Carried alongside the indices because
+   * reading a position back any other way means syncing the whole particle
+   * buffer off the GPU, which is the stall this census exists to avoid. */
+  outsidePos: Float32Array;
   outsideCount: number;
 };
 

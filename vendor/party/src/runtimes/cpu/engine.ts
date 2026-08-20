@@ -173,6 +173,7 @@ export class CPUEngine extends AbstractEngine {
     const counts = new Uint32Array(c);
     const samples = new Uint32Array(c * k);
     const outside = new Uint32Array(m);
+    const outsidePos = new Float32Array(m * 2);
     let outsideCount = 0;
     const r2 = config.radius * config.radius;
     const n = this.getEffectiveCount();
@@ -193,7 +194,11 @@ export class CPUEngine extends AbstractEngine {
         if (slot < k) samples[cell * k + slot] = i;
       } else {
         const slot = outsideCount++;
-        if (slot < m) outside[slot] = i;
+        if (slot < m) {
+          outside[slot] = i;
+          outsidePos[slot * 2] = p.position.x;
+          outsidePos[slot * 2 + 1] = p.position.y;
+        }
       }
     }
     return {
@@ -202,6 +207,7 @@ export class CPUEngine extends AbstractEngine {
       samples,
       samplesPerCell: k,
       outside,
+      outsidePos,
       outsideCount,
     };
   }

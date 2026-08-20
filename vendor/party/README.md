@@ -27,9 +27,14 @@ Every divergence from upstream is listed here.
   `engine.ts`, both runtime engines — `updateCellCensus()`: a persistent
   compute pass that buckets in-disc particles into caller-defined cells,
   with per-cell counts, bounded candidate-index collection, and an
-  outside reservoir. The readback is asynchronous and double-checked
-  against disposal; callers get the latest completed result without ever
-  stalling the pipeline. CPU runtime mirrors it synchronously.
+  outside reservoir carrying both the indices and the world positions of
+  those particles (f32 bit-cast into the same u32 result buffer, so one
+  readback serves both). Positions are there because relocating a particle
+  onto an existing one otherwise means `getParticle`, which syncs the whole
+  particle buffer back off the GPU — the stall this pass exists to avoid.
+  The readback is asynchronous and double-checked against disposal; callers
+  get the latest completed result without ever stalling the pipeline. CPU
+  runtime mirrors it synchronously.
 - `EngineOptions.onFrame` — host per-frame hook called by both runtimes
   before the simulation step, so host writes (uniform lerps, particle
   edits) land in the same frame instead of racing a second rAF loop.
@@ -40,8 +45,8 @@ Every divergence from upstream is listed here.
   the parameters its force law actually uses — signed `strength`, the
   `soften` length of the inverse-square falloff, and for fields the surface
   `offset`, the `push` direction, and an optional per-cell `boost` grid —
-  rather than a pre-baked picture
-  of the falloff. That lets a viewer evaluate the true force at any point
+  rather than a pre-baked picture of the falloff. That lets a viewer
+  evaluate the true force at any point
   instead of approximating it with its own constants, which is what the
   site's glow renderer does. Groups can declare `blend: 'max'` when their
   primitives combine by strongest-wins rather than summing, and a group is

@@ -16,7 +16,9 @@ import type { GPUResources } from "./gpu-resources";
  * decisions made every frame.
  *
  * Result buffer layout (u32): [outsideCount, counts[cellCount],
- * samples[cellCount * samplesPerCell], outside[outsideSamples]].
+ * samples[cellCount * samplesPerCell], outside[outsideSamples],
+ * outsidePos[outsideSamples * 2]]. Positions are f32 bit-cast into the same
+ * u32 storage so one readback carries both.
  */
 export class CellCensus {
   private pipeline: GPUComputePipeline | null = null;
@@ -74,7 +76,8 @@ export class CellCensus {
         1 +
         config.cellCount +
         config.cellCount * config.samplesPerCell +
-        config.outsideSamples;
+        config.outsideSamples +
+        config.outsideSamples * 2;
       this.result = device.createBuffer({
         size: this.resultLen * 4,
         usage:
@@ -153,6 +156,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot = atomicAdd(&res[0], 1u);
     if (slot < m) {
       atomicStore(&res[1u + cellCount + cellCount * k + slot], i);
+      // Record where it is as well as which it is: callers that relocate a
+      // particle to an existing one need the position, and fetching it any
+      // other way would sync the whole particle buffer back off the GPU.
+      let pbase = 1u + cellCount + cellCount * k + m + slot * 2u;
+      atomicStore(&res[pbase], bitcast<u32>(p.position.x));
+      atomicStore(&res[pbase + 1u], bitcast<u32>(p.position.y));
     }
   }
 }
@@ -245,6 +254,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             samples: view.slice(1 + c, 1 + c + c * k),
             samplesPerCell: k,
             outside: view.slice(1 + c + c * k, 1 + c + c * k + m),
+            outsidePos: new Float32Array(
+              view.buffer.slice(
+                view.byteOffset + (1 + c + c * k + m) * 4,
+                view.byteOffset + (1 + c + c * k + m + m * 2) * 4
+              )
+            ),
             outsideCount: view[0],
           };
           staging.unmap();

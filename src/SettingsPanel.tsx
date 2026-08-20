@@ -86,6 +86,7 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'transitionLength', label: 'fade time (s)', min: 0, max: 8, step: 0.1 },
   { key: 'nameDensity', label: 'name density', min: 0, max: 4000, step: 25 },
   { key: 'nameDensityRes', label: 'density cells', min: 8, max: 120, step: 2 },
+  { key: 'maxNameDensity', label: 'max name density', min: 0, max: 300, step: 5 },
   { key: 'nameBaseOpacity', label: 'name opacity', min: 0, max: 1, step: 0.01 },
   { key: 'nameDensityOpacity', label: 'density opacity', min: 0, max: 1, step: 0.01 },
   { key: 'opacityDamping', label: 'opacity damping', min: 0, max: 0.98, step: 0.01 },

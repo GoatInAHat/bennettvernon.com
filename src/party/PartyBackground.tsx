@@ -113,6 +113,11 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   nameWeight: 700,
   nameDensity: 1000,
   nameDensityRes: 36,
+  // Mean particles per name cell above which the surplus is evicted. 0 is
+  // off. The name's natural equilibrium under the current pulls is a few
+  // hundred per cell, so a cap below that evicts continuously rather than
+  // settling -- which is a real choice, not a misconfiguration.
+  maxNameDensity: 0,
   nameBaseOpacity: 0.05,
   nameDensityOpacity: 0.35,
   opacityDamping: 0.85,
@@ -362,6 +367,7 @@ export function PartyBackground() {
       rounds: 0,
       fromCells: 0,
       fromOutside: 0,
+      evicted: 0,
       lastCounts: [] as number[],
     }
     let censusCells: Int32Array | null = null
@@ -1601,6 +1607,57 @@ export function PartyBackground() {
           counts[ci]++
           pendingDelta1[ci]++
           need--
+        }
+      }
+
+      // Cap the name's mean occupancy. Once the average cell holds more than
+      // maxNameDensity, the surplus is evicted densest-cell-first (recomputed
+      // each step, so the name self-levels on the way down) and each evicted
+      // particle lands exactly on some particle that is not in the name, so
+      // it rejoins the field where the field already is rather than appearing
+      // in empty space. Those positions ride along in the census readback;
+      // asking the engine for a position instead would sync the whole
+      // particle buffer back off the GPU every frame.
+      const maxMean = globals.maxNameDensity
+      if (maxMean > 0 && counts.length > 0) {
+        let inName = 0
+        for (let i = 0; i < counts.length; i++) inName += counts[i]
+        let excess = inName - Math.round(maxMean * counts.length)
+        const posAvail = Math.min(res.outsideCount, res.outside.length, res.outsidePos.length >> 1)
+        while (excess > 0 && posAvail > 0) {
+          let densest = -1
+          let densestCount = 0
+          for (let i = 0; i < counts.length; i++) {
+            if (counts[i] > densestCount && used[i] < Math.min(res.counts[i], k)) {
+              densestCount = counts[i]
+              densest = i
+            }
+          }
+          if (densest < 0) break // no cell has uncollected candidates left
+          let donor = -1
+          const avail = Math.min(res.counts[densest], k)
+          while (used[densest] < avail) {
+            const cand = res.samples[densest * k + used[densest]++]
+            if (isFreshDonor(cand)) {
+              donor = cand
+              break
+            }
+          }
+          if (donor < 0) continue // cursor exhausted; rescan
+          const j = Math.floor(Math.random() * posAvail)
+          recentlyMoved.set(donor, densityRound)
+          engine.setParticle(donor, {
+            position: { x: res.outsidePos[j * 2], y: res.outsidePos[j * 2 + 1] },
+            velocity: { x: 0, y: 0 },
+            size: 3,
+            mass: 1,
+            color: { r: 1, g: 1, b: 1, a: 1 },
+          })
+          teleportCount++
+          densityStats.evicted++
+          counts[densest]--
+          pendingDelta1[densest]--
+          excess--
         }
       }
 
