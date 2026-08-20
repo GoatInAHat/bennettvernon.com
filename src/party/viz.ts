@@ -1,5 +1,5 @@
 import type { VizGroup, VizPrimitive } from '@cazala/party'
-import { forceAt, peakForce } from './effectors'
+import { bodyDistance, forceAt, peakForce } from './effectors'
 
 /**
  * Generic debug renderer for the engine's viz contract. Every body is drawn
@@ -133,6 +133,10 @@ function drawGlow(
   const px = img.data
   const [cr, cg, cb] = vizRgb(g.key)
   const isMax = g.blend === 'max'
+  // Outline the body the force is measured from, one cell thick. Skipped for
+  // max-blend groups: their primitives are dense curve samples, so per-sample
+  // outlines would be noise rather than geometry.
+  const halfLine = isMax ? -1 : (cell / zoom) * 0.5
   const out: [number, number] = [0, 0]
 
   for (let r = 0; r < rows; r++) {
@@ -153,9 +157,18 @@ function drawGlow(
           sy += out[1]
         }
       }
-      const mag = isMax ? best : Math.hypot(sx, sy)
-      if (mag <= 0) continue
-      const a = Math.min(maxOpacity, k * mag)
+      let a = 0
+      if (halfLine > 0) {
+        for (const p of live) {
+          const bd = bodyDistance(p, wx, wy)
+          if (bd === bd && Math.abs(bd) <= halfLine) { a = maxOpacity; break }
+        }
+      }
+      if (a === 0) {
+        const mag = isMax ? best : Math.hypot(sx, sy)
+        if (mag <= 0) continue
+        a = Math.min(maxOpacity, k * mag)
+      }
       if (a < ALPHA_QUANTUM) continue
       const o = (r * cols + c) * 4
       px[o] = cr

@@ -96,14 +96,26 @@ function sampleField(
   const ty = uy - Math.floor(uy)
   const i = Math.floor(uy) * p.cols + Math.floor(ux)
   const b = p.valuesStart + i
+  const c = p.cols
   const v00 = p.values[b]
   const v10 = p.values[b + 1]
-  const v01 = p.values[b + p.cols]
-  const v11 = p.values[b + p.cols + 1]
+  const v01 = p.values[b + c]
+  const v11 = p.values[b + c + 1]
+  let gx = (v10 - v00) * (1 - ty) + (v11 - v01) * ty
+  let gy = (v01 - v00) * (1 - tx) + (v11 - v10) * tx
+  if (gx === 0 && gy === 0) {
+    // The 2x2 stencil is flat. A discrete distance transform plateaus along
+    // the medial axis of any filled shape, so this is common inside a body,
+    // not a corner case -- and leaving the direction undefined there carves
+    // force-free pockets that trap particles. Widen the stencil by one cell
+    // (in bounds by the same margin the 2x2 fetch needs) to recover it.
+    gx = p.values[b + 2] + p.values[b + c + 2] - p.values[b - 1] - p.values[b + c - 1]
+    gy = p.values[b + 2 * c] + p.values[b + 2 * c + 1] - p.values[b - c] - p.values[b - c + 1]
+  }
   return {
     v: (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty,
-    gx: (v10 - v00) * (1 - ty) + (v11 - v01) * ty,
-    gy: (v01 - v00) * (1 - tx) + (v11 - v10) * tx,
+    gx,
+    gy,
     tx,
     ty,
     i,
@@ -202,6 +214,35 @@ export function forceAt(
   out[0] = (sgn * s.gx * m) / gl
   out[1] = (sgn * s.gy * m) / gl
   return Math.abs(m)
+}
+
+/**
+ * Signed distance from world (x, y) to the surface of the body that emits
+ * this primitive's force -- negative inside it. This is the geometry the
+ * force is measured from, so a viewer can outline the real body rather than
+ * an approximation of it: the segment a pill pulls toward, the rect's edge,
+ * the text shape dilated by its standoff, the letter surface of the name.
+ *
+ * Returns NaN where a field has no sample (outside its grid).
+ */
+export function bodyDistance(p: VizPrimitive, x: number, y: number): number {
+  if (p.kind === 'segment') {
+    const vx = p.x2 - p.x1
+    const vy = p.y2 - p.y1
+    const len2 = vx * vx + vy * vy
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - p.x1) * vx + (y - p.y1) * vy) / len2)) : 0
+    return Math.hypot(x - (p.x1 + vx * t), y - (p.y1 + vy * t))
+  }
+  if (p.kind === 'rect') {
+    // Standard box distance: positive outside, negative inside.
+    const dx = Math.abs(x - p.x) - p.hw
+    const dy = Math.abs(y - p.y) - p.hh
+    const outside = Math.hypot(Math.max(dx, 0), Math.max(dy, 0))
+    return outside + Math.min(Math.max(dx, dy), 0)
+  }
+  const s = sampleField(p, x, y)
+  if (!s) return NaN
+  return s.v - (p.offset ?? 0)
 }
 
 /** Peak magnitude this primitive can reach anywhere, used to anchor the
@@ -458,6 +499,21 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     const lawFn = `
 fn force_mag(s: f32, r: f32, L: f32) -> f32 {
   return s * L * L / (r * r + L * L);
+}
+
+// Bilinear gradient of a distance field cell, widened by one cell wherever
+// the 2x2 stencil is flat. A rasterized distance transform quantizes to whole
+// cells, so neighbours hold identical values across most of the field near a
+// shape; without this the gradient is exactly zero there and the body exerts
+// no force at all in scattered cells -- particle traps in the simulation, and
+// holes in the debug glow that read as little rectangles.
+fn field_grad(v00: f32, v10: f32, v01: f32, v11: f32, tx: f32, ty: f32,
+              wx0: f32, wx1: f32, wy0: f32, wy1: f32) -> vec2<f32> {
+  var g = vec2<f32>(mix(v10 - v00, v11 - v01, ty), mix(v01 - v00, v11 - v10, tx));
+  if (g.x == 0.0 && g.y == 0.0) {
+    g = vec2<f32>(wx1 - wx0, wy1 - wy0);
+  }
+  return g;
 }`
     const shapeLoop = (
       arr: 'data',
@@ -573,8 +629,13 @@ fn force_mag(s: f32, r: f32, L: f32) -> f32 {
       let d11 = ${getUniform('field', 'i00 + cols + 1u')};
       // The body is the glyph shape dilated by pad; the push saturates
       // anywhere inside it and falls off as the inverse square outside.
-      let gx = mix(d10 - d00, d11 - d01, ty);
-      let gy = mix(d01 - d00, d11 - d10, tx);
+      let g = field_grad(d00, d10, d01, d11, tx, ty,
+        ${getUniform('field', 'i00 - 1u')} + ${getUniform('field', 'i00 + cols - 1u')},
+        ${getUniform('field', 'i00 + 2u')} + ${getUniform('field', 'i00 + cols + 2u')},
+        ${getUniform('field', 'i00 - cols')} + ${getUniform('field', 'i00 - cols + 1u')},
+        ${getUniform('field', 'i00 + 2u * cols')} + ${getUniform('field', 'i00 + 2u * cols + 1u')});
+      let gx = g.x;
+      let gy = g.y;
       let gl = sqrt(gx * gx + gy * gy);
       if (gl > 0.0) {
         let d = mix(mix(d00, d10, tx), mix(d01, d11, tx), ty);
@@ -613,8 +674,13 @@ fn force_mag(s: f32, r: f32, L: f32) -> f32 {
       let nd11 = ${getUniform('nameField', 'ni00 + ncols + 1u')};
       let nd = mix(mix(nd00, nd10, ntx), mix(nd01, nd11, ntx), nty);
       if (nd > 0.0) {
-        let ngx = mix(nd10 - nd00, nd11 - nd01, nty);
-        let ngy = mix(nd01 - nd00, nd11 - nd10, ntx);
+        let ng = field_grad(nd00, nd10, nd01, nd11, ntx, nty,
+          ${getUniform('nameField', 'ni00 - 1u')} + ${getUniform('nameField', 'ni00 + ncols - 1u')},
+          ${getUniform('nameField', 'ni00 + 2u')} + ${getUniform('nameField', 'ni00 + ncols + 2u')},
+          ${getUniform('nameField', 'ni00 - ncols')} + ${getUniform('nameField', 'ni00 - ncols + 1u')},
+          ${getUniform('nameField', 'ni00 + 2u * ncols')} + ${getUniform('nameField', 'ni00 + 2u * ncols + 1u')});
+        let ngx = ng.x;
+        let ngy = ng.y;
         let ngl = sqrt(ngx * ngx + ngy * ngy);
         if (ngl > 0.0) {
           var nm = force_mag(nstrength, nd, nL);
@@ -755,8 +821,15 @@ ${namePart(args)}
             const d01 = field[i00 + cols]
             const d11 = field[i00 + cols + 1]
             const d = (d00 * (1 - tx) + d10 * tx) * (1 - ty) + (d01 * (1 - tx) + d11 * tx) * ty
-            const gx = (d10 - d00) * (1 - ty) + (d11 - d01) * ty
-            const gy = (d01 - d00) * (1 - tx) + (d11 - d10) * tx
+            let gx = (d10 - d00) * (1 - ty) + (d11 - d01) * ty
+            let gy = (d01 - d00) * (1 - tx) + (d11 - d10) * tx
+            if (gx === 0 && gy === 0) {
+              // Widened stencil; see field_grad in the shader.
+              gx = field[i00 + 2] + field[i00 + cols + 2] - field[i00 - 1] - field[i00 + cols - 1]
+              gy =
+                field[i00 + 2 * cols] + field[i00 + 2 * cols + 1] -
+                field[i00 - cols] - field[i00 - cols + 1]
+            }
             const gl = Math.hypot(gx, gy)
             if (gl > 0) {
               const m = forceMag(fstrength, Math.max(d - pad, 0), L)
@@ -788,8 +861,12 @@ ${namePart(args)}
               (nf[i00] * (1 - tx) + nf[i00 + 1] * tx) * (1 - ty) +
               (nf[i00 + cols] * (1 - tx) + nf[i00 + cols + 1] * tx) * ty
             if (d > 0) {
-              const gx = (nf[i00 + 1] - nf[i00]) * (1 - ty) + (nf[i00 + cols + 1] - nf[i00 + cols]) * ty
-              const gy = (nf[i00 + cols] - nf[i00]) * (1 - tx) + (nf[i00 + cols + 1] - nf[i00 + 1]) * tx
+              let gx = (nf[i00 + 1] - nf[i00]) * (1 - ty) + (nf[i00 + cols + 1] - nf[i00 + cols]) * ty
+              let gy = (nf[i00 + cols] - nf[i00]) * (1 - tx) + (nf[i00 + cols + 1] - nf[i00 + 1]) * tx
+              if (gx === 0 && gy === 0) {
+                gx = nf[i00 + 2] + nf[i00 + cols + 2] - nf[i00 - 1] - nf[i00 + cols - 1]
+                gy = nf[i00 + 2 * cols] + nf[i00 + 2 * cols + 1] - nf[i00 - cols] - nf[i00 - cols + 1]
+              }
               const gl = Math.hypot(gx, gy)
               if (gl > 0) {
                 let nm = forceMag(strength, d, L)

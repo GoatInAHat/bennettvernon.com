@@ -85,16 +85,26 @@ const DRAG_TRAIL_SCALE = 0.08
 /** Fixed dynamic-array size: (points+head-1) spans x 3 samples + tail. */
 const TRAIL_NODES_PAD = (TRAIL_MAX_POINTS + 1) * 3 + 2
 
+/**
+ * Every effector starts at the same surface acceleration, so one glow is
+ * directly comparable to another and the debug view's global anchor puts
+ * them all at the same peak opacity. Only the SENSE differs: the name and
+ * the section separators pull particles toward themselves, the text, panel
+ * and drag push them away. Under one force law with one softening length,
+ * equal strength really does mean equal reach.
+ */
+const EFFECTOR_STRENGTH = 20_000
+
 const GLOBAL_DEFAULTS: GlobalSettings = {
   particleCount: 0, // resolved to the device budget once the runtime is known
-  dragStrength: 200_000,
-  nameAttraction: 10_000,
+  dragStrength: EFFECTOR_STRENGTH,
+  nameAttraction: EFFECTOR_STRENGTH,
   concaveAvoidance: 1,
-  boxAttraction: 50_000,
+  boxAttraction: EFFECTOR_STRENGTH,
   textStandoff: 44,
   textSmoothing: 1.8,
-  separatorAttraction: 15_000,
-  cursorStrength: 5_000,
+  separatorAttraction: EFFECTOR_STRENGTH,
+  cursorStrength: EFFECTOR_STRENGTH,
   trailIntensity: 0.5,
   cursorFalloff: 0.5,
   modeDuration: 15,
@@ -1988,6 +1998,7 @@ export function PartyBackground() {
         ;(window as unknown as Record<string, unknown>).__party = {
           engine: eng,
           bridge,
+          effectors,
           probe: () => ({
             zoom,
             seeds: voroSeeds.length,

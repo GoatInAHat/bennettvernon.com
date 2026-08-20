@@ -144,6 +144,58 @@ function run() {
     }
   }
 
+  // A signed-distance field with a flat interior plateau -- which is what a
+  // discrete distance transform produces along the medial axis of any filled
+  // shape -- must still push. The 2x2 bilinear stencil has an exactly zero
+  // gradient there, and bailing on that leaves force-free pockets inside the
+  // body that trap particles and punch holes in the glow.
+  {
+    const cols = 32
+    const rows = 32
+    const cell = 10
+    const distances = new Float32Array(cols * rows)
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        // A real distance transform, quantized to whole cells the way a
+        // rasterized one is. Neighbours land on identical values wherever the
+        // true distance changes by less than a cell, which is most of the
+        // field near the shape -- and there the 2x2 bilinear gradient is
+        // exactly zero.
+        const edge = Math.min(c, r, cols - 1 - c, rows - 1 - r)
+        distances[r * cols + c] = Math.round(edge - 8) * cell
+      }
+    }
+    const flat = new Effectors()
+    flat.setSoften(30)
+    flat.setField({ originX: 0, originY: 0, cell, cols, rows, strength: 1_000, padding: 0, distances })
+    const prim = flat.viz()[0].primitives[0]
+    // Sweep the interior: every sampled point must feel the push. A single
+    // dead cell here is a particle trap in the simulation and a hole in the
+    // debug glow.
+    // The exact centre of a four-way symmetric shape is skipped: there the
+    // nearest exit is a genuine tie in all four directions and no gradient can
+    // break it. Real glyph shapes have no such symmetry.
+    const midX = (cols - 1) / 2
+    const midY = (rows - 1) / 2
+    let dead = 0
+    let sampled = 0
+    const deadAt: string[] = []
+    for (let gy = 4; gy < rows - 4; gy++) {
+      for (let gx = 4; gx < cols - 4; gx++) {
+        if (Math.abs(gx - midX) <= 0.5 && Math.abs(gy - midY) <= 0.5) continue
+        sampled++
+        if (forceAt(prim, (gx + 0.5) * cell, (gy + 0.5) * cell, out) <= 0) {
+          dead++
+          if (deadAt.length < 6) deadAt.push(`${gx},${gy}`)
+        }
+      }
+    }
+    checks++
+    if (dead > 0) {
+      throw new Error(`${dead}/${sampled} cells exert no force at ${JSON.stringify(deadAt)}`)
+    }
+  }
+
   // An empty system must not produce a NaN anchor.
   const empty = new Effectors()
   checks++
