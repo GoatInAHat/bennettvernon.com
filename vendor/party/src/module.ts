@@ -107,6 +107,13 @@ export interface VizGroup {
    * sum; 'max' means the strongest primitive wins at each point (viewers
    * must composite accordingly, e.g. lighten instead of source-over). */
   blend?: "max";
+  /** Control points the group's primitives were derived from, in world
+   * units. A module that fits a curve through a set of points and then
+   * samples it into primitives can hand back the points as well, so a viewer
+   * can show what the shape was built from rather than only the shape. Same
+   * idea as a field primitive's `boost.hulls`: geometry the physics came
+   * from, not geometry the physics acts on. */
+  nodes?: [number, number][];
   primitives: VizPrimitive[];
 }
 

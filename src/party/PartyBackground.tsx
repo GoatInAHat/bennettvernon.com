@@ -992,6 +992,11 @@ export function PartyBackground() {
      * module's array offsets stay stable. */
     const trailNodes = (now: number): TrailNode[] => {
       const nodes: TrailNode[] = []
+      // The points every pointer's curve is fitted through, kept for the
+      // debug view. The spans below are samples OF the curve, so without
+      // these the viewer can only show the smoothed result and not what it
+      // was smoothed from.
+      const fitted: [number, number][] = []
       // Samples of one pointer's spline, flushed into spans between
       // consecutive points. The force measures to those spans, so the field
       // is a smooth tube along the stroke rather than a chain of beads
@@ -1070,6 +1075,7 @@ export function PartyBackground() {
           if (s !== 0) pts.push({ x: ps.x, y: ps.y, s })
         }
 
+        for (const p of pts) fitted.push([p.x / zoom, p.y / zoom])
         if (pts.length === 1) {
           push(pts[0].x, pts[0].y, pts[0].s)
         } else if (pts.length > 1) {
@@ -1102,6 +1108,7 @@ export function PartyBackground() {
       while (nodes.length < TRAIL_NODES_PAD) {
         nodes.push({ x1: 0, y1: 0, x2: 0, y2: 0, s1: 0, s2: 0 })
       }
+      effectors.setTrailPoints(fitted)
       return nodes
     }
 

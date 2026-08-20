@@ -444,6 +444,14 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     this.nameHulls = hulls
   }
 
+  /** The raw trail points each pointer's curve is fitted through, in world
+   * units. Debug geometry only, like `nameHulls`: kept off `write()` because
+   * the shaders consume the sampled spans, not the points behind them. */
+  private trailPoints: [number, number][] = []
+  setTrailPoints(points: [number, number][]): void {
+    this.trailPoints = points
+  }
+
   /** Debug description decoded from the same packed arrays the shaders
    * consume, so the debug view always matches the live physics. */
   viz(): VizGroup[] {
@@ -517,7 +525,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
       })
     }
     const trail = groups.get('effectors:trail')
-    if (trail) trail.blend = 'max'
+    if (trail) {
+      trail.blend = 'max'
+      // The spans are samples of a curve; these are the points that curve was
+      // fitted through, so a viewer can show both.
+      trail.nodes = this.trailPoints
+    }
 
     const field = state.field
     if (field && field.length > FIELD_HEADER) {

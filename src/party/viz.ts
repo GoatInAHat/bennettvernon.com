@@ -334,8 +334,11 @@ function isoPath(
  * surface — the text shape dilated by its standoff, the letter surface of the
  * name. Drawn from the same geometry the physics uses, on top of the glow.
  *
- * Max-blend groups are skipped: their primitives are dense samples of one
- * curve, so per-sample outlines would be noise rather than geometry.
+ * A max-blend group is a curve rather than a set of separate bodies -- its
+ * primitives are consecutive samples of one stroke -- so it gets the curve
+ * itself plus the points the curve was fitted through, which are two
+ * different things worth telling apart: the samples are what the physics
+ * measures to, the points are what the smoothing started from.
  */
 function strokeBodies(
   ctx: CanvasRenderingContext2D,
@@ -343,7 +346,10 @@ function strokeBodies(
   zoom: number,
   maxOpacity: number,
 ) {
-  if (g.blend === 'max') return
+  if (g.blend === 'max') {
+    strokeCurve(ctx, g, zoom, maxOpacity)
+    return
+  }
   ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
   ctx.lineWidth = 1.25
   ctx.beginPath()
@@ -379,6 +385,47 @@ function strokeBodies(
     }
   }
   ctx.stroke()
+}
+
+/** Width of a curve's line, in page px. The dots that mark its control
+ * points are drawn at `NODE_RADIUS`, deliberately wider than half the line,
+ * so a point reads as a bead on the curve rather than as part of it. */
+const CURVE_WIDTH = 1.25
+const NODE_RADIUS = 2.4
+
+/**
+ * The stroke a max-blend group samples, and the points it was fitted
+ * through. Consecutive primitives share endpoints, so stroking each in turn
+ * traces the curve; the points come from the group's `nodes`, which the
+ * module carries alongside because the sampled spans no longer say where the
+ * cursor actually was.
+ */
+function strokeCurve(
+  ctx: CanvasRenderingContext2D,
+  g: VizGroup,
+  zoom: number,
+  maxOpacity: number,
+) {
+  ctx.strokeStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
+  ctx.lineWidth = CURVE_WIDTH
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  for (const p of g.primitives) {
+    if (p.kind !== 'segment') continue
+    ctx.moveTo(p.x1 * zoom, p.y1 * zoom)
+    ctx.lineTo(p.x2 * zoom, p.y2 * zoom)
+  }
+  ctx.stroke()
+
+  if (!g.nodes || g.nodes.length === 0) return
+  ctx.fillStyle = vizCss(g.key, Math.min(1, maxOpacity + 0.1))
+  ctx.beginPath()
+  for (const [nx, ny] of g.nodes) {
+    ctx.moveTo(nx * zoom + NODE_RADIUS, ny * zoom)
+    ctx.arc(nx * zoom, ny * zoom, NODE_RADIUS, 0, Math.PI * 2)
+  }
+  ctx.fill()
 }
 
 /**

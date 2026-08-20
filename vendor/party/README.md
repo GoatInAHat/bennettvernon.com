@@ -92,7 +92,11 @@ Every divergence from upstream is listed here.
   site's glow renderer does. Groups can declare `blend: 'max'` when their
   primitives combine by strongest-wins rather than summing, and a group is
   the unit that blend applies to: primitives whose physics share one winner
-  must share one group, or a viewer will sum two winners.
+  must share one group, or a viewer will sum two winners. A group can also
+  carry `nodes`, the control points its primitives were derived from, so a
+  module that fits a curve through a set of points and then samples it into
+  spans can show a viewer what the shape was built from and not only the
+  shape -- the same idea as a field primitive's `boost.hulls`.
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
 - `modules/forces/fluids.ts`, `collisions.ts`, `sensors.ts` — each gains a
