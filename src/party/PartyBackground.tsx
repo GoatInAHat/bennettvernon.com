@@ -85,8 +85,6 @@ const SPEED_STRENGTH_GAIN = 4
 const PRESSURE_STRENGTH_GAIN = 1.6
 /** Pressed-hard trail points live this much longer (×pressure). */
 const PRESSURE_TTL_GAIN = 2
-/** Drag trail push strength as a fraction of the drag repel setting. */
-const DRAG_TRAIL_SCALE = 0.08
 /** Fixed dynamic-array size: (points+head-1) spans x 3 samples + tail. */
 const TRAIL_NODES_PAD = (TRAIL_MAX_POINTS + 1) * 3 + 2
 
@@ -527,15 +525,15 @@ export function PartyBackground() {
     let lastTickAt = 0
     /** Accumulated clamped frame time driving host oscillators. */
     let oscClock = 0
-    /** Trail points remember the speed/pressure boosts and the mode (pull
-     * vs push) they were born with, for as long as they live. */
+    /** Trail points remember the speed/pressure boosts and the attract/
+     * repel mix they were born with, for as long as they live. */
     interface TrailPoint {
       x: number
       y: number
       t: number
       sb: number // strength boost at birth
       press: number // pressure at birth (extends lifetime)
-      push: boolean // captured while repelling: pushes instead of pulls
+      mix: number // 0 = pull, 1 = push, as eased at birth
     }
     /** Every active pointer (the mouse, each touch) is its own force head
      * with its own trail, pressure, and speed — full multi-touch. */
@@ -986,10 +984,10 @@ export function PartyBackground() {
      * whose radius and strength shrink down the tail. The field takes the
      * MAX-magnitude cone at every point, so overlapping samples never
      * seam, and a stationary pointer is simply its head cone. Points carry
-     * their birth boosts and pull-vs-push mode; pressure-born points live
-     * longer. Each pointer's head blends continuously between attract and
-     * repel via its eased repelMix. Padded to a fixed length so the
-     * module's array offsets stay stable. */
+     * their birth boosts and their eased attract/repel mix; pressure-born
+     * points live longer. The head is the newest point, not a special one:
+     * same law, same taper, differing only in being born now. Padded to a
+     * fixed length so the module's array offsets stay stable. */
     const trailNodes = (now: number): TrailNode[] => {
       const nodes: TrailNode[] = []
       // The points every pointer's curve is fitted through, kept for the
@@ -1054,26 +1052,36 @@ export function PartyBackground() {
         // for spline interpolation. The taper down the tail is carried by
         // the strength alone -- under one global softening length that is
         // the only shape a sample has.
+        //
+        // The live head is the point being born THIS frame: appended to the
+        // trail and run through the same law as every other point, with the
+        // boost and mix it is born with. It used to have a law of its own --
+        // full drag power where the trail pushed at 8% of it, a continuous
+        // attract/repel mix where the trail snapped on a boolean -- which
+        // made the pointer a spike of force its own stroke never matched.
+        // `fromHead` already reserves index n for it, so it lands at f = 1
+        // and the taper runs continuously from there down the tail.
         const pts: { x: number; y: number; s: number }[] = []
         const n = ps.trail.length
-        ps.trail.forEach((p, i) => {
+        const head: TrailPoint | null = ps.ended
+          ? null
+          : {
+              x: ps.x,
+              y: ps.y,
+              t: now,
+              sb: strengthBoost(ps),
+              press: ps.pressure,
+              mix: ps.repelMix,
+            }
+        const along = head ? [...ps.trail, head] : ps.trail
+        along.forEach((p, i) => {
           const fromHead = (n - i) / (n + 1)
           const pttl = ttl * (1 + p.press * PRESSURE_TTL_GAIN)
           const fade = Math.max(0, 1 - (now - p.t) / pttl)
           const f = Math.pow(1 - fromHead, gamma) * fade
-          const base = p.push
-            ? -globals.dragStrength * DRAG_TRAIL_SCALE
-            : globals.cursorStrength
+          const base = (1 - p.mix) * globals.cursorStrength - p.mix * globals.dragStrength
           pts.push({ x: p.x, y: p.y, s: base * f * p.sb })
         })
-        // The live head blends attract → repel continuously with repelMix
-        // (mouse press, or touch pressure crossing half strength).
-        if (!ps.ended) {
-          const sb = strengthBoost(ps)
-          const m = ps.repelMix
-          const s = (1 - m) * globals.cursorStrength * sb - m * globals.dragStrength * sb
-          if (s !== 0) pts.push({ x: ps.x, y: ps.y, s })
-        }
 
         for (const p of pts) fitted.push([p.x / zoom, p.y / zoom])
         if (pts.length === 1) {
@@ -2635,7 +2643,7 @@ export function PartyBackground() {
         t: performance.now(),
         sb: strengthBoost(ps),
         press: ps.pressure,
-        push: ps.repelMix > 0.5,
+        mix: ps.repelMix,
       })
     }
     const onPointerDown = (e: PointerEvent) => {
