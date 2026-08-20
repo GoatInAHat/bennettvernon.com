@@ -43,8 +43,10 @@ export type VizPrimitive =
       x2: number;
       y2: number;
       strength: number;
-      /** Reach from the body surface; the force is zero at and beyond it. */
-      range: number;
+      /** Softening length: the distance from the surface at which the force
+       * is half its peak. There is no outer limit -- the force falls off as
+       * the inverse square and is merely negligible far away. */
+      soften: number;
     }
   | {
       kind: "rect";
@@ -53,7 +55,8 @@ export type VizPrimitive =
       hw: number;
       hh: number;
       strength: number;
-      range: number;
+      /** See `soften` on `segment`. */
+      soften: number;
       /** Repelling rects push out along the nearest edge at full strength
        * everywhere inside; attracting rects exert nothing there. */
       interiorPush?: boolean;

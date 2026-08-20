@@ -39,7 +39,6 @@ export const MODE_SETTING_KEYS = [
 export const GLOBAL_SETTING_KEYS = [
   'particleCount',
   'dragStrength',
-  'dragRadius',
   'nameAttraction',
   'nameRange',
   'nameSharpness',
@@ -49,7 +48,6 @@ export const GLOBAL_SETTING_KEYS = [
   'textPaddingOuter',
   'textSmoothing',
   'separatorAttraction',
-  'separatorRange',
   'cursorStrength',
   'trailIntensity',
   'cursorFalloff',

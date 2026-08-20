@@ -8,20 +8,20 @@ import {
   type VizPrimitive,
 } from '@cazala/party'
 
-export type EffectorShape = 'circle' | 'rect' | 'pill'
-export type EffectorMode = 'attract' | 'repel'
+export type EffectorShape = 'rect' | 'pill'
 
 export interface Effector {
   shape: EffectorShape
-  mode: EffectorMode
   /** World-space center. */
   x: number
   y: number
-  /** Influence distance beyond the shape edge (circle: from center). */
-  range: number
   /** Rect half extents / pill half segment length, in world units. */
   halfW: number
   halfH: number
+  /** Signed peak acceleration at the body surface: positive pulls toward
+   * the body, negative pushes away. The force has no outer limit -- it
+   * falls off as the inverse square of distance, so there is no radius to
+   * set, only how hard it pulls. */
   strength: number
 }
 
@@ -49,19 +49,35 @@ export interface DistanceField {
 }
 
 /**
- * One sample of the cursor-trail curve: a cone of force with its own radius
- * and peak strength. The trail field is the MAX-magnitude sample cone (not
- * the sum), so the densely sampled curve forms one smooth tapered blob
- * with no seams where samples overlap, and a stationary cursor is simply
- * the single-cone degenerate case. Strength is SIGNED: positive pulls,
- * negative pushes (drag trails).
+ * One sample of the cursor-trail curve. The trail field is the MAX-magnitude
+ * sample (not the sum), so the densely sampled curve forms one smooth
+ * tapered blob with no seams where samples overlap, and a stationary cursor
+ * is simply the single-sample degenerate case. Because every sample shares
+ * the one global softening length, the max over samples is exactly the same
+ * law applied to the distance to the trail curve. Strength is SIGNED:
+ * positive pulls, negative pushes (drag trails); the taper down the tail
+ * lives in the strength, which is all the shape the law needs.
  */
 export interface TrailNode {
   x: number
   y: number
-  r: number
   s: number
 }
+
+/**
+ * The force law. `s` is the peak at the body surface, `r` the distance to
+ * that surface, `L` the global softening length.
+ *
+ *   mag = s * L^2 / (r^2 + L^2)
+ *
+ * Far from the body this is exactly the inverse square that gravity and
+ * electrostatics obey, with no cutoff and no range to set. Near it the L^2
+ * keeps the force finite instead of singular, so the peak is exactly `s` at
+ * the surface and half that at L. Nothing here can produce a NaN or an
+ * unbounded kick, which is why the integrator needs no clamp.
+ */
+export const forceMag = (s: number, r: number, L: number): number =>
+  (s * L * L) / (r * r + L * L)
 
 /** Bilinear sample of a field primitive and its analytic gradient, or null
  * where the 2x2 fetch and its +/-1 gradient stencil are not both in bounds.
@@ -121,9 +137,9 @@ export function forceAt(
     const dx = p.x1 + vx * t - x
     const dy = p.y1 + vy * t - y
     const d2 = dx * dx + dy * dy
-    if (d2 <= 0 || d2 > p.range * p.range) return 0
+    if (d2 <= 0) return 0
     const d = Math.sqrt(d2)
-    const m = p.strength * (1 - d / p.range)
+    const m = forceMag(p.strength, d, p.soften)
     out[0] = (dx / d) * m
     out[1] = (dy / d) * m
     return Math.abs(m)
@@ -137,6 +153,8 @@ export function forceAt(
       if (!p.interiorPush) return 0
       const exitX = lx < 0 ? -(p.hw + lx) : p.hw - lx
       const exitY = ly < 0 ? -(p.hh + ly) : p.hh - ly
+      // Full strength inside, which is exactly forceMag(s, 0, L): the
+      // interior is continuous with the exterior at the surface.
       const m = Math.abs(p.strength)
       if (Math.abs(exitY) < Math.abs(exitX)) out[1] = Math.sign(exitY) * m
       else out[0] = Math.sign(exitX) * m
@@ -147,9 +165,9 @@ export function forceAt(
     const dx = cx - lx
     const dy = cy - ly
     const d2 = dx * dx + dy * dy
-    if (d2 <= 0 || d2 > p.range * p.range) return 0
+    if (d2 <= 0) return 0
     const d = Math.sqrt(d2)
-    const m = p.strength * (1 - d / p.range)
+    const m = forceMag(p.strength, d, p.soften)
     out[0] = (dx / d) * m
     out[1] = (dy / d) * m
     return Math.abs(m)
@@ -195,12 +213,17 @@ export function peakForce(p: VizPrimitive): number {
   return Math.abs(p.strength)
 }
 
-const SHAPE_CODE: Record<EffectorShape, number> = { circle: 0, rect: 1, pill: 2 }
-const STRIDE = 8
-const NODE_STRIDE = 4
+const SHAPE_CODE: Record<EffectorShape, number> = { rect: 0, pill: 1 }
+const STRIDE = 6
+const NODE_STRIDE = 3
 const FIELD_HEADER = 8
 
 type EffectorsInputs = {
+  /** One global softening length in world units (see SOFTEN_PX in the host):
+   * the distance at which every body's pull is half its surface peak. It is
+   * the only length the force law needs, and it is shared so that one
+   * strength means the same reach on every body. */
+  soften: number
   data: number[]
   dynamic: number[]
   field: number[]
@@ -219,16 +242,7 @@ type EffectorsInputs = {
 function packEffectors(effectors: Effector[]): number[] {
   const data: number[] = []
   for (const e of effectors) {
-    data.push(
-      SHAPE_CODE[e.shape],
-      e.mode === 'repel' ? 1 : 0,
-      e.x,
-      e.y,
-      e.range,
-      e.halfW,
-      e.halfH,
-      e.strength,
-    )
+    data.push(SHAPE_CODE[e.shape], e.x, e.y, e.halfW, e.halfH, e.strength)
   }
   return data
 }
@@ -242,6 +256,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   readonly name = 'effectors' as const
   readonly role = ModuleRole.Force
   readonly inputs = {
+    soften: DataType.NUMBER,
     data: DataType.ARRAY,
     dynamic: DataType.ARRAY,
     field: DataType.ARRAY,
@@ -252,7 +267,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
 
   constructor() {
     super()
-    this.write({ data: [], dynamic: [], field: [], nameField: [], nameParams: [], nameZone: [] })
+    this.write({ soften: 1, data: [], dynamic: [], field: [], nameField: [], nameParams: [], nameZone: [] })
+  }
+
+  /** The global softening length in world units. Rewritten on zoom change. */
+  setSoften(soften: number): void {
+    this.write({ soften: Math.max(1e-6, soften) })
   }
 
   /** Static effectors: rewritten only on layout/hover changes. */
@@ -264,7 +284,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   setDynamic(nodes: TrailNode[]): void {
     const data: number[] = []
     for (const n of nodes) {
-      data.push(n.x, n.y, n.r, n.s)
+      data.push(n.x, n.y, n.s)
     }
     this.write({ dynamic: data })
   }
@@ -316,6 +336,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
   viz(): VizGroup[] {
     if (!this.isEnabled()) return []
     const state = this.read() as {
+      soften?: number
       data?: number[]
       dynamic?: number[]
       field?: number[]
@@ -334,31 +355,20 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     }
 
     const data = state.data ?? []
+    const soften = (state.soften as number | undefined) ?? 1
     for (let base = 0; base + STRIDE <= data.length; base += STRIDE) {
-      const [kind, mode, x, y, range, hw, hh, strength] = data.slice(base, base + STRIDE)
+      const [kind, x, y, hw, hh, strength] = data.slice(base, base + STRIDE)
       if (strength === 0) continue
-      const dir = mode === 1 ? 'repel' : 'attract'
-      // Signed for the viewer: positive pulls toward the body, negative pushes.
-      const signed = mode === 1 ? -strength : strength
-      if (kind < 0.5) {
-        add(`effectors:${dir}-circle`, false, {
-          kind: 'segment',
-          x1: x,
-          y1: y,
-          x2: x,
-          y2: y,
-          strength: signed,
-          range,
-        })
-      } else if (kind > 1.5) {
+      const dir = strength < 0 ? 'repel' : 'attract'
+      if (kind > 0.5) {
         add(`effectors:${dir}-pill`, false, {
           kind: 'segment',
           x1: x - hw,
           y1: y,
           x2: x + hw,
           y2: y,
-          strength: signed,
-          range,
+          strength,
+          soften,
         })
       } else {
         add(`effectors:${dir}-rect`, false, {
@@ -367,22 +377,22 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
           y,
           hw,
           hh,
-          strength: signed,
-          range,
-          interiorPush: mode === 1,
+          strength,
+          soften,
+          interiorPush: strength < 0,
         })
       }
     }
 
     const dyn = state.dynamic ?? []
     for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
-      const [x, y, r, s] = dyn.slice(base, base + NODE_STRIDE)
-      if (r <= 0 || s === 0) continue
+      const [x, y, s] = dyn.slice(base, base + NODE_STRIDE)
+      if (s === 0) continue
       // One group, not one per sign: the physics takes a single strongest
       // sample across the whole curve, so a pull node and a push node never
       // both act. Splitting them by color would make the viewer sum two
       // winners and show a force that is not there.
-      add('effectors:trail', true, { kind: 'segment', x1: x, y1: y, x2: x, y2: y, strength: s, range: r })
+      add('effectors:trail', true, { kind: 'segment', x1: x, y1: y, x2: x, y2: y, strength: s, soften })
     }
     const trail = groups.get('effectors:trail')
     if (trail) trail.blend = 'max'
@@ -443,73 +453,73 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     type WgslArgs = Parameters<
       Extract<WebGPUDescriptor<EffectorsInputs>, { apply?: unknown }>['apply'] & object
     >[0]
-    // The static array carries circle/rect/pill shapes; the dynamic array
-    // carries the trail capsule chain and has its own layout.
+    // The static array carries rect/pill bodies; the dynamic array carries
+    // the trail samples and has its own layout. Both obey one law, emitted
+    // once as `fx` so a change here cannot miss a call site.
+    const lawFn = `
+fn fx(s: f32, r: f32, L: f32) -> f32 {
+  return s * L * L / (r * r + L * L);
+}`
     const shapeLoop = (
       arr: 'data',
       { particleVar, getUniform, getLength }: WgslArgs,
     ) => `
+  let L = ${getUniform('soften')};
   let n_${arr} = ${getLength(arr)} / ${STRIDE}u;
   for (var i: u32 = 0u; i < n_${arr}; i = i + 1u) {
     let base = i * ${STRIDE}u;
     let kind = ${getUniform(arr, 'base + 0u')};
-    let mode = ${getUniform(arr, 'base + 1u')};
-    let ex = ${getUniform(arr, 'base + 2u')};
-    let ey = ${getUniform(arr, 'base + 3u')};
-    let range = ${getUniform(arr, 'base + 4u')};
-    let hw = ${getUniform(arr, 'base + 5u')};
-    let hh = ${getUniform(arr, 'base + 6u')};
-    let strength = ${getUniform(arr, 'base + 7u')};
+    let ex = ${getUniform(arr, 'base + 1u')};
+    let ey = ${getUniform(arr, 'base + 2u')};
+    let hw = ${getUniform(arr, 'base + 3u')};
+    let hh = ${getUniform(arr, 'base + 4u')};
+    let strength = ${getUniform(arr, 'base + 5u')};
+    if (strength == 0.0) { continue; }
     let px = ${particleVar}.position.x;
     let py = ${particleVar}.position.y;
-    if (kind < 0.5 || kind > 1.5) {
-      // Circle (or pill: distance to a horizontal segment), Interaction falloff.
-      let sx = clamp(px - ex, -hw, hw) * select(0.0, 1.0, kind > 1.5);
+    if (kind > 0.5) {
+      // Pill: distance to a horizontal segment.
+      let sx = clamp(px - ex, -hw, hw);
       let dx = (ex + sx) - px;
       let dy = ey - py;
       let dist2 = dx * dx + dy * dy;
-      if (dist2 > 0.0 && dist2 <= range * range) {
+      if (dist2 > 0.0) {
         let dist = sqrt(dist2);
-        let dir = vec2<f32>(dx, dy) / dist;
-        let f = strength * (1.0 - dist / range);
-        let force = select(dir * f, -dir * f, mode == 1.0);
-        ${particleVar}.acceleration += force;
+        ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * fx(strength, dist, L);
       }
     } else {
       let lx = px - ex;
       let ly = py - ey;
-      let inside = abs(lx) < hw && abs(ly) < hh;
-      if (inside) {
-        if (mode == 1.0) {
-          // Push out along the nearest edge at full strength.
+      if (abs(lx) < hw && abs(ly) < hh) {
+        // Inside a repelling rect: eject along the nearest edge at the
+        // surface peak, which is fx(strength, 0, L) -- continuous with the
+        // exterior. Attracting rects exert nothing here.
+        if (strength < 0.0) {
           let exitX = select(hw - lx, -(hw + lx), lx < 0.0);
           let exitY = select(hh - ly, -(hh + ly), ly < 0.0);
           var dir = vec2<f32>(sign(exitX), 0.0);
           if (abs(exitY) < abs(exitX)) { dir = vec2<f32>(0.0, sign(exitY)); }
-          ${particleVar}.acceleration += dir * strength;
+          ${particleVar}.acceleration += dir * abs(strength);
         }
       } else {
-        // Distance to the nearest point on the rect, Interaction falloff.
         let cx = clamp(lx, -hw, hw);
         let cy = clamp(ly, -hh, hh);
         let dx = cx - lx;
         let dy = cy - ly;
         let dist2 = dx * dx + dy * dy;
-        if (dist2 > 0.0 && dist2 <= range * range) {
+        if (dist2 > 0.0) {
           let dist = sqrt(dist2);
-          let dir = vec2<f32>(dx, dy) / dist;
-          let f = strength * (1.0 - dist / range);
-          let force = select(dir * f, -dir * f, mode == 1.0);
-          ${particleVar}.acceleration += force;
+          ${particleVar}.acceleration += vec2<f32>(dx, dy) / dist * fx(strength, dist, L);
         }
       }
     }
   }`
-    // The trail field is the MAX-magnitude sample cone along the cursor
-    // curve — the strongest sample wins at each point, so overlapping
-    // samples form one smooth tapered blob instead of summing into seams.
-    // Positive strength pulls toward the sample, negative pushes away.
+    // The trail field is the strongest sample, not the sum: the samples are
+    // spline resampling artifacts, so summing would scale force with the
+    // sample count. With one shared L, the max over samples is exactly the
+    // same law applied to the distance to the trail curve.
     const trailLoop = ({ particleVar, getUniform, getLength }: WgslArgs) => `
+  let tL = ${getUniform('soften')};
   let n_dyn = ${getLength('dynamic')} / ${NODE_STRIDE}u;
   var t_best = 0.0;
   var t_dx = 0.0;
@@ -518,15 +528,14 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     let base = i * ${NODE_STRIDE}u;
     let nx = ${getUniform('dynamic', 'base + 0u')};
     let ny = ${getUniform('dynamic', 'base + 1u')};
-    let nr = ${getUniform('dynamic', 'base + 2u')};
-    let ns = ${getUniform('dynamic', 'base + 3u')};
-    if (nr <= 0.0 || ns == 0.0) { continue; }
+    let ns = ${getUniform('dynamic', 'base + 2u')};
+    if (ns == 0.0) { continue; }
     let dx = nx - ${particleVar}.position.x;
     let dy = ny - ${particleVar}.position.y;
     let dist2 = dx * dx + dy * dy;
-    if (dist2 > 0.0 && dist2 < nr * nr) {
+    if (dist2 > 0.0) {
       let dist = sqrt(dist2);
-      let c = abs(ns) * (1.0 - dist / nr);
+      let c = abs(fx(ns, dist, tL));
       if (c > t_best) {
         t_best = c;
         let sgn = sign(ns);
@@ -628,6 +637,7 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     }
   }`
     return {
+      global: () => lawFn,
       apply: (args) => `{
   {${shapeLoop('data', args)}
   }
@@ -644,39 +654,40 @@ ${namePart(args)}
       apply: ({ particle, input }) => {
         const px = particle.position.x
         const py = particle.position.y
+        const L = input.soften
         const applyList = (data: number[] | undefined) => {
           if (!data || data.length < STRIDE) return
           for (let base = 0; base + STRIDE <= data.length; base += STRIDE) {
             const kind = data[base]
-            const mode = data[base + 1]
-            const ex = data[base + 2]
-            const ey = data[base + 3]
-            const range = data[base + 4]
-            const hw = data[base + 5]
-            const hh = data[base + 6]
-            const strength = data[base + 7]
-            if (kind < 0.5 || kind > 1.5) {
-              const sx = kind > 1.5 ? Math.max(-hw, Math.min(hw, px - ex)) : 0
+            const ex = data[base + 1]
+            const ey = data[base + 2]
+            const hw = data[base + 3]
+            const hh = data[base + 4]
+            const strength = data[base + 5]
+            if (strength === 0) continue
+            if (kind > 0.5) {
+              const sx = Math.max(-hw, Math.min(hw, px - ex))
               const dx = ex + sx - px
               const dy = ey - py
               const dist2 = dx * dx + dy * dy
-              if (dist2 <= 0 || dist2 > range * range) continue
+              if (dist2 <= 0) continue
               const dist = Math.sqrt(dist2)
-              const f = (strength * (1 - dist / range)) / dist
-              const s = mode === 1 ? -1 : 1
-              particle.acceleration.x += s * dx * f
-              particle.acceleration.y += s * dy * f
+              const f = forceMag(strength, dist, L) / dist
+              particle.acceleration.x += dx * f
+              particle.acceleration.y += dy * f
             } else {
               const lx = px - ex
               const ly = py - ey
               if (Math.abs(lx) < hw && Math.abs(ly) < hh) {
-                if (mode === 1) {
+                // Repelling rects eject at the surface peak; attracting
+                // rects exert nothing inside.
+                if (strength < 0) {
                   const exitX = lx < 0 ? -(hw + lx) : hw - lx
                   const exitY = ly < 0 ? -(hh + ly) : hh - ly
                   if (Math.abs(exitY) < Math.abs(exitX)) {
-                    particle.acceleration.y += Math.sign(exitY) * strength
+                    particle.acceleration.y += Math.sign(exitY) * Math.abs(strength)
                   } else {
-                    particle.acceleration.x += Math.sign(exitX) * strength
+                    particle.acceleration.x += Math.sign(exitX) * Math.abs(strength)
                   }
                 }
               } else {
@@ -685,36 +696,33 @@ ${namePart(args)}
                 const dx = cx - lx
                 const dy = cy - ly
                 const dist2 = dx * dx + dy * dy
-                if (dist2 <= 0 || dist2 > range * range) continue
+                if (dist2 <= 0) continue
                 const dist = Math.sqrt(dist2)
-                const f = (strength * (1 - dist / range)) / dist
-                const s = mode === 1 ? -1 : 1
-                particle.acceleration.x += s * dx * f
-                particle.acceleration.y += s * dy * f
+                const f = forceMag(strength, dist, L) / dist
+                particle.acceleration.x += dx * f
+                particle.acceleration.y += dy * f
               }
             }
           }
         }
         applyList(input.data)
         {
-          // Trail curve samples (dynamic layout: x,y,radius,strength); the
-          // strongest-magnitude cone wins, mirroring the WGSL max-field.
-          // Positive strength pulls, negative pushes.
+          // Trail samples (dynamic layout: x, y, signed strength); the
+          // strongest sample wins, mirroring the WGSL max-field.
           const dyn = input.dynamic
           if (dyn && dyn.length >= NODE_STRIDE) {
             let best = 0
             let bx = 0
             let by = 0
             for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
-              const nr = dyn[base + 2]
-              const ns = dyn[base + 3]
-              if (nr <= 0 || ns === 0) continue
+              const ns = dyn[base + 2]
+              if (ns === 0) continue
               const dx = dyn[base] - px
               const dy = dyn[base + 1] - py
               const dist2 = dx * dx + dy * dy
-              if (dist2 <= 0 || dist2 >= nr * nr) continue
+              if (dist2 <= 0) continue
               const dist = Math.sqrt(dist2)
-              const c = Math.abs(ns) * (1 - dist / nr)
+              const c = Math.abs(forceMag(ns, dist, L))
               if (c > best) {
                 best = c
                 const sgn = Math.sign(ns)

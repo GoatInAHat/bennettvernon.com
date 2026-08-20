@@ -60,15 +60,16 @@ function discField(strength: number, padding: number, falloff: number): Distance
 
 function run() {
   const fx = new Effectors()
+  fx.setSoften(30)
   fx.set([
-    { shape: 'pill', mode: 'attract', x: 300, y: 120, range: 140, halfW: 90, halfH: 0, strength: 15_000 },
-    { shape: 'rect', mode: 'repel', x: 160, y: 320, range: 60, halfW: 70, halfH: 40, strength: 40_000 },
-    { shape: 'circle', mode: 'repel', x: 420, y: 400, range: 100, halfW: 0, halfH: 0, strength: 8_000 },
+    { shape: 'pill', x: 300, y: 120, halfW: 90, halfH: 0, strength: 15_000 },
+    { shape: 'rect', x: 160, y: 320, halfW: 70, halfH: 40, strength: -40_000 },
+    { shape: 'rect', x: 420, y: 400, halfW: 30, halfH: 30, strength: 8_000 },
   ])
   fx.setDynamic([
-    { x: 250, y: 250, r: 120, s: 6_000 },
-    { x: 290, y: 265, r: 120, s: 6_000 },
-    { x: 330, y: 280, r: 110, s: -9_000 },
+    { x: 250, y: 250, s: 6_000 },
+    { x: 290, y: 265, s: 6_000 },
+    { x: 330, y: 280, s: -9_000 },
   ])
   fx.setField(discField(50_000, 44, 30))
 

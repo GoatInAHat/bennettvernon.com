@@ -55,12 +55,19 @@ const PARTICLE_POOL = (webgpu: boolean) => (webgpu ? 80_000 : 8_000)
 const MAX_CANVAS_HEIGHT = 8_000
 
 /** Effector tuning (world units are CSS px / zoom). */
-const PANEL_RANGE_PX = 6
 const BOX_CORNER_PX = 6
+/**
+ * The one length the force law needs. Every body's pull is half its surface
+ * peak at this distance and falls off as the inverse square beyond it, so
+ * this sets how wide every force feels — the dial to reach for first if the
+ * field reads too tight or too diffuse. It is global rather than per-body so
+ * that one strength value means the same reach everywhere, which is what
+ * lets a single slider drive two different bodies.
+ */
+const SOFTEN_PX = 30
 const SPAWN_SPREAD_PX = 60
 const SPAWN_SPEED = 100
 const TRAIL_BASE_TTL_MS = 900
-const TRAIL_POINT_RANGE_PX = 80
 const TRAIL_MIN_SPACING_PX = 10
 const TRAIL_MAX_POINTS = 32
 
@@ -70,9 +77,7 @@ const TRAIL_MAX_POINTS = 32
  * trail point remembers the boosts it was born with. */
 const SPEED_HALF_PX_S = 700
 const SPEED_STRENGTH_GAIN = 4
-const SPEED_RADIUS_GAIN = 2.2
 const PRESSURE_STRENGTH_GAIN = 1.6
-const PRESSURE_RADIUS_GAIN = 0.9
 /** Pressed-hard trail points live this much longer (×pressure). */
 const PRESSURE_TTL_GAIN = 2
 /** Drag trail push strength as a fraction of the drag repel setting. */
@@ -82,8 +87,7 @@ const TRAIL_NODES_PAD = (TRAIL_MAX_POINTS + 1) * 3 + 2
 
 const GLOBAL_DEFAULTS: GlobalSettings = {
   particleCount: 0, // resolved to the device budget once the runtime is known
-  dragStrength: 50_000,
-  dragRadius: 400,
+  dragStrength: 200_000,
   nameAttraction: 10_000,
   nameRange: 90,
   nameSharpness: 1,
@@ -93,8 +97,7 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   textPaddingOuter: 44,
   textSmoothing: 1.8,
   separatorAttraction: 15_000,
-  separatorRange: 90,
-  cursorStrength: 6_000,
+  cursorStrength: 5_000,
   trailIntensity: 0.5,
   cursorFalloff: 0.5,
   modeDuration: 15,
@@ -279,7 +282,7 @@ export function PartyBackground() {
     let builtNameRange = 0
     let nameRangeRebuildTimer = 0
     let syncScheduled = false
-    const globals: GlobalSettings = { ...GLOBAL_DEFAULTS, dragRadius: isMobile() ? 350 : 400 }
+    const globals: GlobalSettings = { ...GLOBAL_DEFAULTS }
     const overrides: Partial<Record<number, Partial<ModeSettings>>> = {}
     /** Per-mode user retunes of preset oscillator swings (range sliders). */
     const oscOverrides: Partial<Record<number, Record<string, { min: number; max: number }>>> = {}
@@ -376,7 +379,6 @@ export function PartyBackground() {
       y: number
       t: number
       sb: number // strength boost at birth
-      rb: number // radius boost at birth
       press: number // pressure at birth (extends lifetime)
       push: boolean // captured while repelling: pushes instead of pulls
     }
@@ -702,10 +704,8 @@ export function PartyBackground() {
           // A genuine line: the pill kernel attracts to a segment.
           list.push({
             shape: 'pill',
-            mode: 'attract',
             x: (r.x + r.w / 2) / zoom,
             y: (r.y + r.h / 2) / zoom,
-            range: globals.separatorRange / zoom,
             halfW: r.w / 2 / zoom,
             halfH: 0,
             strength: globals.separatorAttraction,
@@ -713,13 +713,14 @@ export function PartyBackground() {
         } else {
           list.push({
             shape: 'rect',
-            mode: 'repel',
             x: (r.x + r.w / 2) / zoom,
             y: (r.y + r.h / 2) / zoom,
-            range: (PANEL_RANGE_PX + BOX_CORNER_PX) / zoom,
+            // BOX_CORNER_PX shrinks the body so the effective surface sits
+            // where the rounded corner does, not where the bounding box does.
             halfW: Math.max(2, r.w / 2 - BOX_CORNER_PX) / zoom,
             halfH: Math.max(2, r.h / 2 - BOX_CORNER_PX) / zoom,
-            strength: globals.boxAttraction,
+            // Negative pushes: the panel repels.
+            strength: -globals.boxAttraction,
           })
         }
       }
@@ -739,8 +740,6 @@ export function PartyBackground() {
     const speedNorm = (ps: PointerField) => ps.speed / (ps.speed + SPEED_HALF_PX_S)
     const strengthBoost = (ps: PointerField) =>
       1 + speedNorm(ps) * SPEED_STRENGTH_GAIN + ps.pressure * PRESSURE_STRENGTH_GAIN
-    const radiusBoost = (ps: PointerField) =>
-      1 + speedNorm(ps) * SPEED_RADIUS_GAIN + ps.pressure * PRESSURE_RADIUS_GAIN
     const totalTrailPoints = () => {
       let n = 0
       for (const ps of pointers.values()) n += ps.trail.length
@@ -758,9 +757,9 @@ export function PartyBackground() {
      * module's array offsets stay stable. */
     const trailNodes = (now: number): TrailNode[] => {
       const nodes: TrailNode[] = []
-      const push = (x: number, y: number, s: number, r: number) => {
+      const push = (x: number, y: number, s: number) => {
         if (nodes.length >= TRAIL_NODES_PAD) return
-        nodes.push({ x: x / zoom, y: y / zoom, r: r / zoom, s })
+        nodes.push({ x: x / zoom, y: y / zoom, s })
       }
       const gamma = 0.4 + (1 - globals.trailIntensity) * 2.6
 
@@ -781,9 +780,11 @@ export function PartyBackground() {
           continue
         }
 
-        // Signed per-point strength (pull positive, push negative) and
-        // radius, ready for spline interpolation.
-        const pts: { x: number; y: number; s: number; r: number }[] = []
+        // Signed per-point strength (pull positive, push negative), ready
+        // for spline interpolation. The taper down the tail is carried by
+        // the strength alone -- under one global softening length that is
+        // the only shape a sample has.
+        const pts: { x: number; y: number; s: number }[] = []
         const n = ps.trail.length
         ps.trail.forEach((p, i) => {
           const fromHead = (n - i) / (n + 1)
@@ -793,26 +794,19 @@ export function PartyBackground() {
           const base = p.push
             ? -globals.dragStrength * DRAG_TRAIL_SCALE
             : globals.cursorStrength
-          pts.push({
-            x: p.x,
-            y: p.y,
-            s: base * f * p.sb,
-            r: TRAIL_POINT_RANGE_PX * (0.3 + 0.7 * f) * p.rb,
-          })
+          pts.push({ x: p.x, y: p.y, s: base * f * p.sb })
         })
         // The live head blends attract → repel continuously with repelMix
         // (mouse press, or touch pressure crossing half strength).
         if (!ps.ended) {
           const sb = strengthBoost(ps)
-          const rb = radiusBoost(ps)
           const m = ps.repelMix
           const s = (1 - m) * globals.cursorStrength * sb - m * globals.dragStrength * sb
-          const r = ((1 - m) * TRAIL_POINT_RANGE_PX + m * globals.dragRadius) * rb
-          if (s !== 0) pts.push({ x: ps.x, y: ps.y, s, r })
+          if (s !== 0) pts.push({ x: ps.x, y: ps.y, s })
         }
 
         if (pts.length === 1) {
-          push(pts[0].x, pts[0].y, pts[0].s, pts[0].r)
+          push(pts[0].x, pts[0].y, pts[0].s)
         } else if (pts.length > 1) {
           // Catmull-Rom through the points, three samples per span, so the
           // cone chain follows a smooth curve rather than the raw polyline.
@@ -832,16 +826,15 @@ export function PartyBackground() {
                 cr(p0.x, p1.x, p2.x, p3.x),
                 cr(p0.y, p1.y, p2.y, p3.y),
                 p1.s + (p2.s - p1.s) * u,
-                p1.r + (p2.r - p1.r) * u,
               )
             }
           }
           const last = pts[pts.length - 1]
-          push(last.x, last.y, last.s, last.r)
+          push(last.x, last.y, last.s)
         }
       }
       while (nodes.length < TRAIL_NODES_PAD) {
-        nodes.push({ x: 0, y: 0, r: 0, s: 0 })
+        nodes.push({ x: 0, y: 0, s: 0 })
       }
       return nodes
     }
@@ -998,6 +991,7 @@ export function PartyBackground() {
       engine.setZoom(DESIRED_ZOOM() * scale)
       zoom = engine.getZoom() / scale // effective page-px zoom
       engine.setCamera(w / (2 * zoom), h / (2 * zoom))
+      effectors.setSoften(SOFTEN_PX / zoom)
     }
 
     // Equal-area Voronoi partition of the letter shapes themselves: the
@@ -2158,7 +2152,6 @@ export function PartyBackground() {
         y: e.pageY,
         t: performance.now(),
         sb: strengthBoost(ps),
-        rb: radiusBoost(ps),
         press: ps.pressure,
         push: ps.repelMix > 0.5,
       })

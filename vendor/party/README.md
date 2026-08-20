@@ -37,9 +37,10 @@ Every divergence from upstream is listed here.
   `VizGroup`, optional `Module.viz()`): modules describe their own live
   spatial influence so a generic viewer renders any physics without viewer
   changes. Primitives are `segment`, `rect`, and `field`, and each carries
-  the parameters its force law actually uses — signed `strength`, `range`,
-  and for fields the surface `offset`, `push` direction, `exponent`, `cap`,
-  and an optional per-cell `boost` grid — rather than a pre-baked picture
+  the parameters its force law actually uses — signed `strength`, a
+  `soften` length for the unbounded inverse-square bodies, and for fields
+  `range`, the surface `offset`, `push` direction, `exponent`, `cap`, and
+  an optional per-cell `boost` grid — rather than a pre-baked picture
   of the falloff. That lets a viewer evaluate the true force at any point
   instead of approximating it with its own constants, which is what the
   site's glow renderer does. Groups can declare `blend: 'max'` when their

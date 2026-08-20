@@ -72,8 +72,7 @@ const SLIDER_BY_KEY = new Map(MODE_SLIDERS.map((s) => [s.key, s]))
 
 const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'particleCount', label: 'particles', min: 500, max: 80000, step: 500 },
-  { key: 'dragStrength', label: 'drag power', min: 0, max: 200000, step: 1000 },
-  { key: 'dragRadius', label: 'drag radius', min: 100, max: 2000, step: 10 },
+  { key: 'dragStrength', label: 'drag power', min: 0, max: 400000, step: 5000 },
   { key: 'nameAttraction', label: 'name pull', min: 0, max: 50000, step: 500 },
   { key: 'nameRange', label: 'name pull radius', min: 10, max: 300, step: 5 },
   { key: 'nameSharpness', label: 'name sharpness', min: 0.2, max: 6, step: 0.05 },
@@ -83,7 +82,6 @@ const GLOBAL_SLIDERS: SliderDef<GlobalSettingKey>[] = [
   { key: 'textPaddingOuter', label: 'outer padding', min: 2, max: 150, step: 1 },
   { key: 'textSmoothing', label: 'blob smoothing', min: 1.05, max: 3, step: 0.05 },
   { key: 'separatorAttraction', label: 'separator pull', min: 0, max: 100000, step: 500 },
-  { key: 'separatorRange', label: 'separator radius', min: 10, max: 300, step: 5 },
   { key: 'cursorStrength', label: 'cursor pull', min: 0, max: 50000, step: 500 },
   { key: 'trailIntensity', label: 'trail intensity', min: 0, max: 1, step: 0.01 },
   { key: 'cursorFalloff', label: 'trail falloff', min: 0, max: 1, step: 0.01 },

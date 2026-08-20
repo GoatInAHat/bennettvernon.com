@@ -63,26 +63,32 @@ const ALPHA_QUANTUM = 0.5 / 255
 const CELL_BUDGET = 600_000
 const MIN_CELL_PX = 3
 
-/** World-space box outside which this primitive exerts nothing. Derived from
- * the force law's own reach, never authored. */
-function extent(p: VizPrimitive): [number, number, number, number] {
+/**
+ * World-space box outside which this primitive cannot raise a single alpha
+ * quantum, so painting past it is provably invisible rather than merely
+ * unlikely. The bounded field law stops at its range; the inverse-square law
+ * never reaches zero, so its edge is solved from the law itself:
+ *
+ *   k * peak * L^2 / (r^2 + L^2) = ALPHA_QUANTUM
+ *   r = L * sqrt(k * peak / ALPHA_QUANTUM - 1)
+ *
+ * `k` is maxOpacity / fmax. The only constant involved is the 8-bit quantum,
+ * which is a property of the pixel format, not of the physics.
+ */
+function extent(p: VizPrimitive, k: number): [number, number, number, number] {
+  if (p.kind === 'field') {
+    return [p.originX, p.originY, p.originX + p.cols * p.cell, p.originY + p.rows * p.cell]
+  }
+  const reach = p.soften * Math.sqrt(Math.max(0, (k * peakForce(p)) / ALPHA_QUANTUM - 1))
   if (p.kind === 'segment') {
     return [
-      Math.min(p.x1, p.x2) - p.range,
-      Math.min(p.y1, p.y2) - p.range,
-      Math.max(p.x1, p.x2) + p.range,
-      Math.max(p.y1, p.y2) + p.range,
+      Math.min(p.x1, p.x2) - reach,
+      Math.min(p.y1, p.y2) - reach,
+      Math.max(p.x1, p.x2) + reach,
+      Math.max(p.y1, p.y2) + reach,
     ]
   }
-  if (p.kind === 'rect') {
-    return [p.x - p.hw - p.range, p.y - p.hh - p.range, p.x + p.hw + p.range, p.y + p.hh + p.range]
-  }
-  return [
-    p.originX,
-    p.originY,
-    p.originX + p.cols * p.cell,
-    p.originY + p.rows * p.cell,
-  ]
+  return [p.x - p.hw - reach, p.y - p.hh - reach, p.x + p.hw + reach, p.y + p.hh + reach]
 }
 
 function drawGlow(
@@ -96,7 +102,8 @@ function drawGlow(
 ) {
   // A primitive whose own peak cannot reach one alpha quantum is invisible
   // at this anchor; skipping it is exact, not an approximation.
-  const live = g.primitives.filter((p) => (maxOpacity * peakForce(p)) / fmax >= ALPHA_QUANTUM)
+  const k = maxOpacity / fmax
+  const live = g.primitives.filter((p) => k * peakForce(p) >= ALPHA_QUANTUM)
   if (live.length === 0) return
 
   let x0 = Infinity
@@ -104,7 +111,7 @@ function drawGlow(
   let x1 = -Infinity
   let y1 = -Infinity
   for (const p of live) {
-    const e = extent(p)
+    const e = extent(p, k)
     if (e[0] < x0) x0 = e[0]
     if (e[1] < y0) y0 = e[1]
     if (e[2] > x1) x1 = e[2]
@@ -126,7 +133,6 @@ function drawGlow(
   const px = img.data
   const [cr, cg, cb] = vizRgb(g.key)
   const isMax = g.blend === 'max'
-  const k = maxOpacity / fmax
   const out: [number, number] = [0, 0]
 
   for (let r = 0; r < rows; r++) {
