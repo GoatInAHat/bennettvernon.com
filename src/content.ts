@@ -1,80 +1,122 @@
-export interface WorkItem {
+export interface ContentItem {
   title: string
   subtitle: string
-  date: string
-  description: string
+  date?: string
+  description: string,
+  links?: { label: string; href: string }[]
 }
 
 export const site = {
   name: 'Bennett Vernon',
   description: 'I like to build things, check out some of them here.',
-  links: [
-    { label: 'GitHub', href: 'https://github.com/GoatInAHat' },
-    { label: 'LinkedIn', href: 'https://www.linkedin.com/in/bennett-vernon-79b298249/' },
-    { label: 'X', href: 'https://x.com/bennetttvernon' },
+  socials: [
+    { label: 'github', href: 'https://github.com/GoatInAHat' },
+    { label: 'linkedin', href: 'https://www.linkedin.com/in/bennett-vernon-79b298249/' },
+    { label: 'x', href: 'https://x.com/bennetttvernon' },
+    { label: 'insta', href: 'https://www.instagram.com/bennetttvernon/' },
+    { label: 'email', href: 'mailto:bennett.vernon@gmail.com' }
   ],
 }
 
-export const projects: WorkItem[] = [
+export const current: ContentItem[] = [
   {
-    title: 'ACRE Robotics',
-    subtitle: 'Co-Founder, CTO',
-    date: 'Mar 2025',
+    title: 'Beer',
+    subtitle: 'experiment',
     description:
-      'Raised **$750k** and became the fastest team to build an autonomous tractor. Developed the robotic actuation stack for tractor autonomy and closed additional funding through demos.',
+      'Multi-agent system based on Stafford Beer\'s Viable System Model. Aims to create an autonomous system for self-organizing, self-regulating, and self-improving enterprises fractally composed of agents. Experiments with **RSI**, online RL, and applied **Agent Cybernetics**.',
   },
   {
-    title: 'SafetySpect, Inc',
-    subtitle: 'Engineering Intern',
-    date: 'Jan 2024',
+    title: 'Recursive Agent Framework',
+    subtitle: 'experiment',
     description:
-      'Developed electronics and software for the cooling system on a project to grow vegetables on the International Space Station. Invented a testing suite for proprietary LED drivers to maximize efficient product development for the USDA.',
+      'Precursor to Beer. Experimental framework for massively decomposed agentic processes using recursively-organized teams of agents for problem decomposition. Improved performance of **Llama-8b** to past that of **Llama-70b** and **Claude Sonnet 4.6** on **GSM8K**. Presented at **VURS 2026**.',
+  },
+  {
+    title: 'Engraphia',
+    subtitle: 'experiment',
+    description:
+      'A Training-Free Hirearchical Dynamic Memory for Transformer Inference. Aims to provide autoregressive transformer models of any modality that weren\'t built with long-term memory in mind with a memory system in the native language of their internal activation states. Works on direct KV cache manipulation, requires no additional tool-calling or fine-tuning.',
+    links: [
+      { label: 'whitepaper', href: 'https://pub-b447e42c9d6b4e50bac166262888ff2a.r2.dev/vernon/unpublished/pdf/Vernon%20-%202026%20-%20Engraphia.pdf' },
+    ]
   },
 ]
 
-export const research: WorkItem[] = []
-
-export const work: WorkItem[] = [
+export const projects: ContentItem[] = [
   {
-    title: 'Rolling Robots',
-    subtitle: 'Instructor',
-    date: 'Jun 2023',
+    title: 'ACRE Robotics',
+    subtitle: 'venture · cofounder, cto',
+    date: '2025',
     description:
-      'Taught 150+ elementary and middle school students programming and robotics concepts through hands-on lessons. Coached world-championship-level teams and helped run a summer program at a new location.',
+      'Fastest team to build a fully **autonomous tractor** (against other agtech startups: Bear Flag Robotics, Sabanto, etc.) Developed the robotic actuation stack, control systems, onboard AI. Raised **$750k** at **$5M**, assembled a team of 10 from Vanderbilt, MIT, Stanford, CMU, and Berkeley.',
+    links: [
+      { label: 'launch video', href: 'https://www.youtube.com/watch?v=54Q49bmkKLo' },
+      { label: 'website', href: 'https://www.acre-robotics.com' },
+      { label: 'linkedin', href: 'https://www.linkedin.com/company/acre-robotics/' },
+    ]
   },
   {
-    title: 'The Jim Henson Company',
-    subtitle: 'Software Engineering Intern',
-    date: 'Jun 2021',
+    title: 'Electric CRF150RB',
+    subtitle: 'project',
+    date: '2025',
     description:
-      'Engineered user-friendly software for puppeteers to adjust control settings of personalized animatronics controllers. Enabled performers to quickly fine tune parameters for characters in productions such as Netflix’s _The Dark Crystal_.',
+      'Converted a Honda CRF150RB to electric with a **E&C** built billet **QS138v3**, 76v 32ah battery, TruMoto Noisy Cricket controller, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30hp, 14 -> 190 nM. More coming soon with vehicle dynamics control systems.',
   },
   {
-    title: 'Aventre',
-    subtitle: 'Founder, Developer, UI/UX Designer',
-    date: 'Nov 2024',
+    title: 'Testing Equipment for Hyperspectral Camera LED-Driver Arrays',
+    subtitle: 'embedded systems & software engineer @ **SafetySpect**',
+    date: '2024',
     description:
-      'Rapid-prototyped a SaaS mapping campus startups, support programs, and available talent to accelerate student team formation. Streamlined venture building by surfacing talent matches and startup opportunities.',
+      'Created automated test equipment for proprietary LED drivers for hyperspectral camera arrays. Applications included food safety, healthcare, agriculture, military,  Customers included **NASA**, **NOAA**, **USDA**, and **U.S. Army**.',
+    links: [
+      { label: 'website', href: 'https://www.safetyspect.com' },
+      { label: 'linkedin', href: 'https://www.linkedin.com/company/safetyspect/' }
+    ]
   },
   {
-    title: 'CodeRace',
-    subtitle: 'Co-Founder, Developer, UI/UX Designer',
-    date: 'Sep 2024',
+    title: 'Cooling System for ISS Astrobotany',
+    subtitle: 'embedded systems & software engineer @ **SafetySpect**',
+    date: '2024',
     description:
-      'Designed and built a “multiplayer leetcode” platform for CS students to practice technical interview questions with friends. Added game elements like changing the language your opponent is working in.',
+      'Developed electronics and software for the cooling system on a project to grow vegetables on the **International Space Station** for **NASA**. Created control loop software, schematic for custom PCB, documented code and circuits for installation and maintenance by astronauts. No teammates, but mentored by an ex-soviet aerospace engineer who didn\'t speak english. Sent up by a Falcon 9 rocket and currently on the ISS.',
+    links: [
+      { label: 'website', href: 'https://www.safetyspect.com' },
+      { label: 'linkedin', href: 'https://www.linkedin.com/company/safetyspect/' }
+    ]
   },
   {
-    title: 'AP Practice Website',
-    subtitle: 'Founder, Developer, UI/UX Designer',
-    date: 'Mar 2023',
+    title: 'AP Exam Practice Site',
+    subtitle: 'project',
+    date: '2023',
     description:
-      'Created a website with 20,000 AP practice questions across 19 courses, filling a gap in study materials. Gamified studying with correct answer streaks and high scores for short 5–10 minute sessions.',
+      'Everywhere that offered AP exam practice problems sucked to use or was paywalled. Created a dead simple practice website with 20,000 AP practice questions across 19 courses. The code wasn\'t anything special, I wrote it in 2 days, but I thought I\'d include it here because it was the first time I had people I knew, friends of friends, and other students around my city getting value out of something I\'d made. I only told about 10 people about it then forgot it until I started getting messages from Buckley students asking if I was the Bennett who\'d made the practice site. From there it spread around high schools in LA, ~1k users total.',
+    links: [
+      { label: 'website', href: 'http://ap-practice.bennettvernon.com' },
+    ]
   },
   {
-    title: 'Discord Bot',
-    subtitle: 'Founder, Developer, UI/UX Designer',
-    date: 'Jun 2020',
+    title: 'Eugene Mk II & III',
+    subtitle: 'project',
+    date: '2022 & 2023',
     description:
-      'Created a Discord bot that gained over **1 million** users with a thriving online community and recurring revenue. Enabled users to share short-form videos/images and play games within the app.',
+      'VEX VRC Robots for **Tipping Point** and **Spin Up**. Local & regional wins & awards, World Championship quarterfinalist.'
+  },
+  {
+    title: 'Animatronics Control System',
+    subtitle: 'Software Engineering Intern @ **The Jim Henson Company**',
+    date: '2021',
+    description:
+      'Developed software for puppeteers to adjust control settings of personalized animatronics controllers. Enabled performers to quickly fine tune parameters for characters running Henson\'s CHI system.',
+    links: [
+      { label: 'website', href: 'https://www.henson.com' },
+      { label: 'linkedin', href: 'https://www.linkedin.com/company/the-jim-henson-company/' }
+    ]
+  },
+  {
+    title: 'AutoMemes Discord Bot',
+    subtitle: 'project',
+    date: '2020',
+    description:
+      'I\'ve been coding since 4th grade, but this was my first public project at 14 years old. **1 million** users in 1.5 years, my first bit of monthly revenue. Enabled users to share short-form videos/images and play games within Discord. Created the first serverless hosting architecture for Discord bots in **Rust** to handle the load.',
   },
 ]
