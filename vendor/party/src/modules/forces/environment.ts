@@ -298,9 +298,14 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
   }
 
   cpu(): CPUDescriptor<EnvironmentInputs> {
+    // Scratch reused across calls (the runtime caches this descriptor): the
+    // per-particle Vector allocations here ran for every particle of every
+    // frame on the CPU path, since this module is enabled in nearly every
+    // preset.
+    const gdir = new Vector(0, 0);
     return {
       apply: ({ particle, dt, input, view }) => {
-        const gdir = new Vector(input.dirX, input.dirY);
+        gdir.set(input.dirX, input.dirY);
 
         if (input.mode === 1 || input.mode === 2) {
           // Centre is the explicit one when set, else the camera position
@@ -319,11 +324,9 @@ export class Environment extends Module<"environment", EnvironmentInputs> {
         }
         const glen = gdir.magnitude();
         if (glen > 0) {
-          const gravityForce = gdir
-            .clone()
-            .divide(glen)
-            .multiply(input.gravityStrength);
-          particle.acceleration.add(gravityForce);
+          const scale = input.gravityStrength / glen;
+          particle.acceleration.x += gdir.x * scale;
+          particle.acceleration.y += gdir.y * scale;
         }
 
         // Inertia, friction, and damping are all velocity rates in 1/s:

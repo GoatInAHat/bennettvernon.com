@@ -16,6 +16,7 @@ import { buildProgram, type Program } from "./builders/program";
 import {
   Module,
   ModuleRole,
+  type WebGPUDescriptor,
   type WebGPURenderDescriptor,
   DataType,
 } from "../../module";
@@ -32,9 +33,23 @@ export class ModuleRegistry {
   private moduleArrayOffsets: Record<string, Record<string, number>> = {};
   private nameToIndex: Map<string, number> = new Map();
   private resources: GPUResources | null = null;
+  /** webgpu() descriptors are pure functions of the module class, but
+   * building one allocates the whole DSL closure tree -- and the render loop
+   * asks for them every frame. Built once per module instance. */
+  private descriptorCache: WeakMap<Module, WebGPUDescriptor> = new WeakMap();
 
   constructor(modules: readonly Module[]) {
     this.modules = modules;
+  }
+
+  /** Cached module.webgpu(); see descriptorCache. */
+  getDescriptor(module: Module): WebGPUDescriptor {
+    let d = this.descriptorCache.get(module);
+    if (!d) {
+      d = module.webgpu();
+      this.descriptorCache.set(module, d);
+    }
+    return d;
   }
 
   /**
@@ -122,7 +137,7 @@ export class ModuleRegistry {
   /** Filter enabled render module descriptors for the render pipeline. */
   getEnabledRenderDescriptors(): WebGPURenderDescriptor[] {
     return this.modules
-      .map((m) => m.webgpu())
+      .map((m) => this.getDescriptor(m))
       .filter(
         (_descriptor, idx): _descriptor is WebGPURenderDescriptor =>
           this.modules[idx].role === ModuleRole.Render &&
@@ -134,9 +149,9 @@ export class ModuleRegistry {
    *  Includes any module that provides render passes in its descriptor, regardless of role.
    */
   getEnabledRenderModules(): Module[] {
-    return this.modules.filter((module, idx) => {
+    return this.modules.filter((module) => {
       if (!module.isEnabled()) return false;
-      const descriptor = this.modules[idx].webgpu() as WebGPURenderDescriptor;
+      const descriptor = this.getDescriptor(module) as WebGPURenderDescriptor;
       return !!(
         descriptor &&
         descriptor.passes &&

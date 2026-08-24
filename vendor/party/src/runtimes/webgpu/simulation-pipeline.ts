@@ -13,10 +13,10 @@ import type { GPUResources } from "./gpu-resources";
 export class SimulationPipeline {
   private program: Program | null = null;
 
-  initialize(resources: GPUResources, program: Program): void {
+  async initialize(resources: GPUResources, program: Program): Promise<void> {
     this.program = program;
     resources.buildComputeLayouts(program);
-    resources.buildComputePipelines(program.code);
+    await resources.buildComputePipelines(program.code);
   }
 
   runPasses(

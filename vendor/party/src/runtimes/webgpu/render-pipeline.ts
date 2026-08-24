@@ -40,6 +40,48 @@ import {
  */
 
 export class RenderPipeline {
+  /** Per-module descriptor and array-input caches, and per-pass generated
+   * WGSL. All of these are pure functions of the module class (plus the
+   * clear color, which keys the WGSL entry), yet they were rebuilt --
+   * multi-KB template strings included -- on every pass of every frame:
+   * steady string garbage and hashing for a result that never changed. */
+  private descCache = new WeakMap<Module, WebGPURenderDescriptor>();
+  private arrayInputsCache = new WeakMap<Module, string[]>();
+  private wgslCache = new WeakMap<object, { key: string; wgsl: string }>();
+
+  private descriptorOf(module: Module): WebGPURenderDescriptor {
+    let d = this.descCache.get(module);
+    if (!d) {
+      d = module.webgpu() as WebGPURenderDescriptor;
+      this.descCache.set(module, d);
+    }
+    return d;
+  }
+
+  private arrayInputsOf(module: Module): string[] {
+    let a = this.arrayInputsCache.get(module);
+    if (!a) {
+      a = Object.entries(module.inputs)
+        .filter(([_, type]) => type === DataType.ARRAY)
+        .map(([key, _]) => key);
+      this.arrayInputsCache.set(module, a);
+    }
+    return a;
+  }
+
+  private wgslOf(
+    pass: object,
+    clearColor: { r: number; g: number; b: number; a: number },
+    build: () => string
+  ): string {
+    const key = `${clearColor.r},${clearColor.g},${clearColor.b},${clearColor.a}`;
+    const cached = this.wgslCache.get(pass);
+    if (cached && cached.key === key) return cached.wgsl;
+    const wgsl = build();
+    this.wgslCache.set(pass, { key, wgsl });
+    return wgsl;
+  }
+
   ensureTargets(resources: GPUResources, width: number, height: number): void {
     resources.ensureSceneTextures(width, height);
   }
@@ -99,7 +141,7 @@ export class RenderPipeline {
 
     for (let i = 0; i < modules.length; i++) {
       const module = modules[i];
-      const descriptor = module.webgpu() as WebGPURenderDescriptor;
+      const descriptor = this.descriptorOf(module);
       if (!descriptor.passes || descriptor.passes.length === 0) continue;
       for (const pass of descriptor.passes) {
         // Resolve the uniform layout for this module
@@ -218,19 +260,19 @@ export class RenderPipeline {
     particleCount: number,
     clearColor: { r: number; g: number; b: number; a: number }
   ): void {
-    // Generate WGSL for the fullscreen pass
-    const wgsl = buildFullscreenPassWGSL(
-      pass as FullscreenRenderPass,
-      module.name,
-      layout,
-      module.inputs,
-      clearColor
+    // Generate WGSL for the fullscreen pass (cached per pass per clear color)
+    const wgsl = this.wgslOf(pass, clearColor, () =>
+      buildFullscreenPassWGSL(
+        pass as FullscreenRenderPass,
+        module.name,
+        layout,
+        module.inputs,
+        clearColor
+      )
     );
 
     // Get array inputs for this module
-    const arrayInputs = Object.entries(module.inputs)
-      .filter(([_, type]) => type === DataType.ARRAY)
-      .map(([key, _]) => key);
+    const arrayInputs = this.arrayInputsOf(module);
 
     // Check if this is a non-instanced pass that needs fragment particle access
     const fragmentParticleAccess = pass.instanced === false;
@@ -301,19 +343,19 @@ export class RenderPipeline {
     size: { width: number; height: number },
     clearColor: { r: number; g: number; b: number; a: number }
   ): void {
-    // Generate WGSL for the compute pass
-    const wgsl = buildComputeImagePassWGSL(
-      pass as ComputeRenderPass,
-      module.name,
-      layout,
-      module.inputs,
-      clearColor
+    // Generate WGSL for the compute pass (cached per pass per clear color)
+    const wgsl = this.wgslOf(pass, clearColor, () =>
+      buildComputeImagePassWGSL(
+        pass as ComputeRenderPass,
+        module.name,
+        layout,
+        module.inputs,
+        clearColor
+      )
     );
 
     // Get array inputs for this module
-    const arrayInputs = Object.entries(module.inputs)
-      .filter(([_, type]) => type === DataType.ARRAY)
-      .map(([key, _]) => key);
+    const arrayInputs = this.arrayInputsOf(module);
 
     // Acquire or create a cached compute pipeline
     const pipeline = resources.getOrCreateImageComputePipeline(wgsl);
