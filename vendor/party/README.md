@@ -133,6 +133,8 @@ Every divergence from upstream is listed here.
   rgba() style string. The 2D context is acquired with
   `willReadFrequently: true`, so per-particle sensor `getImageData` reads
   are memory copies instead of synchronous GPU readback stalls.
+  `modules/forces/environment.ts` likewise reuses one scratch Vector in
+  its cpu() apply instead of allocating two per particle per frame.
 - `modules/forces/fluids.ts`, `collisions.ts`, `sensors.ts` — each gains a
   `strength` master-gate uniform (default 1) with an exact no-op at 0, so
   hosts can fade whole modules in and out continuously. Fluids needs it
