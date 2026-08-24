@@ -504,7 +504,15 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
     const data = state.data ?? []
     const soften = (state.soften as number | undefined) ?? 1
     for (let base = 0; base + STRIDE <= data.length; base += STRIDE) {
-      const [kind, x, y, hw, hh, strength] = data.slice(base, base + STRIDE)
+      // Indexed, not slice-destructured: this runs on every debug repaint,
+      // once per body plus once per trail span, and the throwaway arrays
+      // were pure garbage.
+      const kind = data[base]
+      const x = data[base + 1]
+      const y = data[base + 2]
+      const hw = data[base + 3]
+      const hh = data[base + 4]
+      const strength = data[base + 5]
       if (strength === 0) continue
       const dir = strength < 0 ? 'repel' : 'attract'
       if (kind > 0.5) {
@@ -533,7 +541,12 @@ export class Effectors extends Module<'effectors', EffectorsInputs> {
 
     const dyn = state.dynamic ?? []
     for (let base = 0; base + NODE_STRIDE <= dyn.length; base += NODE_STRIDE) {
-      const [x1, y1, x2, y2, s1, s2] = dyn.slice(base, base + NODE_STRIDE)
+      const x1 = dyn[base]
+      const y1 = dyn[base + 1]
+      const x2 = dyn[base + 2]
+      const y2 = dyn[base + 3]
+      const s1 = dyn[base + 4]
+      const s2 = dyn[base + 5]
       if (s1 === 0 && s2 === 0) continue
       // One group, not one per sign: the physics takes a single strongest
       // span across the whole curve, so a pull span and a push span never

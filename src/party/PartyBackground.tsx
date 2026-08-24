@@ -344,15 +344,17 @@ const easeInOutCubic = (p: number) =>
 export function PartyBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const debugRef = useRef<HTMLCanvasElement>(null)
+  const dynDebugRef = useRef<HTMLCanvasElement>(null)
   const nameTextRef = useRef<HTMLCanvasElement>(null)
   const holderRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
     const debugCanvas = debugRef.current
+    const dynDebugCanvas = dynDebugRef.current
     const nameTextCanvas = nameTextRef.current
     const holder = holderRef.current
-    if (!canvas || !debugCanvas || !holder) return
+    if (!canvas || !debugCanvas || !dynDebugCanvas || !holder) return
 
     let disposed = false
     let engine: Engine | null = null
@@ -832,29 +834,58 @@ export function PartyBackground() {
       drawViz(ctx, statics, zoom, EFFECTOR_STRENGTH, globals.debugOpacity)
     }
 
+    /** Clears an overlay regardless of whatever transform its context holds. */
+    const clearOverlay = (c: HTMLCanvasElement) => {
+      const ctx = c.getContext('2d')
+      if (!ctx) return
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.clearRect(0, 0, c.width, c.height)
+    }
+
+    // The overlay is two stacked canvases so each layer repaints only when
+    // its own inputs change. Moving the mouse redraws only the trail layer;
+    // before the split every one of those repaints also cleared the full
+    // native-resolution canvas and blitted both full-page caches back onto
+    // it -- most of a repaint spent reproducing pixels that had not changed.
     const drawDebug = () => {
-      const dctx = debugCanvas.getContext('2d')
-      if (!dctx) return
-      dctx.setTransform(1, 0, 0, 1, 0, 0)
-      dctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
-      if (!bridge.debugOn || !name) return
-      if (voroCacheDirty) renderVoroCache()
-      // Collect once and partition: every module's viz() runs on this call,
-      // so collecting again for the static cache rebuilds and discards the
-      // same groups a second time on the frames that need it least.
-      const groups = collectViz()
-      // The opacity scale is a fixed reference, not the strongest force in
-      // the system: `EFFECTOR_STRENGTH` is what every force on this page is
-      // set to by default, so a body at its default strength renders at half
-      // of `debug opacity` and everything else is read against that. Anchored
-      // to the live maximum instead, the cursor -- the strongest thing on the
-      // page while it moves -- dimmed every other glow for as long as it
-      // moved, and the static cache had to be rescaled to match.
-      if (staticVizDirty) renderStaticViz(groups.filter((g) => !g.dynamic))
-      if (voroCache) dctx.drawImage(voroCache, 0, 0)
-      if (staticVizCache) dctx.drawImage(staticVizCache, 0, 0)
-      dctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
-      drawViz(dctx, groups.filter((g) => g.dynamic), zoom, EFFECTOR_STRENGTH, globals.debugOpacity)
+      if (!bridge.debugOn || !name) {
+        clearOverlay(debugCanvas)
+        clearOverlay(dynDebugCanvas)
+        return
+      }
+      if (voroCacheDirty || staticVizDirty) {
+        if (voroCacheDirty) renderVoroCache()
+        // The opacity scale is a fixed reference, not the strongest force in
+        // the system: `EFFECTOR_STRENGTH` is what every force on this page is
+        // set to by default, so a body at its default strength renders at half
+        // of `debug opacity` and everything else is read against that. Anchored
+        // to the live maximum instead, the cursor -- the strongest thing on the
+        // page while it moves -- dimmed every other glow for as long as it
+        // moved, and the static cache had to be rescaled to match.
+        if (staticVizDirty) renderStaticViz(collectViz().filter((g) => !g.dynamic))
+        const sctx = debugCanvas.getContext('2d')
+        if (sctx) {
+          sctx.setTransform(1, 0, 0, 1, 0, 0)
+          sctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height)
+          if (voroCache) sctx.drawImage(voroCache, 0, 0)
+          if (staticVizCache) sctx.drawImage(staticVizCache, 0, 0)
+        }
+      }
+      if (debugPending) {
+        debugPending = false
+        const dctx = dynDebugCanvas.getContext('2d')
+        if (!dctx) return
+        dctx.setTransform(1, 0, 0, 1, 0, 0)
+        dctx.clearRect(0, 0, dynDebugCanvas.width, dynDebugCanvas.height)
+        dctx.setTransform(debugDpr, 0, 0, debugDpr, 0, 0)
+        drawViz(
+          dctx,
+          collectViz().filter((g) => g.dynamic),
+          zoom,
+          EFFECTOR_STRENGTH,
+          globals.debugOpacity,
+        )
+      }
     }
 
     const syncEffectors = () => {
@@ -1369,7 +1400,7 @@ export function PartyBackground() {
         (debugPending || staticVizDirty || voroCacheDirty) &&
         now >= debugNextAt
       ) {
-        debugPending = false
+        // drawDebug clears whichever of the three dirty flags it services.
         const t0 = performance.now()
         drawDebug()
         const cost = performance.now() - t0
@@ -1416,7 +1447,7 @@ export function PartyBackground() {
       const h = holder.clientHeight
       if (w < 1 || h < 1) return
       const scale = Math.min(1, MAX_CANVAS_HEIGHT / h)
-      for (const c of [canvas, debugCanvas]) {
+      for (const c of [canvas, debugCanvas, dynDebugCanvas]) {
         c.style.width = `${w}px`
         c.style.height = `${h}px`
       }
@@ -2474,13 +2505,14 @@ export function PartyBackground() {
         // needs the multi-MB distance field rebuilt.
         pushNameParams()
         staticVizDirty = true
-        if (bridge.debugOn) drawDebug()
+        // The dirty flag is enough: the frame loop repaints under the same
+        // budget as everything else, instead of once per slider event.
       } else if (key === 'nameBaseOpacity' || key === 'nameDensityOpacity') {
         renderNameOpacity()
       } else if (key === 'debugOpacity') {
-        // Debug-only: rescales the glow, touches no physics.
+        // Debug-only: rescales the glow, touches no physics. Repaints on the
+        // frame loop's budget like every other overlay input.
         staticVizDirty = true
-        if (bridge.debugOn) drawDebug()
       } else if (key === 'particleCount') {
         particleCountTouched = true
         setMaxParticlesAnimated(
@@ -2535,6 +2567,10 @@ export function PartyBackground() {
       // picture would stay on the canvas forever. Called here it clears and
       // returns.
       if (!on) drawDebug()
+      // Turning ON erases nothing -- but the erase above cleared both layers
+      // when this session last turned OFF, and a quiet field would otherwise
+      // leave the trail layer blank until the next pointer event.
+      else debugPending = true
       scheduleSync()
     }
     bridge.getTelemetry = () => {
@@ -2936,6 +2972,7 @@ export function PartyBackground() {
       <canvas ref={canvasRef} className="party-canvas" />
       <canvas ref={nameTextRef} className="party-nametext" />
       <canvas ref={debugRef} className="party-debug" />
+      <canvas ref={dynDebugRef} className="party-debug" />
     </div>
   )
 }
