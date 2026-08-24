@@ -137,7 +137,10 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
   // inverse-square tail, not a padded shell.
   textStandoff: 4,
   textSmoothing: 1.8,
-  separatorAttraction: EFFECTOR_STRENGTH,
+  // Below the shared reference on purpose: at full EFFECTOR_STRENGTH the
+  // dividers overpowered nearby text before their own load falloff had a
+  // chance to bite.
+  separatorAttraction: 7_000,
   // The load at which a section divider has no pull left. Real gravity gets
   // STRONGER as mass gathers; this does the opposite, so a divider that has
   // already collected a crowd stops calling for more and the particles it
