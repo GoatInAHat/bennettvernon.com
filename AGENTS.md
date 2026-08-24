@@ -13,7 +13,7 @@ extended with pinned-particle typography and DOM-anchored force effectors.
 |---|---|
 | `src/` | Application code. `src/party/` holds the engine wiring, demo presets, and the custom multi-effector force module. |
 | `vendor/party/` | Vendored fork of the `@cazala/party` engine core; imports keep the upstream package name via aliases. Every divergence from upstream is listed in `vendor/party/README.md`. Kept in upstream code style (exempt from repo ESLint and the trailing-whitespace check, still typechecked). |
-| `public/` | Static files served verbatim; currently the Pages `CNAME` and the favicon. |
+| `public/` | Static files served verbatim; the Pages `CNAME` and the favicon set (`favicon.svg` is the source, the `.ico`/PNGs are rendered from it). |
 | `.agents/` | Canonical shared skills, MCP definitions, and adapter scripts. |
 | `.claude/`, `.cursor/`, `.codex/`, `.gemini/`, `.github/`, `.mcp.json` | Agent adapters. Generated files must not be edited directly. |
 | `.devcontainer/` | Container definition for Codespaces and local devcontainers. |
