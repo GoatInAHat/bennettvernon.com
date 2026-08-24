@@ -117,6 +117,6 @@ export const projects: ContentItem[] = [
     subtitle: 'project',
     date: '2020',
     description:
-      'I\'ve been coding since 4th grade, but this was my first public project at 14 years old. **1 million** users in 1.5 years, my first bit of monthly revenue. Enabled users to share short-form videos/images and play games within Discord. Created the first serverless hosting architecture for Discord bots in **Rust** to handle the load.',
+      'I\'ve been coding since 4th grade, but this was my first public project at 14 years old. **1 million** users in 1.5 years, my first little bit of monthly revenue. Enabled users to share short-form videos/images and play games within Discord. Created the first serverless hosting architecture for Discord bots in **Rust** to handle the load.',
   },
 ]
