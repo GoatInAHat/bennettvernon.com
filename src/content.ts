@@ -2,7 +2,7 @@ export interface ContentItem {
   title: string
   subtitle: string
   date?: string
-  description: string,
+  description: string
   links?: { label: string; href: string }[]
 }
 
@@ -35,7 +35,7 @@ export const current: ContentItem[] = [
     title: 'Engraphia',
     subtitle: 'experiment',
     description:
-      'A Training-Free Hirearchical Dynamic Memory for Transformer Inference. Aims to provide autoregressive transformer models of any modality that weren\'t built with long-term memory in mind with a memory system in the native language of their internal activation states. Works on direct KV cache manipulation, requires no additional tool-calling or fine-tuning.',
+      'A Training-Free Hierarchical Dynamic Memory for Transformer Inference. Aims to provide autoregressive transformer models of any modality that weren\'t built with long-term memory in mind with a memory system in the native language of their internal activation states. Works on direct KV cache manipulation, requires no additional tool-calling or fine-tuning.',
     links: [
       { label: 'whitepaper', href: 'https://pub-b447e42c9d6b4e50bac166262888ff2a.r2.dev/vernon/unpublished/pdf/Vernon%20-%202026%20-%20Engraphia.pdf' },
     ]
@@ -48,7 +48,7 @@ export const projects: ContentItem[] = [
     subtitle: 'venture · cofounder, cto',
     date: '2025',
     description:
-      'Fastest team to build a fully **autonomous tractor** (against other agtech startups: Bear Flag Robotics, Sabanto, etc.) Developed the robotic actuation stack, control systems, onboard AI. Raised **$750k** at **$5M**, assembled a team of 10 from Vanderbilt, MIT, Stanford, CMU, and Berkeley.',
+      'Fastest team to build a fully **autonomous tractor** (against other agtech startups: Bear Flag Robotics, Sabanto, etc.). Developed the robotic actuation stack, control systems, onboard AI. Raised **$750k** at **$5M**, assembled a team of 10 from Vanderbilt, MIT, Stanford, CMU, and Berkeley.',
     links: [
       { label: 'launch video', href: 'https://www.youtube.com/watch?v=54Q49bmkKLo' },
       { label: 'website', href: 'https://www.acre-robotics.com' },
@@ -60,14 +60,14 @@ export const projects: ContentItem[] = [
     subtitle: 'project',
     date: '2025',
     description:
-      'Converted a Honda CRF150RB to electric with a **E&C** built billet **QS138v3**, 76v 32ah battery, TruMoto Noisy Cricket controller, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30hp, 14 -> 190 nM. More coming soon with vehicle dynamics control systems.',
+      'Converted a Honda CRF150RB to electric with an **E&C** built billet **QS138v3**, 76v 32ah battery, TruMoto Noisy Cricket controller, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30 hp, 14 -> 190 Nm. More coming soon with vehicle dynamics control systems.',
   },
   {
     title: 'Testing Equipment for Hyperspectral Camera LED-Driver Arrays',
     subtitle: 'embedded systems & software engineer @ **SafetySpect**',
     date: '2024',
     description:
-      'Created automated test equipment for proprietary LED drivers for hyperspectral camera arrays. Applications included food safety, healthcare, agriculture, military,  Customers included **NASA**, **NOAA**, **USDA**, and **U.S. Army**.',
+      'Created automated test equipment for proprietary LED drivers for hyperspectral camera arrays. Applications included food safety, healthcare, agriculture, and military. Customers included **NASA**, **NOAA**, **USDA**, and **U.S. Army**.',
     links: [
       { label: 'website', href: 'https://www.safetyspect.com' },
       { label: 'linkedin', href: 'https://www.linkedin.com/company/safetyspect/' }
@@ -78,7 +78,7 @@ export const projects: ContentItem[] = [
     subtitle: 'embedded systems & software engineer @ **SafetySpect**',
     date: '2024',
     description:
-      'Developed electronics and software for the cooling system on a project to grow vegetables on the **International Space Station** for **NASA**. Created control loop software, schematic for custom PCB, documented code and circuits for installation and maintenance by astronauts. No teammates, but mentored by an ex-soviet aerospace engineer who didn\'t speak english. Sent up by a Falcon 9 rocket and currently on the ISS.',
+      'Developed electronics and software for the cooling system on a project to grow vegetables on the **International Space Station** for **NASA**. Created control loop software, schematic for custom PCB, documented code and circuits for installation and maintenance by astronauts. No teammates, but mentored by an ex-Soviet aerospace engineer who didn\'t speak English. Sent up by a Falcon 9 rocket and currently on the ISS.',
     links: [
       { label: 'website', href: 'https://www.safetyspect.com' },
       { label: 'linkedin', href: 'https://www.linkedin.com/company/safetyspect/' }
@@ -89,7 +89,7 @@ export const projects: ContentItem[] = [
     subtitle: 'project',
     date: '2023',
     description:
-      'Everywhere that offered AP exam practice problems sucked to use or was paywalled. Created a dead simple practice website with 20,000 AP practice questions across 19 courses. The code wasn\'t anything special, I wrote it in 2 days, but I thought I\'d include it here because it was the first time I had people I knew, friends of friends, and other students around my city getting value out of something I\'d made. I only told about 10 people about it then forgot it until I started getting messages from Buckley students asking if I was the Bennett who\'d made the practice site. From there it spread around high schools in LA, ~1k users total.',
+      'Everywhere that offered AP exam practice problems was paywalled or forced you to sit through entire practice exams, so I made a simple practice site with **20,000** AP practice questions across **19** courses. I wrote it in 2 days, nothing special, but I included it here because it was the first time I\'d had a lot of people I knew using something I made. I told probably 10 people about it then forgot it until I started getting messages from Buckley students, and from there it spread around high schools in LA, **~1k users** total.',
     links: [
       { label: 'website', href: 'http://ap-practice.bennettvernon.com' },
     ]
@@ -103,10 +103,10 @@ export const projects: ContentItem[] = [
   },
   {
     title: 'Animatronics Control System',
-    subtitle: 'Software Engineering Intern @ **The Jim Henson Company**',
+    subtitle: 'software engineering intern @ **The Jim Henson Company**',
     date: '2021',
     description:
-      'Developed software for puppeteers to adjust control settings of personalized animatronics controllers. Enabled performers to quickly fine tune parameters for characters running Henson\'s CHI system.',
+      'Developed software for puppeteers to adjust control settings of personalized animatronics controllers. Enabled performers to quickly fine-tune parameters for characters running Henson\'s CHI system.',
     links: [
       { label: 'website', href: 'https://www.henson.com' },
       { label: 'linkedin', href: 'https://www.linkedin.com/company/the-jim-henson-company/' }
