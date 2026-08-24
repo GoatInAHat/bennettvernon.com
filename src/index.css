@@ -116,10 +116,10 @@ a:visited {
   left: 0;
 }
 
-/* The name lives at the top left of the first viewport; the gap before the
-   content is 1.5x the name's 44px top margin. */
+/* The name lives at the top left of the first viewport; content starts 44px
+   below the name, matching the top offset. */
 .hero {
-  height: calc(var(--name-bottom, 38vh) + 66px);
+  height: calc(var(--name-bottom, 38vh) + 44px);
 }
 
 .container {
@@ -132,7 +132,7 @@ a:visited {
 
 /* Bold section title over a full-width separator line. */
 .section-sep {
-  margin: 0 0 32px;
+  margin: 32px 0 32px;
 }
 
 .section-sep h2 {
@@ -151,7 +151,7 @@ a:visited {
 
 /* Content blocks: the particles avoid the text lines inside these. */
 .pblock {
-  padding: 18px 22px;
+  padding: 0px 22px;
   margin: 0 0 32px;
   border-radius: 12px;
 }
@@ -647,7 +647,7 @@ a:visited {
 
 @media (max-width: 768px) {
   .hero {
-    height: calc(var(--name-bottom, 30vh) + 132px);
+    height: calc(var(--name-bottom, 30vh) + 44px);
   }
 
   /* On mobile the mode selector sits right below the name, in the flow of
