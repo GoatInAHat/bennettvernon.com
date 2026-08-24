@@ -290,28 +290,6 @@ function sampleName(pageW: number, viewportH: number, font: string, weight: numb
   return { points, bottom: topY + lineGap + size * 1.1, width, step, size, topY, lineGap }
 }
 
-interface CharBall {
-  x: number
-  y: number
-  /** Glyph radius in page px (before smoothing/padding). */
-  r: number
-}
-
-/** Page-space balls, one per rendered glitchable character span. */
-function collectCharBalls(): CharBall[] {
-  const balls: CharBall[] = []
-  for (const el of document.querySelectorAll<HTMLElement>('main .g')) {
-    const r = el.getBoundingClientRect()
-    if (r.width < 1 || r.height < 1) continue
-    balls.push({
-      x: r.left + window.scrollX + r.width / 2,
-      y: r.top + window.scrollY + r.height / 2,
-      r: Math.max(r.width, r.height * 0.72) / 2,
-    })
-  }
-  return balls
-}
-
 /** Felzenszwalb 1D squared distance transform, applied in place. */
 function edt1d(f: Float32Array, n: number, out: Float32Array) {
   const v = new Int32Array(n)
@@ -408,7 +386,6 @@ export function PartyBackground() {
     /** Oscillators of the settled demo, evaluated host-side every tick. */
     let activeOsc: OscConfig[] = []
     let name: NameLayout | null = null
-    let charBalls: CharBall[] = []
     /** Signed distances (page px) of the name glyphs, for the pull field. */
     let nameField: { minX: number; minY: number; cell: number; cols: number; rows: number; d: Float32Array } | null = null
     let nameMask: HTMLCanvasElement | null = null
@@ -2276,19 +2253,15 @@ export function PartyBackground() {
     }
 
     const measureContent = () => {
-      charBalls = collectCharBalls()
       buildTextField()
       staticVizDirty = true
     }
 
-    // Like the reference page's spawn-around-the-circle: particles are born
-    // scattered around the name and around the content text, with the same
-    // random launch speed.
-    const spawnOne = (i: number, anchors: { x: number; y: number }[]): IParticle => {
-      const anchor =
-        anchors.length > 0 && i % 2 === 0
-          ? anchors[Math.floor(Math.random() * anchors.length)]
-          : name!.points[Math.floor(Math.random() * name!.points.length)]
+    // Particles are born scattered around the name -- the one region every
+    // subsystem agrees particles belong -- with the reference page's random
+    // launch speed.
+    const spawnOne = (): IParticle => {
+      const anchor = name!.points[Math.floor(Math.random() * name!.points.length)]
       const spread = SPAWN_SPREAD_PX * Math.sqrt(Math.random())
       const angle = Math.random() * Math.PI * 2
       const { x, y } = pageToWorld(
@@ -2307,10 +2280,9 @@ export function PartyBackground() {
 
     const spawnAll = () => {
       if (!engine || !name || name.points.length === 0) return
-      const anchors = charBalls.filter((_, i) => i % 3 === 0)
       const count = PARTICLE_POOL(webgpu)
       const particles: IParticle[] = []
-      for (let i = 0; i < count; i++) particles.push(spawnOne(i, anchors))
+      for (let i = 0; i < count; i++) particles.push(spawnOne())
       engine.setParticles(particles)
       // Every index now refers to a different particle, so both ledgers are
       // about particles that no longer exist.
@@ -2340,9 +2312,8 @@ export function PartyBackground() {
         // spawned pool.
         const revealTo = Math.min(cap, PARTICLE_POOL(webgpu))
         if (revealTo > prevCap && name && name.points.length > 0) {
-          const anchors = charBalls.filter((_, i) => i % 3 === 0)
           const fresh: IParticle[] = []
-          for (let i = prevCap; i < revealTo; i++) fresh.push(spawnOne(i, anchors))
+          for (let i = prevCap; i < revealTo; i++) fresh.push(spawnOne())
           engine.setParticleRange(prevCap, fresh)
         }
         prevCap = cap
