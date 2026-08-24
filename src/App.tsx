@@ -4,7 +4,7 @@ import { bridge } from './party/bridge'
 import { DEMO_PRESETS } from './party/presets'
 import { useEffectorTarget } from './party/targets'
 import { SettingsPanel } from './SettingsPanel'
-import { site, projects, research, work, type WorkItem } from './content'
+import { site, current, projects, type ContentItem } from './content'
 
 /** Wraps every non-space character in a glitchable span. */
 function Chars({ text }: { text: string }) {
@@ -21,14 +21,29 @@ function Chars({ text }: { text: string }) {
   )
 }
 
-/** The site descriptions only use **bold** and _italic_. */
+/** The site descriptions use **bold**, _italic_, and [text](url). Emphasis can
+ * wrap a link, so those branches recurse rather than rendering their contents
+ * as plain characters. Links are matched first so a URL containing an
+ * underscore can't be split as italics. */
 function Rich({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*|_[^_]+_)/g)
+  const parts = text.split(/(\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|_[^_]+_)/g)
   return (
     <>
       {parts.map((part, i) => {
-        if (part.startsWith('**')) return <strong key={i}><Chars text={part.slice(2, -2)} /></strong>
-        if (part.startsWith('_')) return <em key={i}><Chars text={part.slice(1, -1)} /></em>
+        // split() with a single capture group puts the delimiters at odd
+        // indices; even ones are plain text, which may legitimately begin with
+        // a stray marker that must not be sliced off as if it were one.
+        if (i % 2 === 0) return <Chars key={i} text={part} />
+        if (part.startsWith('**')) return <strong key={i}><Rich text={part.slice(2, -2)} /></strong>
+        if (part.startsWith('_')) return <em key={i}><Rich text={part.slice(1, -1)} /></em>
+        const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part)
+        if (link) {
+          return (
+            <a key={i} href={link[2]} target="_blank" rel="noreferrer">
+              <Chars text={link[1]} />
+            </a>
+          )
+        }
         return <Chars key={i} text={part} />
       })}
     </>
@@ -337,36 +352,93 @@ function SectionSeparator({ title }: { title: string }) {
   )
 }
 
-function WorkItemBlock({ item }: { item: WorkItem }) {
+/** A dot-separated row of external links. */
+function LinkRow({
+  links,
+  className,
+}: {
+  links: { label: string; href: string }[]
+  className: string
+}) {
+  return (
+    <div className={className}>
+      {links.map((link, index) => (
+        <span key={link.href}>
+          <a href={link.href} target="_blank" rel="noreferrer">
+            <Chars text={link.label} />
+          </a>
+          {index < links.length - 1 ? (
+            <span className="dot" aria-hidden="true">
+              {' '}
+              <span className="g">·</span>
+            </span>
+          ) : null}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function ContentItemBlock({ item, section }: { item: ContentItem; section: string }) {
+  // The year separator above already states the year, so only print a date
+  // that says something more than its section does — a span like '2022 & 2023'.
+  const date = item.date && item.date !== section ? item.date : null
   return (
     <Block>
       <article>
         <div className="work-head">
           <div>
             <div className="meta subtitle">
-              <Chars text={item.subtitle} />
+              <Rich text={item.subtitle} />
             </div>
             <h3>
               <Chars text={item.title} />
             </h3>
           </div>
-          <div className="meta">
-            <Chars text={item.date} />
-          </div>
+          {date ? (
+            <div className="meta">
+              <Chars text={date} />
+            </div>
+          ) : null}
         </div>
         <p className="md-muted">
           <Rich text={item.description} />
         </p>
+        {item.links?.length ? <LinkRow links={item.links} className="item-links" /> : null}
       </article>
     </Block>
   )
 }
 
-const SECTIONS: { title: string; items: WorkItem[] }[] = [
-  { title: 'Projects', items: projects },
-  { title: 'Research', items: research },
-  { title: 'Work', items: work },
-]
+const UNDATED = 'undated'
+
+/** An item files under the latest year its date names, so a span like
+ * '2022 & 2023' sorts and groups as 2023 instead of opening a section of
+ * its own next to the plain 2023 one. */
+function yearOf(item: ContentItem): string {
+  const years = item.date?.match(/\d{4}/g)
+  return years?.length ? String(Math.max(...years.map(Number))) : UNDATED
+}
+
+/** Newest year first. Anything with no parseable year sinks to the bottom
+ * rather than sorting as a string above the real years. */
+function yearSections(items: ContentItem[]): { title: string; items: ContentItem[] }[] {
+  const groups = new Map<string, ContentItem[]>()
+  for (const item of items) {
+    const year = yearOf(item)
+    const bucket = groups.get(year)
+    if (bucket) bucket.push(item)
+    else groups.set(year, [item])
+  }
+  const rank = (title: string) => (title === UNDATED ? -Infinity : Number(title))
+  return [...groups]
+    .map(([title, sectionItems]) => ({ title, items: sectionItems }))
+    .sort((a, b) => rank(b.title) - rank(a.title))
+}
+
+const SECTIONS = [{ title: 'current', items: current }, ...yearSections(projects)].filter(
+  (s) => s.items.length > 0,
+)
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -402,28 +474,14 @@ export default function App() {
           <p className="lede">
             <Chars text={site.description} />
           </p>
-          <div className="hero-links">
-            {site.links.map((link, index) => (
-              <span key={link.href}>
-                <a href={link.href} target="_blank" rel="noreferrer">
-                  <Chars text={link.label} />
-                </a>
-                {index < site.links.length - 1 ? (
-                  <span className="dot" aria-hidden="true">
-                    {' '}
-                    <span className="g">·</span>
-                  </span>
-                ) : null}
-              </span>
-            ))}
-          </div>
+          <LinkRow links={site.socials} className="hero-links" />
         </Block>
 
-        {SECTIONS.filter((s) => s.items.length > 0).map((s) => (
+        {SECTIONS.map((s) => (
           <section key={s.title}>
             <SectionSeparator title={s.title} />
             {s.items.map((item) => (
-              <WorkItemBlock key={item.title} item={item} />
+              <ContentItemBlock key={item.title} item={item} section={s.title} />
             ))}
           </section>
         ))}
