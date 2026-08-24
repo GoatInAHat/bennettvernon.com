@@ -63,7 +63,7 @@ export const projects: ContentItem[] = [
       'Converted a Honda CRF150RB to electric with an **E&C** built billet **QS138v3**, 76v 32ah battery, TruMoto Noisy Cricket controller, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30 hp, 14 -> 190 Nm. More coming soon with vehicle dynamics control systems.',
   },
   {
-    title: 'Testing Equipment for Hyperspectral Camera LED-Driver Arrays',
+    title: 'Testing Equipment for Hyperspectral Camera LED Driver Arrays',
     subtitle: 'embedded systems & software engineer @ **SafetySpect**',
     date: '2024',
     description:
@@ -74,11 +74,11 @@ export const projects: ContentItem[] = [
     ]
   },
   {
-    title: 'Cooling System for ISS Astrobotany',
+    title: 'Cooling System for ISS Astrobotany Lighting',
     subtitle: 'embedded systems & software engineer @ **SafetySpect**',
     date: '2024',
     description:
-      'Developed electronics and software for the cooling system on a project to grow vegetables on the **International Space Station** for **NASA**. Created control loop software, schematic for custom PCB, documented code and circuits for installation and maintenance by astronauts. No teammates, but mentored by an ex-Soviet aerospace engineer who didn\'t speak English. Sent up by a Falcon 9 rocket and currently on the ISS.',
+      'Developed electronics and software for the light-bar cooling system on a project to grow vegetables on the **International Space Station** for **NASA**. Created control loop software, schematic for custom PCB, documented code and circuits for installation and maintenance by astronauts. No teammates, but mentored by an ex-Soviet aerospace engineer who didn\'t speak English. Sent up by a Falcon 9 rocket and currently on the ISS.',
     links: [
       { label: 'website', href: 'https://www.safetyspect.com' },
       { label: 'linkedin', href: 'https://www.linkedin.com/company/safetyspect/' }
