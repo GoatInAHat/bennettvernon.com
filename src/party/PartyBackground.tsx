@@ -442,6 +442,10 @@ export function PartyBackground() {
       return Math.min(dpr, Math.sqrt(64_000_000 / Math.max(1, w * h)))
     }
     let densityStatus = 'idle'
+    /** The array-valued stats below are read only by the dev probe, but they
+     * were being sliced fresh on every census round -- a steady per-frame
+     * allocation for data production never looks at. */
+    const collectDensityStats = import.meta.env.DEV
     const densityStats = {
       calls: 0,
       noRes: 0,
@@ -1440,6 +1444,7 @@ export function PartyBackground() {
       }
     }
 
+    let lastLayoutKey = ''
     const layout = () => {
       if (!engine) return
       // The overflow-hidden holder tracks the content height, so the canvas
@@ -1449,6 +1454,13 @@ export function PartyBackground() {
       const w = holder.clientWidth
       const h = holder.clientHeight
       if (w < 1 || h < 1) return
+      // Everything below is a pure function of these inputs, and running it
+      // redundantly is not free: assigning the overlay canvases' width/height
+      // discards their backing stores, and the body ResizeObserver fires for
+      // plenty of events that change none of this.
+      const key = `${w}:${h}:${window.devicePixelRatio || 1}:${DESIRED_ZOOM()}`
+      if (key === lastLayoutKey) return
+      lastLayoutKey = key
       const scale = Math.min(1, MAX_CANVAS_HEIGHT / h)
       for (const c of [canvas, debugCanvas, dynDebugCanvas]) {
         c.style.width = `${w}px`
@@ -1619,12 +1631,19 @@ export function PartyBackground() {
       }
       for (let iter = 0; iter < 20; iter++) {
         const { count, cx, cy } = assign()
+        // Each iteration is a full O(pixels x cells) scan, so stop once the
+        // seeds have effectively settled instead of always paying for 20.
+        let moved = 0
         for (let s = 0; s < target; s++) {
           if (count[s] > 0) {
-            sx[s] = cx[s] / count[s]
-            sy[s] = cy[s] / count[s]
+            const nx = cx[s] / count[s]
+            const ny = cy[s] / count[s]
+            moved = Math.max(moved, Math.abs(nx - sx[s]), Math.abs(ny - sy[s]))
+            sx[s] = nx
+            sy[s] = ny
           }
         }
+        if (moved < step / 2) break
       }
       for (let iter = 0; iter < 100; iter++) {
         const { count } = assign()
@@ -2065,9 +2084,12 @@ export function PartyBackground() {
       // are built equal-area, so equal density is simply an equal count in
       // every cell, and each letter ends up holding particles in proportion to
       // its own ink area -- a B more than a T, because a B is more letter.
-      const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
-      for (let i = 0; i < cellLetter.length; i++) {
-        if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
+      if (collectDensityStats) {
+        const cellsPerLetter = new Int32Array(Math.max(letterCount, 1))
+        for (let i = 0; i < cellLetter.length; i++) {
+          if (cellLetter[i] >= 0) cellsPerLetter[cellLetter[i]]++
+        }
+        densityStats.lastCellsPerLetter = Array.from(cellsPerLetter)
       }
       // Measured reality, plus only those corrections the census provably
       // cannot have seen yet.
@@ -2078,8 +2100,10 @@ export function PartyBackground() {
         for (let i = 0; i < n; i++) counts[i] += p.delta[i]
       }
       for (let i = 0; i < n; i++) if (counts[i] < 0) counts[i] = 0
-      densityStats.lastCounts = Array.from(counts)
-      densityStats.lastRawCounts = Array.from(res.counts)
+      if (collectDensityStats) {
+        densityStats.lastCounts = Array.from(counts)
+        densityStats.lastRawCounts = Array.from(res.counts)
+      }
       let inNameNow = 0
       for (let i = 0; i < n; i++) inNameNow += counts[i]
       // Per LETTER, not per name and not per cell: the cap bounds how thick
@@ -2100,10 +2124,11 @@ export function PartyBackground() {
         variance: globals.densityVariance,
         letter: cellLetter,
       })
-      densityStats.lastTargets = Array.from(plan.target)
-      densityStats.lastTol = Array.from(plan.tol)
-      densityStats.lastCellLetter = Array.from(cellLetter)
-      densityStats.lastCellsPerLetter = Array.from(cellsPerLetter)
+      if (collectDensityStats) {
+        densityStats.lastTargets = Array.from(plan.target)
+        densityStats.lastTol = Array.from(plan.tol)
+        densityStats.lastCellLetter = Array.from(cellLetter)
+      }
       densityStats.lastShareTotal = plan.total
       densityStats.lastInName = inNameNow
       // Density-weighted name opacity targets: the densest cell pins the max,
@@ -2131,7 +2156,7 @@ export function PartyBackground() {
       }
       if (plan.settled) {
         densityStats.settled++
-        densityStats.lastCountsAfter = Array.from(counts)
+        if (collectDensityStats) densityStats.lastCountsAfter = Array.from(counts)
         weighOpacity()
         return
       }
@@ -2276,7 +2301,7 @@ export function PartyBackground() {
         densityStats.fromCells += out
       }
 
-      densityStats.lastCountsAfter = Array.from(counts)
+      if (collectDensityStats) densityStats.lastCountsAfter = Array.from(counts)
       weighOpacity()
     }
 
@@ -2620,6 +2645,9 @@ export function PartyBackground() {
     const boot = async (pref: 'auto' | 'webgpu' | 'cpu') => {
       mods = createPartyModules()
       effectors = new Effectors()
+      // A fresh engine holds default view state; the memoized layout must
+      // not skip configuring it.
+      lastLayoutKey = ''
       pointers.clear()
       dynamicDirty = false
       lastCensus = null
@@ -2714,10 +2742,20 @@ export function PartyBackground() {
           }),
         }
       }
+      // The three heavy boot steps (name Voronoi rebuild, content distance
+      // field, 80k-particle spawn) used to run in one long task that blocked
+      // input for most of a second at page load; yielding a frame between
+      // them keeps the page responsive while the simulation warms up.
+      const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()))
       layout()
       measureName()
+      await nextFrame()
+      if (disposed || engine !== eng) return
       measureContent()
+      await nextFrame()
+      if (disposed || engine !== eng) return
       lastPageW = holder.clientWidth
+      lastPageH = holder.clientHeight
       spawnAll()
       syncEffectors()
       applyDemo(demoIndex, true)
@@ -2912,18 +2950,32 @@ export function PartyBackground() {
     cleanups.push(() => window.removeEventListener('scroll', scheduleSync))
     cleanups.push(onTargetsChanged(scheduleSync))
 
-    // Viewport/document size changes: always relayout and resync; only
-    // respawn (and re-measure) when the width actually changed.
+    // Viewport/document size changes: relayout and resync cheaply, and pay
+    // for the heavy rebuilds only when their actual inputs changed. The body
+    // ResizeObserver and the mobile URL bar fire height-only events
+    // constantly, and the name/Voronoi rebuild behind measureName is a
+    // several-hundred-ms main-thread stall that must not run for those.
     let resizeTimer = 0
     let lastPageW = 0
+    let lastPageH = 0
     const onResize = () => {
       window.clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => {
         if (!engine) return
         const pageW = holder.clientWidth
+        const pageH = holder.clientHeight
+        const zoomBefore = zoom
         layout()
-        measureName()
-        measureContent()
+        // The name's geometry is a function of the page width alone; the
+        // world-unit uploads behind it also depend on the zoom, which
+        // layout() may have just changed.
+        if (pageW !== lastPageW || zoom !== zoomBefore) measureName()
+        // Content rects move only when the document actually reflows, and a
+        // reflow shows up as a width or document-height change.
+        if (pageW !== lastPageW || pageH !== lastPageH || zoom !== zoomBefore) {
+          lastPageH = pageH
+          measureContent()
+        }
         if (pageW !== lastPageW) {
           lastPageW = pageW
           spawnAll()

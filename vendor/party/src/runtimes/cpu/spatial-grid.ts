@@ -88,10 +88,19 @@ export class SpatialGrid {
   }
 
   clear(): void {
+    // Truncate cells in place instead of reallocating rows x cols fresh
+    // arrays: this runs every frame, and the reallocation was tens of
+    // thousands of array objects per frame of pure GC load.
     for (let row = 0; row < this.rows; row++) {
-      this.grid[row] = [];
+      const cells = this.grid[row];
+      if (!cells) {
+        this.grid[row] = [];
+        continue;
+      }
       for (let col = 0; col < this.cols; col++) {
-        this.grid[row][col] = [];
+        const cell = cells[col];
+        if (cell === undefined) cells[col] = [];
+        else if (cell.length > 0) cell.length = 0;
       }
     }
     // Clear particle position tracking

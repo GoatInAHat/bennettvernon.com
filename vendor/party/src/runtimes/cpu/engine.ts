@@ -10,6 +10,7 @@ import {
   Module,
   ModuleRole,
   CanvasComposition,
+  CPUDescriptor,
   CPURenderDescriptor,
   CPUForceDescriptor,
 } from "../../module";
@@ -26,6 +27,38 @@ export class CPUEngine extends AbstractEngine {
   private particleIdToIndex: Map<number, number> = new Map();
   private censusSerial: number = 0;
   private segmentSerial: number = 0;
+  // cpu() descriptors are pure functions of the module class, but they were
+  // being rebuilt -- closures and all -- several times per module per frame.
+  private cpuDescriptors: WeakMap<Module, CPUDescriptor> = new WeakMap();
+  // Scratch for getNeighbors so a neighbor query does not allocate a Vector.
+  private neighborPoint: Vector = new Vector(0, 0);
+  // Per-particle prev/post integration positions, with records reused across
+  // frames instead of reallocated for every particle every frame.
+  private positionState: Map<
+    number,
+    { prev: { x: number; y: number }; post: { x: number; y: number } }
+  > = new Map();
+
+  private cpuOf(module: Module): CPUDescriptor {
+    let d = this.cpuDescriptors.get(module);
+    if (!d) {
+      d = module.cpu();
+      this.cpuDescriptors.set(module, d);
+    }
+    return d;
+  }
+
+  // One read() per module instead of one per input key: read() copies the
+  // whole uniform state, so the per-key form was quadratic in key count.
+  private readInputs(module: Module): Record<string, number | number[]> {
+    const state = module.read() as Record<string, number | number[]>;
+    const input: Record<string, number | number[]> = {};
+    for (const key of Object.keys(module.inputs)) {
+      input[key] = state[key] ?? 0;
+    }
+    input.enabled = module.isEnabled() ? 1 : 0;
+    return input;
+  }
 
   constructor(options: {
     canvas: HTMLCanvasElement;
@@ -311,8 +344,12 @@ export class CPUEngine extends AbstractEngine {
   };
 
   private getNeighbors(position: { x: number; y: number }, radius: number) {
+    // Reuse one scratch Vector: this is called once per particle per
+    // neighbor-based module per frame, and getParticles does not retain it.
+    this.neighborPoint.x = position.x;
+    this.neighborPoint.y = position.y;
     return this.grid.getParticles(
-      new Vector(position.x, position.y),
+      this.neighborPoint,
       radius,
       this.getMaxNeighbors()
     );
@@ -325,7 +362,12 @@ export class CPUEngine extends AbstractEngine {
     height: number
   ): ImageData | null {
     try {
-      const context = this.canvas.getContext("2d")!;
+      // willReadFrequently keeps the canvas in CPU memory: sensor modules
+      // call this per particle per frame, and each readback from a
+      // GPU-backed canvas is a synchronous pipeline stall.
+      const context = this.canvas.getContext("2d", {
+        willReadFrequently: true,
+      })!;
 
       // Clamp to canvas bounds
       const clampedX = Math.max(0, Math.min(x, this.canvas.width));
@@ -373,11 +415,9 @@ export class CPUEngine extends AbstractEngine {
     // Global state for modules that need it
     const globalState: Record<number, Record<string, number>> = {};
 
-    // Position tracking for correct pass
-    const positionState: Map<
-      number,
-      { prev: { x: number; y: number }; post: { x: number; y: number } }
-    > = new Map();
+    // Position tracking for correct pass (persistent records; see the
+    // integration pass)
+    const positionState = this.positionState;
 
     // Get neighbors function
     const getNeighbors = (position: { x: number; y: number }, radius: number) =>
@@ -397,25 +437,23 @@ export class CPUEngine extends AbstractEngine {
         // Skip disabled modules
         if (!module.isEnabled()) continue;
         if (module.role === ModuleRole.Force) {
-          const force = module.cpu() as CPUForceDescriptor;
+          const force = this.cpuOf(module) as CPUForceDescriptor;
           if (force.state) {
-            const input: Record<string, number | number[]> = {};
-            for (const key of Object.keys(module.inputs)) {
-              const value = module.read()[key];
-              input[key] = value ?? 0;
-            }
-            // Always add enabled
-            input.enabled = module.isEnabled() ? 1 : 0;
+            const input = this.readInputs(module);
 
+            // One closure per pass, not one per particle: it reads the loop
+            // variable, so hoisting it out of the loop changes nothing but
+            // the allocation count.
+            let particle: Particle = this.particles[0];
+            const setState = (name: string, value: number) => {
+              if (!globalState[particle.id]) {
+                globalState[particle.id] = {};
+              }
+              globalState[particle.id][name] = value;
+            };
             for (let pi = 0; pi < effectiveCount; pi++) {
-              const particle = this.particles[pi];
+              particle = this.particles[pi];
               if (particle.mass <= 0) continue;
-              const setState = (name: string, value: number) => {
-                if (!globalState[particle.id]) {
-                  globalState[particle.id] = {};
-                }
-                globalState[particle.id][name] = value;
-              };
 
               force.state({
                 particle: particle,
@@ -440,27 +478,23 @@ export class CPUEngine extends AbstractEngine {
         // Skip disabled modules
         if (!module.isEnabled()) continue;
         if (module.role === ModuleRole.Force) {
-          const force = module.cpu() as CPUForceDescriptor;
+          const force = this.cpuOf(module) as CPUForceDescriptor;
           if (force.apply) {
-            const input: Record<string, number | number[]> = {};
-            for (const key of Object.keys(module.inputs)) {
-              const value = module.read()[key];
-              input[key] = value ?? 0;
-            }
-            // Always add enabled
-            input.enabled = module.isEnabled() ? 1 : 0;
+            const input = this.readInputs(module);
+            const maxSize = this.getMaxSize();
 
+            let particle: Particle = this.particles[0];
+            const getState = (name: string, pid?: number) => {
+              return globalState[pid ?? particle.id]?.[name] ?? 0;
+            };
             for (let pi = 0; pi < effectiveCount; pi++) {
-              const particle = this.particles[pi];
+              particle = this.particles[pi];
               if (particle.mass <= 0) continue;
-              const getState = (name: string, pid?: number) => {
-                return globalState[pid ?? particle.id]?.[name] ?? 0;
-              };
 
               force.apply({
                 particle: particle,
                 dt,
-                maxSize: this.getMaxSize(),
+                maxSize,
                 getNeighbors,
                 input,
                 getState,
@@ -475,20 +509,31 @@ export class CPUEngine extends AbstractEngine {
       } catch (error) {}
     }
 
-    // Third pass: integration (once per particle)
+    // Third pass: integration (once per particle). Inlined arithmetic and
+    // reused position records: the clone()-based form allocated five objects
+    // per particle per frame, which at thousands of particles was most of
+    // this runtime's GC load.
     for (let i = 0; i < effectiveCount; i++) {
       const particle = this.particles[i];
       if (particle.mass <= 0) continue;
+      let entry = positionState.get(particle.id);
+      if (!entry) {
+        entry = { prev: { x: 0, y: 0 }, post: { x: 0, y: 0 } };
+        positionState.set(particle.id, entry);
+      }
       // Capture position before integration
-      const prevPos = { x: particle.position.x, y: particle.position.y };
+      entry.prev.x = particle.position.x;
+      entry.prev.y = particle.position.y;
 
-      particle.velocity.add(particle.acceleration.clone().multiply(dt));
-      particle.position.add(particle.velocity.clone().multiply(dt));
+      particle.velocity.x += particle.acceleration.x * dt;
+      particle.velocity.y += particle.acceleration.y * dt;
+      particle.position.x += particle.velocity.x * dt;
+      particle.position.y += particle.velocity.y * dt;
       particle.acceleration.zero();
 
       // Capture position after integration
-      const postPos = { x: particle.position.x, y: particle.position.y };
-      positionState.set(particle.id, { prev: prevPos, post: postPos });
+      entry.post.x = particle.position.x;
+      entry.post.y = particle.position.y;
     }
 
     // Fourth pass: constraints for all modules (multiple iterations)
@@ -499,27 +544,23 @@ export class CPUEngine extends AbstractEngine {
           // Skip disabled modules
           if (!module.isEnabled()) continue;
           if (module.role === ModuleRole.Force) {
-            const force = module.cpu() as CPUForceDescriptor;
+            const force = this.cpuOf(module) as CPUForceDescriptor;
             if (force.constrain) {
-              const input: Record<string, number | number[]> = {};
-              for (const key of Object.keys(module.inputs)) {
-                const value = module.read()[key];
-                input[key] = value ?? 0;
-              }
-              // Always add enabled
-              input.enabled = module.isEnabled() ? 1 : 0;
+              const input = this.readInputs(module);
+              const maxSize = this.getMaxSize();
+              let particle: Particle = this.particles[0];
+              const getState = (name: string, pid?: number) => {
+                return globalState[pid ?? particle.id]?.[name] ?? 0;
+              };
               for (let pi = 0; pi < effectiveCount; pi++) {
-                const particle = this.particles[pi];
+                particle = this.particles[pi];
                 if (particle.mass <= 0) continue;
-                const getState = (name: string, pid?: number) => {
-                  return globalState[pid ?? particle.id]?.[name] ?? 0;
-                };
 
                 force.constrain({
                   particle: particle,
                   getNeighbors,
                   dt: dt,
-                  maxSize: this.getMaxSize(),
+                  maxSize,
                   input,
                   getState,
                   view: this.view,
@@ -540,22 +581,18 @@ export class CPUEngine extends AbstractEngine {
         // Skip disabled modules
         if (!module.isEnabled()) continue;
         if (module.role === ModuleRole.Force) {
-          const force = module.cpu() as CPUForceDescriptor;
+          const force = this.cpuOf(module) as CPUForceDescriptor;
           if (force.correct) {
-            const input: Record<string, number | number[]> = {};
-            for (const key of Object.keys(module.inputs)) {
-              const value = module.read()[key];
-              input[key] = value ?? 0;
-            }
-            // Always add enabled
-            input.enabled = module.isEnabled() ? 1 : 0;
+            const input = this.readInputs(module);
+            const maxSize = this.getMaxSize();
 
+            let particle: Particle = this.particles[0];
+            const getState = (name: string, pid?: number) => {
+              return globalState[pid ?? particle.id]?.[name] ?? 0;
+            };
             for (let index = 0; index < effectiveCount; index++) {
-              const particle = this.particles[index];
+              particle = this.particles[index];
               if (particle.mass <= 0) continue;
-              const getState = (name: string, pid?: number) => {
-                return globalState[pid ?? particle.id]?.[name] ?? 0;
-              };
 
               const positions = positionState.get(particle.id);
               const prevPos = positions?.prev ?? {
@@ -571,7 +608,7 @@ export class CPUEngine extends AbstractEngine {
                 particle: particle,
                 getNeighbors,
                 dt: dt,
-                maxSize: this.getMaxSize(),
+                maxSize,
                 prevPos,
                 postPos,
                 input,
@@ -589,26 +626,45 @@ export class CPUEngine extends AbstractEngine {
   }
 
   private createRenderUtils(context: CanvasRenderingContext2D) {
+    // Memoize the last color string: particles overwhelmingly share a color,
+    // and building a fresh rgba() string per particle per frame was both
+    // steady garbage and a per-call style reparse.
+    let lastR = NaN;
+    let lastG = NaN;
+    let lastB = NaN;
+    let lastA = NaN;
+    let lastStyle = "";
+    const formatColor = (color: {
+      r: number;
+      g: number;
+      b: number;
+      a: number;
+    }): string => {
+      if (
+        color.r !== lastR ||
+        color.g !== lastG ||
+        color.b !== lastB ||
+        color.a !== lastA
+      ) {
+        lastR = color.r;
+        lastG = color.g;
+        lastB = color.b;
+        lastA = color.a;
+        lastStyle = `rgba(${color.r * 255}, ${color.g * 255}, ${
+          color.b * 255
+        }, ${color.a})`;
+      }
+      return lastStyle;
+    };
     return {
-      formatColor: (color: {
-        r: number;
-        g: number;
-        b: number;
-        a: number;
-      }): string => {
-        return `rgba(${color.r * 255}, ${color.g * 255}, ${color.b * 255}, ${
-          color.a
-        })`;
-      },
+      formatColor,
       drawCircle: (
         x: number,
         y: number,
         radius: number,
         color: { r: number; g: number; b: number; a: number }
       ): void => {
-        context.fillStyle = `rgba(${color.r * 255}, ${color.g * 255}, ${
-          color.b * 255
-        }, ${color.a})`;
+        context.fillStyle = formatColor(color);
         context.beginPath();
         context.arc(x, y, radius, 0, Math.PI * 2);
         context.fill();
@@ -620,16 +676,17 @@ export class CPUEngine extends AbstractEngine {
         height: number,
         color: { r: number; g: number; b: number; a: number }
       ): void => {
-        context.fillStyle = `rgba(${color.r * 255}, ${color.g * 255}, ${
-          color.b * 255
-        }, ${color.a})`;
+        context.fillStyle = formatColor(color);
         context.fillRect(x, y, width, height);
       },
     };
   }
 
   private render(): void {
-    const context = this.canvas.getContext("2d")!;
+    // Same attributes as getImageData: the first getContext call fixes them.
+    const context = this.canvas.getContext("2d", {
+      willReadFrequently: true,
+    })!;
 
     // Get camera and canvas info for coordinate transformation
     const camera = this.view.getCamera();
@@ -643,7 +700,7 @@ export class CPUEngine extends AbstractEngine {
     const hasBackgroundHandler = this.modules.some((module) => {
       if (!module.isEnabled() || module.role !== ModuleRole.Render)
         return false;
-      const descriptor = module.cpu() as CPURenderDescriptor;
+      const descriptor = this.cpuOf(module) as CPURenderDescriptor;
       return descriptor.composition === CanvasComposition.HandlesBackground;
     });
 
@@ -658,7 +715,7 @@ export class CPUEngine extends AbstractEngine {
       const needsClearing = this.modules.some((module) => {
         if (!module.isEnabled() || module.role !== ModuleRole.Render)
           return false;
-        const descriptor = module.cpu() as CPURenderDescriptor;
+        const descriptor = this.cpuOf(module) as CPURenderDescriptor;
         return descriptor.composition === CanvasComposition.RequiresClear;
       });
 
@@ -675,16 +732,9 @@ export class CPUEngine extends AbstractEngine {
         // Skip disabled modules
         if (!module.isEnabled()) continue;
         if (module.role === ModuleRole.Render) {
-          const descriptor = module.cpu() as CPURenderDescriptor;
+          const descriptor = this.cpuOf(module) as CPURenderDescriptor;
           const render = descriptor;
-          // input
-          const input: Record<string, number | number[]> = {};
-          for (const key of Object.keys(module.inputs)) {
-            const value = module.read()[key];
-            input[key] = value ?? 0;
-          }
-          // Always add enabled
-          input.enabled = module.isEnabled() ? 1 : 0;
+          const input = this.readInputs(module);
 
           // Setup phase
           render.setup?.({

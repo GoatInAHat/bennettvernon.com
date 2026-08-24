@@ -491,6 +491,19 @@ export class GPUResources {
   createGridStorage(totalCells: number, maxPerCell: number): void {
     const countsSize = totalCells * 4;
     const indicesSize = totalCells * maxPerCell * 4;
+    // Grow-only: these buffers are sized by the whole world (hundreds of MB
+    // at small cell sizes), so destroying and reallocating them on every
+    // cell-size change stalls the GPU process mid-frame. A larger existing
+    // buffer serves a smaller grid as-is; the shaders index within
+    // cols*rows*maxPerCell and never read past it.
+    if (
+      this.gridCountsBuffer &&
+      this.gridIndicesBuffer &&
+      this.gridCountsBuffer.size >= countsSize &&
+      this.gridIndicesBuffer.size >= indicesSize
+    ) {
+      return;
+    }
     this.gridCountsBuffer?.destroy();
     this.gridIndicesBuffer?.destroy();
     this.gridCountsBuffer = this.getDevice().createBuffer({
@@ -668,34 +681,55 @@ export class GPUResources {
     return this.computeBindGroupLayout;
   }
 
-  buildComputePipelines(code: string): void {
+  async buildComputePipelines(code: string): Promise<void> {
     if (!this.computeBindGroupLayout || !this.computePipelineLayout) return;
-    const module = this.getDevice().createShaderModule({ code });
-    const createComputePipelineForEntry = (
+    const device = this.getDevice();
+    const module = device.createShaderModule({ code });
+    const layout = this.computePipelineLayout;
+    // Async creation compiles the shaders off the main thread; the sync path
+    // stalls the boot task for every entry point (tens to hundreds of ms of
+    // driver compile on real hardware). Kept as a fallback for
+    // implementations without the async API.
+    const create = async (
       entryPoint: string
-    ): GPUComputePipeline =>
-      this.getDevice().createComputePipeline({
-        layout: this.computePipelineLayout!,
-        compute: { module, entryPoint },
-      });
-    const safeCreateComputePipelineForEntry = (
-      entryPoint: string
-    ): GPUComputePipeline | undefined => {
+    ): Promise<GPUComputePipeline | undefined> => {
       try {
-        return createComputePipelineForEntry(entryPoint);
+        if (device.createComputePipelineAsync) {
+          return await device.createComputePipelineAsync({
+            layout,
+            compute: { module, entryPoint },
+          });
+        }
+        return device.createComputePipeline({
+          layout,
+          compute: { module, entryPoint },
+        });
       } catch {
         return undefined;
       }
     };
+    const [main, gridClear, gridBuild, state, apply, integrate, constrain, correct] =
+      await Promise.all(
+        [
+          "main",
+          "grid_clear",
+          "grid_build",
+          "state_pass",
+          "apply_pass",
+          "integrate_pass",
+          "constrain_pass",
+          "correct_pass",
+        ].map(create)
+      );
     this.simulationPipelines = {
-      main: safeCreateComputePipelineForEntry("main"),
-      gridClear: safeCreateComputePipelineForEntry("grid_clear"),
-      gridBuild: safeCreateComputePipelineForEntry("grid_build"),
-      state: safeCreateComputePipelineForEntry("state_pass"),
-      apply: safeCreateComputePipelineForEntry("apply_pass"),
-      integrate: safeCreateComputePipelineForEntry("integrate_pass"),
-      constrain: safeCreateComputePipelineForEntry("constrain_pass"),
-      correct: safeCreateComputePipelineForEntry("correct_pass"),
+      main,
+      gridClear,
+      gridBuild,
+      state,
+      apply,
+      integrate,
+      constrain,
+      correct,
     };
   }
 

@@ -103,8 +103,8 @@ export class WebGPUEngine extends AbstractEngine {
       );
     }
 
-    // Build compute pipelines
-    this.sim.initialize(this.resources, program);
+    // Build compute pipelines (compiled off the main thread where supported)
+    await this.sim.initialize(this.resources, program);
 
     // Ensure scene textures
     const size = this.view.getSize();

@@ -55,6 +55,14 @@ type Slot = {
   result: GPUBuffer;
   staging: GPUBuffer;
   busy: boolean;
+  /** Reused output arrays for this slot. A completed readback copies into
+   * these instead of slicing fresh arrays -- the slices were ~1.9 MB of
+   * garbage per frame at this site's sample counts, a steady GC-pause
+   * source. The published result therefore stays valid only until this
+   * slot's next readback completes, RING dispatches later; callers that act
+   * on a census synchronously (the intended use) never notice, callers that
+   * retain one must copy what they keep. */
+  out: CellCensusResult;
 };
 
 export class CellCensus {
@@ -142,6 +150,20 @@ export class CellCensus {
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
           }),
           busy: false,
+          out: {
+            serial: -1,
+            issued: 0,
+            version: -1,
+            counts: new Uint32Array(config.cellCount),
+            samples: new Uint32Array(config.cellCount * config.samplesPerCell),
+            samplePos: new Float32Array(
+              config.cellCount * config.samplesPerCell * 2
+            ),
+            samplesPerCell: config.samplesPerCell,
+            outside: new Uint32Array(config.outsideSamples),
+            outsidePos: new Float32Array(config.outsideSamples * 2),
+            outsideCount: 0,
+          },
         });
       }
       this.slots = slots;
@@ -312,33 +334,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         .then(() => {
           if (this.slots !== slots) return; // disposed/reshaped meanwhile
           try {
-            const view = new Uint32Array(slot.staging.getMappedRange());
+            const mapped = slot.staging.getMappedRange();
+            const view = new Uint32Array(mapped);
             // Nothing orders map callbacks across separate buffers, and the
             // promise chains add microtask hops of their own, so an older
             // dispatch may land after a newer one. Publish forward only.
             if (serial > (this.latest?.serial ?? -1)) {
-              this.latest = {
-                serial,
-                issued: this.nextSerial,
-                version,
-                counts: view.slice(1, 1 + c),
-                samples: view.slice(1 + c, 1 + c + c * k),
-                samplesPerCell: k,
-                outside: view.slice(1 + c + c * k, 1 + c + c * k + m),
-                outsidePos: new Float32Array(
-                  view.buffer.slice(
-                    view.byteOffset + (1 + c + c * k + m) * 4,
-                    view.byteOffset + (1 + c + c * k + m + m * 2) * 4
-                  )
-                ),
-                samplePos: new Float32Array(
-                  view.buffer.slice(
-                    view.byteOffset + (1 + c + c * k + m + m * 2) * 4,
-                    view.byteOffset + (1 + c + c * k + m + m * 2 + c * k * 2) * 4
-                  )
-                ),
-                outsideCount: view[0],
-              };
+              const f32 = new Float32Array(mapped);
+              const out = slot.out;
+              out.serial = serial;
+              out.issued = this.nextSerial;
+              out.version = version;
+              out.counts.set(view.subarray(1, 1 + c));
+              out.samples.set(view.subarray(1 + c, 1 + c + c * k));
+              out.outside.set(view.subarray(1 + c + c * k, 1 + c + c * k + m));
+              out.outsidePos.set(
+                f32.subarray(1 + c + c * k + m, 1 + c + c * k + m + m * 2)
+              );
+              out.samplePos.set(
+                f32.subarray(
+                  1 + c + c * k + m + m * 2,
+                  1 + c + c * k + m + m * 2 + c * k * 2
+                )
+              );
+              out.outsideCount = view[0];
+              this.latest = out;
             }
           } finally {
             // Unconditional: a slot left mapped can never be copied into

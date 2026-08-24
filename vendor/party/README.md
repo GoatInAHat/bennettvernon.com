@@ -99,6 +99,40 @@ Every divergence from upstream is listed here.
   shape -- the same idea as a field primitive's `boost.hulls`.
 - `gpu-resources.ts` — the initialize() failure path destroys a
   partially-created GPUDevice instead of leaking it.
+- `gpu-resources.ts` — `createGridStorage()` is grow-only: the grid
+  counts/indices buffers are sized by the whole world (hundreds of MB at
+  small cell sizes), and upstream destroyed and reallocated them on every
+  cell-size change — a mid-transition GPU stall each time a demo preset
+  changed `gridCellSize`. A larger existing buffer now serves a smaller
+  grid as-is.
+- `gpu-resources.ts` + `simulation-pipeline.ts` + `runtimes/webgpu/engine.ts`
+  — `buildComputePipelines()` uses `createComputePipelineAsync` (with a
+  sync fallback), so the driver shader compiles no longer run inside the
+  boot task on the main thread.
+- `runtimes/webgpu/cell-census.ts` — completed readbacks copy into
+  per-slot reused arrays instead of slicing fresh ones (~1.9 MB of typed-
+  array garbage per frame at this site's sample counts — a steady GC-pause
+  source). A published result is therefore valid until its slot's next
+  readback completes, RING dispatches later; callers that act on a census
+  synchronously (the intended use) never notice, callers that retain one
+  must copy what they keep.
+- `runtimes/webgpu/module-registry.ts` + `render-pipeline.ts` — `webgpu()`
+  descriptors, per-module array-input lists, and per-pass generated WGSL
+  are cached (descriptors per module instance, WGSL per pass object per
+  clear color). Upstream rebuilt all of them — multi-KB template strings
+  included — on every pass of every frame.
+- `runtimes/cpu/engine.ts`, `runtimes/cpu/spatial-grid.ts` — the CPU
+  runtime no longer allocates per particle per frame: `cpu()` descriptors
+  are cached per module, module inputs are read once per pass instead of
+  once per key (read() copies the whole state), the per-particle
+  `getState`/`setState` closures are hoisted to per-pass, integration uses
+  in-place arithmetic and persistent prev/post records instead of five
+  fresh objects per particle, `getNeighbors` reuses a scratch Vector, the
+  spatial grid truncates its cells in place instead of reallocating
+  rows x cols arrays every frame, and the render utils memoize the last
+  rgba() style string. The 2D context is acquired with
+  `willReadFrequently: true`, so per-particle sensor `getImageData` reads
+  are memory copies instead of synchronous GPU readback stalls.
 - `modules/forces/fluids.ts`, `collisions.ts`, `sensors.ts` — each gains a
   `strength` master-gate uniform (default 1) with an exact no-op at 0, so
   hosts can fade whole modules in and out continuously. Fluids needs it
