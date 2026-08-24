@@ -14,7 +14,7 @@ export const site = {
     { label: 'linkedin', href: 'https://www.linkedin.com/in/bennett-vernon-79b298249/' },
     { label: 'x', href: 'https://x.com/bennetttvernon' },
     { label: 'insta', href: 'https://www.instagram.com/bennetttvernon/' },
-    { label: 'email', href: 'mailto:bennett.vernon@gmail.com' }
+    { label: 'email', href: 'mailto:bennett.g.vernon@gmail.com' }
   ],
 }
 
