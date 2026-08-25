@@ -60,7 +60,7 @@ export const projects: ContentItem[] = [
     subtitle: 'project',
     date: '2025',
     description:
-      'Converted a Honda CRF150RB to electric with an **E&C** built billet **QS138v3**, 76v 32ah battery, TruMoto Noisy Cricket controller, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30 hp, 14 -> 190 Nm. More coming soon with vehicle dynamics control systems.',
+      'Converted a Honda CRF150RB to electric (in my Vanderbilt dorm) with an **E&C** billet **QS138v3**, Noisy Cricket controller, 76v 32ah battery, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30 hp, 14 -> 190 Nm. More coming soon with vehicle dynamics control systems.',
   },
   {
     title: 'Testing Equipment for Hyperspectral Camera LED Driver Arrays',
