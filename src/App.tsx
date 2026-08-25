@@ -408,7 +408,9 @@ function PhotosPopup() {
       </button>
       <div className="photos-grid">
         {photos.map((src) => (
-          <img key={src} src={src} loading="lazy" alt="" />
+          <a key={src} href={src} target="_blank" rel="noreferrer">
+            <img src={src} loading="lazy" alt="" />
+          </a>
         ))}
       </div>
     </dialog>

@@ -682,6 +682,17 @@ a:visited {
   gap: 10px;
 }
 
+.photos-grid a {
+  display: block;
+  text-decoration: none;
+  opacity: 1;
+  transition: opacity 0.15s ease;
+}
+
+.photos-grid a:hover {
+  opacity: 0.8;
+}
+
 .photos-grid img {
   display: block;
   width: 100%;
