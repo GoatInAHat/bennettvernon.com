@@ -24,7 +24,7 @@ export const current: ContentItem[] = [
     title: 'Beer',
     subtitle: 'experiment',
     description:
-      'Multi-agent system based on Stafford Beer\'s Viable System Model. Aims to create an autonomous system for self-organizing, self-regulating, and self-improving enterprises fractally composed of agents. Experiments with **RSI**, online RL, and applied **Agent Cybernetics**.',
+      'Multi-agent system based on Stafford Beer\'s Viable System Model. Aims to create an autonomous system for self-organizing, self-regulating, and self-improving enterprises fractally composed of agents. Experiments with **RSI**, online RL, and applied **[Agent Cybernetics](https://arxiv.org/pdf/2605.10754)**.',
   },
   {
     title: 'Recursive Agent Framework',
