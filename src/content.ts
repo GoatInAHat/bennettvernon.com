@@ -107,7 +107,8 @@ export const projects: ContentItem[] = [
     subtitle: 'project',
     date: '2022 & 2023',
     description:
-      'VEX VRC Robots for **Tipping Point** and **Spin Up**. Local & regional wins & awards, World Championship quarterfinalist.'
+      'VEX VRC Robots for **Tipping Point** and **Spin Up**. Local & regional wins & awards, World Championship quarterfinalist.',
+    photos: ['/photos/eugene/1.jpg', '/photos/eugene/2.jpg'],
   },
   {
     title: 'Animatronics Control System',
