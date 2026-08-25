@@ -31,6 +31,11 @@ export const current: ContentItem[] = [
     subtitle: 'experiment',
     description:
       'Precursor to Beer. Experimental framework for massively decomposed agentic processes using recursively-organized teams of agents for problem decomposition. Improved performance of **Llama-8b** to past that of **Llama-70b** and **Claude Sonnet 4.6** on **GSM8K**. Presented at **VURS 2026**.',
+    links: [
+      { label: 'repo', href: 'https://aventre-labs.github.io/raf-demo/' },
+      { label: 'paper', href: 'https://aventre-labs.github.io/raf-demo/RAF-Paper.pdf' },
+      { label: 'demo', href: 'https://aventre-labs.github.io/raf-demo/' },
+    ]
   },
   {
     title: 'Engraphia',
