@@ -352,21 +352,24 @@ function SectionSeparator({ title }: { title: string }) {
   )
 }
 
-/** A dot-separated row of external links. */
-function LinkRow({
-  links,
-  className,
-}: {
-  links: { label: string; href: string }[]
-  className: string
-}) {
+type LinkItem = { label: string } & ({ href: string } | { onClick: () => void })
+
+/** A dot-separated row of links; entries without an href fire onClick instead
+ * of navigating (used for the in-page photos popup). */
+function LinkRow({ links, className }: { links: LinkItem[]; className: string }) {
   return (
     <div className={className}>
       {links.map((link, index) => (
-        <span key={link.href}>
-          <a href={link.href} target="_blank" rel="noreferrer">
-            <Chars text={link.label} />
-          </a>
+        <span key={link.label}>
+          {'href' in link ? (
+            <a href={link.href} target="_blank" rel="noreferrer">
+              <Chars text={link.label} />
+            </a>
+          ) : (
+            <button type="button" onClick={link.onClick}>
+              <Chars text={link.label} />
+            </button>
+          )}
           {index < links.length - 1 ? (
             <span className="dot" aria-hidden="true">
               {' '}
@@ -379,10 +382,49 @@ function LinkRow({
   )
 }
 
+/** Full-size photo viewer opened via the "photos" link on an item; listens
+ * for the same window-event pattern as the other popups in this file. */
+function PhotosPopup() {
+  const ref = useRef<HTMLDialogElement>(null)
+  const [photos, setPhotos] = useState<string[]>([])
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      setPhotos((e as CustomEvent<string[]>).detail)
+      ref.current?.showModal()
+    }
+    window.addEventListener('photos:open', onOpen)
+    return () => window.removeEventListener('photos:open', onOpen)
+  }, [])
+  return (
+    <dialog
+      ref={ref}
+      className="photos-popup"
+      onClick={(e) => {
+        if (e.target === ref.current) ref.current?.close()
+      }}
+    >
+      <button type="button" className="photos-close" onClick={() => ref.current?.close()} aria-label="Close">
+        ×
+      </button>
+      <div className="photos-grid">
+        {photos.map((src) => (
+          <img key={src} src={src} loading="lazy" alt="" />
+        ))}
+      </div>
+    </dialog>
+  )
+}
+
 function ContentItemBlock({ item, section }: { item: ContentItem; section: string }) {
   // The year separator above already states the year, so only print a date
   // that says something more than its section does — a span like '2022 & 2023'.
   const date = item.date && item.date !== section ? item.date : null
+  const links: LinkItem[] = [
+    ...(item.links ?? []),
+    ...(item.photos?.length
+      ? [{ label: 'photos', onClick: () => window.dispatchEvent(new CustomEvent('photos:open', { detail: item.photos })) }]
+      : []),
+  ]
   return (
     <Block>
       <article>
@@ -404,7 +446,7 @@ function ContentItemBlock({ item, section }: { item: ContentItem; section: strin
         <p className="md-muted">
           <Rich text={item.description} />
         </p>
-        {item.links?.length ? <LinkRow links={item.links} className="item-links" /> : null}
+        {links.length ? <LinkRow links={links} className="item-links" /> : null}
       </article>
     </Block>
   )
@@ -458,6 +500,7 @@ export default function App() {
       {particlesOff ? null : <DebugHud panelOpen={settingsOpen} />}
       {settingsOpen && !particlesOff ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
       <FallbackPopup />
+      <PhotosPopup />
       <header className="hero">
         {particlesOff ? (
           <h1 className="hero-name">

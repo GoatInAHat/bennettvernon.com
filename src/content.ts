@@ -4,6 +4,7 @@ export interface ContentItem {
   date?: string
   description: string
   links?: { label: string; href: string }[]
+  photos?: string[]
 }
 
 export const site = {
@@ -53,7 +54,8 @@ export const projects: ContentItem[] = [
       { label: 'launch video', href: 'https://www.youtube.com/watch?v=54Q49bmkKLo' },
       { label: 'website', href: 'https://www.acre-robotics.com' },
       { label: 'linkedin', href: 'https://www.linkedin.com/company/acre-robotics/' },
-    ]
+    ],
+    photos: ['/photos/acre/1.jpg', '/photos/acre/2.jpg', '/photos/acre/3.jpg'],
   },
   {
     title: 'Electric CRF150RB',
@@ -61,6 +63,7 @@ export const projects: ContentItem[] = [
     date: '2025',
     description:
       'Converted a Honda CRF150RB to electric (in my Vanderbilt dorm) with an **E&C** billet **QS138v3**, Noisy Cricket controller, 76v 32ah battery, and beautiful CNC work from **[quasaremotosports](https://quasaremotosports.com)**. 23 -> 30 hp, 14 -> 190 Nm. More coming soon with vehicle dynamics control systems.',
+    photos: ['/photos/crf/1.jpg', '/photos/crf/2.jpg', '/photos/crf/3.jpg', '/photos/crf/4.jpg'],
   },
   {
     title: 'Testing Equipment for Hyperspectral Camera LED Driver Arrays',

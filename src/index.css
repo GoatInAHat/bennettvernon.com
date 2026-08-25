@@ -180,12 +180,29 @@ a:visited {
 }
 
 .hero-links a,
-.item-links a {
+.item-links a,
+.hero-links button,
+.item-links button {
   color: var(--muted);
 }
 
+.hero-links button,
+.item-links button {
+  font: inherit;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
 .hero-links a:hover,
-.item-links a:hover {
+.item-links a:hover,
+.hero-links button:hover,
+.item-links button:hover {
   color: var(--fg);
 }
 
@@ -633,6 +650,60 @@ a:visited {
   background: #000;
   color: #fff;
   border-color: #000;
+}
+
+/* Photo viewer opened from an item's "photos" link; native <dialog> handles
+   backdrop, focus trapping, and Escape-to-close across browsers. */
+.photos-popup {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  z-index: 300;
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.photos-popup::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.photos-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.photos-grid img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.photos-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.photos-close:hover {
+  color: var(--fg);
 }
 
 /* Static name shown when the particle simulation is disabled. */
