@@ -54,7 +54,7 @@ export const projects: ContentItem[] = [
     subtitle: 'venture · cofounder, cto',
     date: '2025',
     description:
-      'Fastest team to build a fully **autonomous tractor** (against other agtech startups: Bear Flag Robotics, Sabanto, etc.). Developed the robotic actuation stack, control systems, onboard AI. Raised **$750k** at **$5M**, assembled a team of 10 from Vanderbilt, MIT, Stanford, CMU, and Berkeley.',
+      'Fastest team to build a fully **autonomous tractor** (against other agtech startups: Bear Flag Robotics, Sabanto, etc.). Developed the robotic actuation stack, control systems, onboard AI. Raised **$750k** @ **$5M**, assembled a team of 10 from Vanderbilt, MIT, Stanford, CMU, and Berkeley.',
     links: [
       { label: 'launch video', href: 'https://www.youtube.com/watch?v=54Q49bmkKLo' },
       { label: 'website', href: 'https://www.acre-robotics.com' },
@@ -75,7 +75,7 @@ export const projects: ContentItem[] = [
     subtitle: 'embedded systems & software engineer @ **SafetySpect**',
     date: '2024',
     description:
-      'Created automated test equipment for proprietary LED drivers for hyperspectral camera arrays. Applications included food safety, healthcare, agriculture, and military. Customers included **NASA**, **NOAA**, **USDA**, and **U.S. Army**.',
+      'Created automated test equipment for proprietary LED drivers for hyperspectral camera arrays. Applications included food safety, healthcare, agriculture, and military. Customers included **NASA**, **NOAA**, **USDA**, and **U.S. Army**. Used in production to test over $2M ',
     links: [
       { label: 'website', href: 'https://www.safetyspect.com' },
       { label: 'linkedin', href: 'https://www.linkedin.com/company/safetyspect/' }
